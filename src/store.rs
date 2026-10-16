@@ -82,6 +82,30 @@ impl Store {
             > 0)
     }
 
+    pub async fn purge_expired(&self, retention_seconds: u64) -> Result<usize, ApiError> {
+        if retention_seconds == 0 {
+            return Ok(0);
+        }
+        self.call(move |connection| {
+            let cutoff = chrono::Utc::now().timestamp_millis() - (retention_seconds * 1000) as i64;
+            let tx = connection.transaction()?;
+            tx.execute("DELETE FROM event_otlp WHERE event_id IN (SELECT event_id FROM events WHERE received_at_ms < ?)", [cutoff])?;
+            let removed = tx.execute("DELETE FROM events WHERE received_at_ms < ?", [cutoff])?;
+            tx.commit()?;
+            Ok(removed)
+        }).await
+    }
+
+    pub async fn delete_viewer(&self, viewer_id: String) -> Result<usize, ApiError> {
+        self.call(move |connection| {
+            let tx = connection.transaction()?;
+            tx.execute("DELETE FROM event_otlp WHERE event_id IN (SELECT event_id FROM events WHERE viewer_id = ?)", [&viewer_id])?;
+            let removed = tx.execute("DELETE FROM events WHERE viewer_id = ?", [&viewer_id])?;
+            tx.commit()?;
+            Ok(removed)
+        }).await
+    }
+
     pub async fn insert_batch(&self, events: Vec<IncomingEvent>) -> Result<usize, ApiError> {
         self.call(move |connection| {
             let tx = connection.transaction()?;

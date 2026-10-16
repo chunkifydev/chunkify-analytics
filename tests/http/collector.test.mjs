@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { gzipSync } from "node:zlib";
+import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
@@ -39,6 +40,16 @@ function postOtlp(server, body, headers = {}) {
   });
 }
 
+async function runCommand(args, env) {
+  const child = spawn(binary, args, { env, stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const [code] = await once(child, "close");
+  return { code, stdout, stderr };
+}
+
 async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
@@ -53,9 +64,14 @@ async function collector(t, settings = {}, initialBinary = binary) {
   let child;
   let exited;
   server = {
+    directory,
     keys,
-    async start(executable = binary) {
-      child = spawn(executable, ["serve"], { env, stdio: "pipe" });
+    command: (args, overrides = {}) => runCommand(args, { ...env, ...overrides }),
+    async reloadKeys() {
+      Object.assign(keys, JSON.parse(await readFile(join(directory, "keys.json"), "utf8")));
+    },
+    async start(executable = binary, overrides = {}) {
+      child = spawn(executable, ["serve"], { env: { ...env, ...overrides }, stdio: "pipe" });
       exited = once(child, "exit");
       let output = "";
       errors = "";
@@ -67,7 +83,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
         child.stdout.on("data", (chunk) => {
           output += chunk;
           const match = output.match(/Listening on (http:\/\/\S+)/);
-          if (match) { clearTimeout(timeout); resolveReady(match[1]); }
+          if (match) { server.output = output; clearTimeout(timeout); resolveReady(match[1]); }
         });
       });
     },
@@ -99,7 +115,7 @@ function sdkEvents(videoId = "video-a", viewerId = "viewer-a") {
   const media = Object.assign(new EventTarget(), { duration: 120, currentTime: 0, src: "", currentSrc: "",
     ownerDocument: { defaultView: null } });
   const events = [];
-  const session = attachAnalytics(media, { videoId, viewerId,
+  const session = attachAnalytics(media, { videoId, viewerId: viewerId ?? undefined,
     destinations: [{ send(event) { events.push(event); } }] });
   session.startAttempt();
   session.destroy();
@@ -154,6 +170,198 @@ test("real SDK events survive a collector restart and duplicate delivery", async
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), events);
   assert.equal((await fetch(`${server.url}/v1/events`)).status, 401);
+});
+
+test("retention expires native and OTLP events by receipt time and updates summaries", async (t) => {
+  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "2", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const past = { ...sdkEvents("past-video")[0], occurred_at: "2000-01-01T00:00:00Z" };
+  const future = { ...sdkEvents("future-video")[0], occurred_at: "2099-01-01T00:00:00Z" };
+  await server.send(past);
+  await server.sendOtlp(future);
+  assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [past, future]);
+  assert.equal((await server.get("/v1/summary")).views, 2);
+  const deadline = Date.now() + 7000;
+  while ((await server.get("/v1/events")).events.length && Date.now() < deadline) await delay(200);
+  assert.deepEqual((await server.get("/v1/events")).events, []);
+  assert.deepEqual(await server.get("/v1/summary"), { views: 0, unique_viewers: 0, total_playing_time_ms: 0 });
+  assert.deepEqual((await server.get("/v1/videos")).videos, []);
+  // Expired event IDs can be received again, with a new retention lifetime.
+  await server.sendOtlp(future);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+  await server.stop("SIGKILL");
+  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "0" });
+  assert.equal((await server.get("/v1/summary")).views, 1);
+});
+
+test("retention defaults to 30 days, can be disabled, and purges at startup", async (t) => {
+  const server = await collector(t);
+  assert.match(server.output, /Retention: 2592000 seconds/);
+  const event = { ...sdkEvents()[0], occurred_at: "2000-01-01T00:00:00Z" };
+  await server.sendOtlp(event);
+  await server.stop();
+  await delay(1200);
+  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  assert.match(server.output, /Retention: disabled/);
+  await delay(1200);
+  assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
+  await server.stop();
+  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  assert.deepEqual((await server.get("/v1/events")).events, []);
+  assert.equal((await server.get("/v1/summary")).views, 0);
+});
+
+test("offline viewer deletion removes both transports across videos and preserves other viewers", async (t) => {
+  const server = await collector(t);
+  const viewerId = "viewer's-id; SELECT * FROM events";
+  const first = sdkEvents("video-a", viewerId);
+  const second = sdkEvents("video-b", viewerId);
+  const other = sdkEvents("video-a", "keep-me");
+  const anonymous = sdkEvents("video-b", null);
+  first.at(-1).playing_time_ms = 1000;
+  second.at(-1).playing_time_ms = 2000;
+  other.at(-1).playing_time_ms = 3000;
+  anonymous.at(-1).playing_time_ms = 500;
+  for (const event of [...first, ...other]) await server.send(event);
+  for (const event of [...second, ...anonymous]) await server.sendOtlp(event);
+  const original = (await server.get("/v1/events")).events;
+  const busy = await server.command(["delete-viewer", viewerId]);
+  assert.notEqual(busy.code, 0);
+  assert.match(busy.stderr, /Stop the collector/);
+  assert.deepEqual((await server.get("/v1/events")).events, original);
+  await server.stop("SIGKILL");
+  const deleted = await server.command(["delete-viewer", viewerId]);
+  assert.equal(deleted.code, 0, deleted.stderr);
+  assert.deepEqual(JSON.parse(deleted.stdout), { deleted_events: 6 });
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events,
+    original.filter((record) => record.event.viewer_id !== viewerId));
+  assert.deepEqual(await server.get("/v1/summary"), { views: 2, unique_viewers: 1, total_playing_time_ms: 3500 });
+  assert.deepEqual((await server.get("/v1/videos")).videos, [
+    { video_id: "video-a", views: 1, unique_viewers: 1, total_playing_time_ms: 3000 },
+    { video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500 },
+  ]);
+  await server.stop();
+  const repeated = await server.command(["delete-viewer", viewerId]);
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.deepEqual(JSON.parse(repeated.stdout), { deleted_events: 0 });
+  await server.start();
+  // Deletion removes stored data; it does not block future collection of this ID.
+  await server.sendOtlp(second[0]);
+  assert.equal((await server.get("/v1/summary")).views, 3);
+});
+
+test("offline key rotation replaces each credential independently without exposing keys or losing data", async (t) => {
+  const server = await collector(t);
+  const originalKeys = { ...server.keys };
+  const event = sdkEvents()[0];
+  await server.send(event);
+  const original = await server.get("/v1/events");
+  const busy = await server.command(["rotate-key", "ingest"]);
+  assert.notEqual(busy.code, 0);
+  assert.match(busy.stderr, /Stop the collector/);
+  await server.reloadKeys();
+  assert.deepEqual(server.keys, originalKeys);
+  await server.stop();
+  const invalid = await server.command(["rotate-key", "unknown"]);
+  assert.notEqual(invalid.code, 0);
+  const ingest = await server.command(["rotate-key", "ingest"]);
+  assert.equal(ingest.code, 0, ingest.stderr);
+  await server.reloadKeys();
+  assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
+  assert.equal(server.keys.read_token, originalKeys.read_token);
+  assert.ok(server.keys.ingest_key.length >= 32);
+  for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
+    assert.equal(`${ingest.stdout}${ingest.stderr}`.includes(key), false);
+  }
+  if (process.platform !== "win32") {
+    assert.equal((await stat(join(server.directory, "keys.json"))).mode & 0o777, 0o600);
+  }
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events"), original);
+  const deniedWrite = await fetch(`${server.url}/v1/events`, { method: "POST",
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": originalKeys.ingest_key },
+    body: JSON.stringify(event),
+  });
+  assert.equal(deniedWrite.status, 401);
+  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.ingest_key })).status, 401);
+  const rotatedIngest = server.keys.ingest_key;
+  await server.sendOtlp(sdkEvents("after-ingest-rotation")[0]);
+  await server.stop("SIGKILL");
+  const read = await server.command(["rotate-key", "read"]);
+  assert.equal(read.code, 0, read.stderr);
+  await server.reloadKeys();
+  assert.notEqual(server.keys.read_token, originalKeys.read_token);
+  assert.equal(server.keys.ingest_key, rotatedIngest);
+  for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
+    assert.equal(`${read.stdout}${read.stderr}`.includes(key), false);
+  }
+  await server.start();
+  const deniedRead = await fetch(`${server.url}/v1/events`, {
+    headers: { Authorization: `Bearer ${originalKeys.read_token}` },
+  });
+  assert.equal(deniedRead.status, 401);
+  await server.send(sdkEvents("after-read-rotation")[0]);
+  assert.equal((await server.get("/v1/summary")).views, 3);
+});
+
+test("a stopped data-directory backup restores events, OTLP context, summaries and keys", async (t) => {
+  const events = sdkPlayback(t);
+  const server = await collector(t);
+  const backups = await mkdtemp(join(tmpdir(), "chunkify-collector-backup-test-"));
+  t.after(async () => { await server.stop(); await rm(backups, { recursive: true, force: true }); });
+  for (const [index, event] of events.entries()) {
+    if (index % 2) await server.sendOtlp(event);
+    else await server.send(event);
+  }
+  const originalKeys = { ...server.keys };
+  const originalEvents = await server.get("/v1/events");
+  const originalSummary = await server.get("/v1/summary");
+  await server.stop();
+  await cp(server.directory, join(backups, "snapshot"), { recursive: true, force: false, errorOnExist: true });
+  // Changes made after the backup must not appear in the restored installation.
+  const rotation = await server.command(["rotate-key", "ingest"]);
+  assert.equal(rotation.code, 0, rotation.stderr);
+  await server.reloadKeys();
+  assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
+  await server.start();
+  await server.send(sdkEvents("after-backup")[0]);
+  await server.stop();
+  const restored = join(backups, "restored");
+  await cp(join(backups, "snapshot"), restored, { recursive: true, force: false, errorOnExist: true });
+  const restoredKeys = JSON.parse(await readFile(join(restored, "keys.json"), "utf8"));
+  assert.deepEqual(restoredKeys, originalKeys);
+  Object.assign(server.keys, restoredKeys);
+  await server.start(binary, { COLLECTOR_DATA_DIR: restored });
+  assert.deepEqual(await server.get("/v1/events"), originalEvents);
+  assert.deepEqual(await server.get("/v1/summary"), originalSummary);
+  await server.sendOtlp(events[0]);
+  assert.deepEqual(await server.get("/v1/events"), originalEvents);
+  await server.send(sdkEvents("after-restore")[0]);
+  assert.equal((await server.get("/v1/summary")).views, 2);
+});
+
+test("invalid retention settings fail clearly without changing stored events or keys", async (t) => {
+  const server = await collector(t);
+  await server.send(sdkEvents()[0]);
+  const before = await server.get("/v1/events");
+  const keys = { ...server.keys };
+  await server.stop();
+  for (const settings of [
+    { COLLECTOR_RETENTION_SECONDS: "-1" },
+    { COLLECTOR_RETENTION_SECONDS: "1.5" },
+    { COLLECTOR_RETENTION_SECONDS: "18446744073709551615" },
+    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "0" },
+    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "-1" },
+    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "86401" },
+  ]) {
+    const result = await server.command(["serve"], settings);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, new RegExp(Object.keys(settings)[0]));
+  }
+  await server.reloadKeys();
+  assert.deepEqual(server.keys, keys);
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events"), before);
 });
 
 test("ingestion validates SDK payloads and separates browser writes from private reads", async (t) => {

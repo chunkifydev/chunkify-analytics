@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { isIP } from "node:net";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
@@ -28,6 +29,11 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
   const stored = await server.get("/v1/events");
   assert.deepEqual(stored.events.map(({ event }) => event), events);
   assert.ok(stored.events.at(-1).otlp);
+  for (const record of stored.events) {
+    assert.ok(isIP(record.event_context.peer_ip));
+    assert.equal(record.event_context.client_ip, record.event_context.peer_ip);
+    assert.equal(record.event_context.client_ip_source, "connection");
+  }
 
   const stopped = await server.stop();
   assert.equal(stopped.ExitCode, 0, "docker stop should finish without SIGKILL");

@@ -1,12 +1,13 @@
 use crate::{
     config::{Config, Keys},
+    context::RequestContext,
     event, otlp,
     store::Store,
 };
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -15,6 +16,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::{
     io::Read,
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::Instant,
 };
@@ -27,6 +29,8 @@ struct App {
     origins: Vec<String>,
     max_body_bytes: usize,
     max_otlp_records: usize,
+    store_ip: bool,
+    trusted_proxies: Vec<ipnet::IpNet>,
     rate: Arc<Mutex<RateLimit>>,
 }
 
@@ -111,6 +115,8 @@ pub fn router(store: Store, keys: Keys, config: &Config) -> Router {
         origins: config.allowed_origins.clone(),
         max_body_bytes: config.max_body_bytes,
         max_otlp_records: config.max_otlp_records,
+        store_ip: config.store_ip,
+        trusted_proxies: config.trusted_proxies.clone(),
         rate: Arc::new(Mutex::new(RateLimit {
             tokens: capacity,
             capacity,
@@ -258,10 +264,17 @@ async fn access(
     Ok(response)
 }
 
-async fn ingest(State(app): State<App>, request: Request) -> Result<Response, ApiError> {
+async fn ingest(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    let context = app
+        .store_ip
+        .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let event = read_json(request, app.max_body_bytes, false).await?;
     event::validate(&event)?;
-    let inserted = app.store.insert(event).await?;
+    let inserted = app.store.insert(event, context).await?;
     Ok((
         if inserted {
             StatusCode::CREATED
@@ -273,10 +286,17 @@ async fn ingest(State(app): State<App>, request: Request) -> Result<Response, Ap
         .into_response())
 }
 
-async fn ingest_otlp(State(app): State<App>, request: Request) -> Result<Json<Value>, ApiError> {
+async fn ingest_otlp(
+    State(app): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+) -> Result<Json<Value>, ApiError> {
+    let context = app
+        .store_ip
+        .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let request = read_json(request, app.max_body_bytes, true).await?;
     app.store
-        .insert_batch(otlp::decode(&request, app.max_otlp_records)?)
+        .insert_batch(otlp::decode(&request, app.max_otlp_records)?, context)
         .await?;
     Ok(Json(json!({})))
 }

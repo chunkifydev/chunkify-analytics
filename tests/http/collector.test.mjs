@@ -3,11 +3,12 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { gzipSync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
+import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
@@ -55,7 +56,8 @@ async function collector(t, settings = {}, initialBinary = binary) {
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
   const env = { ...process.env, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
-    COLLECTOR_ALLOWED_ORIGINS: "https://player.example", ...settings };
+    COLLECTOR_ALLOWED_ORIGINS: "https://player.example", COLLECTOR_STORE_IP: "true",
+    COLLECTOR_TRUSTED_PROXIES: "", ...settings };
   const init = spawn(initialBinary, ["init"], { env, stdio: "pipe" });
   let errors = "";
   init.stderr.on("data", (chunk) => { errors += chunk; });
@@ -75,6 +77,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
       exited = once(child, "exit");
       let output = "";
       errors = "";
+      server.logs = () => `${output}${errors}`;
       child.stderr.on("data", (chunk) => { errors += chunk; });
       server.url = await new Promise((resolveReady, reject) => {
         const timeout = setTimeout(() => reject(new Error(`Collector startup timed out: ${errors}`)), 10000);
@@ -98,12 +101,12 @@ async function collector(t, settings = {}, initialBinary = binary) {
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
-    async send(event) {
-      await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.ingest_key } }).send(event);
+    async send(event, headers = {}) {
+      await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.ingest_key, ...headers } }).send(event);
     },
     async sendOtlp(event, options = {}) {
       await createOtlpAdapter(`${server.url}/v1/logs`, {
-        ...options, headers: { "X-Chunkify-Ingest-Key": keys.ingest_key },
+        ...options, headers: { "X-Chunkify-Ingest-Key": keys.ingest_key, ...options.headers },
       }).send(event);
     },
   };
@@ -170,6 +173,242 @@ test("real SDK events survive a collector restart and duplicate delivery", async
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), events);
   assert.equal((await fetch(`${server.url}/v1/events`)).status, 401);
+});
+
+test("connection IP is stored separately and cannot be replaced by event fields or untrusted headers", async (t) => {
+  const server = await collector(t);
+  const event = { ...sdkEvents()[0], event_context: { client_ip: "203.0.113.99" } };
+  await server.send(event, { "X-Forwarded-For": "198.51.100.99", "X-Real-IP": "198.51.100.99",
+    "Forwarded": "for=198.51.100.99", "CF-Connecting-IP": "198.51.100.99" });
+  const stored = await server.get("/v1/events");
+  assert.deepEqual(stored.events[0].event, event);
+  assert.deepEqual(stored.events[0].event_context, {
+    schema_version: 1, peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
+  });
+  await server.sendOtlp(event);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events"), stored);
+});
+
+test("IP collection can be disabled without rewriting earlier events or enriching retries", async (t) => {
+  const server = await collector(t, { COLLECTOR_STORE_IP: "false" });
+  const events = sdkEvents();
+  await server.send(events[0]);
+  await server.sendOtlp(events[1]);
+  const withoutIp = (await server.get("/v1/events")).events;
+  assert.ok(withoutIp.every((record) => !Object.hasOwn(record, "event_context")));
+  await server.stop();
+  await server.start(binary, { COLLECTOR_STORE_IP: "true" });
+  for (const event of events) await server.send(event);
+  const added = sdkEvents("with-ip")[0];
+  await server.send(added);
+  const withIp = (await server.get("/v1/events")).events;
+  assert.deepEqual(withIp.slice(0, 2), withoutIp);
+  assert.equal(withIp[2].event_context.client_ip, "127.0.0.1");
+  await server.stop();
+  await server.start(binary, { COLLECTOR_STORE_IP: "false" });
+  await server.send(added);
+  assert.deepEqual((await server.get("/v1/events")).events, withIp);
+  await server.sendOtlp(sdkEvents("disabled-again")[0]);
+  assert.equal((await server.get("/v1/events")).events.at(-1).event_context, undefined);
+});
+
+test("flat event context copies browser fields and reserves IP fields for the collector", async (t) => {
+  const server = await collector(t);
+  const event = { ...sdkEvents()[0], browser_context: {
+    schema_version: 1, browser_name: "Firefox", os_name: "Linux", device_type: "desktop",
+    viewport_width_px: 960, client_ip: "203.0.113.99", peer_ip: "203.0.113.99",
+    browser_version: { invalid: "nested" },
+    client_ip_source: "forged", extra: "preserve only in original payload",
+  } };
+  await server.send(event);
+  const stored = (await server.get("/v1/events")).events[0];
+  assert.deepEqual(stored.event, event);
+  assert.deepEqual(stored.event_context, {
+    schema_version: 1, browser_name: "Firefox", os_name: "Linux", device_type: "desktop", viewport_width_px: 960,
+    peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
+  });
+  await server.stop("SIGKILL");
+  await server.start(binary, { COLLECTOR_STORE_IP: "false" });
+  const withoutIp = { ...sdkEvents()[0], browser_context: event.browser_context };
+  await server.sendOtlp(withoutIp);
+  const records = (await server.get("/v1/events")).events;
+  assert.deepEqual(records[0], stored);
+  assert.deepEqual(records[1].event, withoutIp);
+  assert.deepEqual(records[1].event_context, {
+    schema_version: 1, browser_name: "Firefox", os_name: "Linux", device_type: "desktop", viewport_width_px: 960,
+  });
+});
+
+test("trusted proxies resolve the first untrusted address from the right", async (t) => {
+  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1,10.20.0.0/16,2001:db8:abcd::/48" });
+  const event = sdkEvents()[0];
+  await server.send(event, { "X-Forwarded-For": "203.0.113.99, 198.51.100.8, 10.20.1.2, 2001:db8:abcd::1" });
+  const stored = (await server.get("/v1/events")).events;
+  assert.deepEqual(stored[0].event, event);
+  assert.deepEqual(stored[0].event_context, {
+    schema_version: 1, peer_ip: "127.0.0.1", client_ip: "198.51.100.8", client_ip_source: "x_forwarded_for",
+  });
+  await server.sendOtlp(event, { headers: { "X-Forwarded-For": "203.0.113.33" } });
+  assert.deepEqual((await server.get("/v1/events")).events, stored, "a retry cannot replace the first request context");
+  assert.ok(!server.logs().includes("198.51.100.8"));
+});
+
+test("proxy headers are ignored unless the connection peer matches the configured trust list", async (t) => {
+  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "10.0.0.0/8,::1" });
+  await server.sendOtlp(sdkEvents()[0], { headers: { "X-Forwarded-For": "203.0.113.10, 10.1.2.3" } });
+  const context = (await server.get("/v1/events")).events[0].event_context;
+  assert.equal(context.client_ip, "127.0.0.1");
+  assert.equal(context.client_ip_source, "connection");
+});
+
+test("trusted forwarding accepts literal IPs and leaves invalid or missing client addresses unresolved", async (t) => {
+  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.0/8,10.20.0.0/16,2001:db8:abcd::/48" });
+  const cases = [
+    ["198.51.100.2", "198.51.100.2"],
+    ["2001:db8:beef::5, 2001:db8:abcd::1", "2001:db8:beef::5"],
+    ["::ffff:198.51.100.6, ::ffff:10.20.1.2", "198.51.100.6"],
+    ["203.0.113.5, 10.21.1.2", "10.21.1.2"],
+    [undefined, null], ["", null], ["unknown", null], ["for=198.51.100.2", null],
+    ["198.51.100.2:443", null], ["[2001:db8::2]", null], ["fe80::1%en0", null],
+    ["198.51.100.2,", null], [",198.51.100.2", null], ["malformed, 198.51.100.2", null],
+    ["127.0.0.1, 10.20.1.2", null],
+    [["198.51.100.2", ...Array(31).fill("10.20.1.2")].join(","), "198.51.100.2"],
+    [["198.51.100.2", ...Array(32).fill("10.20.1.2")].join(","), null],
+    [`198.51.100.2,${" ".repeat(4096)}10.20.1.2`, null],
+  ];
+  for (const [forwarded, expected] of cases) {
+    const event = sdkEvents()[0];
+    await server.send(event, {
+      ...(forwarded === undefined ? {} : { "X-Forwarded-For": forwarded }),
+      "Forwarded": "for=192.0.2.99", "X-Real-IP": "192.0.2.99", "CF-Connecting-IP": "192.0.2.99",
+    });
+    const context = (await server.get("/v1/events")).events.at(-1).event_context;
+    assert.deepEqual(context, { schema_version: 1, peer_ip: "127.0.0.1", client_ip: expected,
+      client_ip_source: expected ? "x_forwarded_for" : null }, `forwarded case ${cases.findIndex((entry) => entry[0] === forwarded)}`);
+  }
+});
+
+test("multiple X-Forwarded-For header lines form one ordered chain", async (t) => {
+  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1,10.20.0.0/16" });
+  const body = JSON.stringify(sdkEvents()[0]);
+  const status = await new Promise((resolveStatus, reject) => {
+    const request = httpRequest(`${server.url}/v1/events`, { method: "POST", headers: [
+      "Content-Type", "application/json", "Content-Length", String(Buffer.byteLength(body)),
+      "X-Chunkify-Ingest-Key", server.keys.ingest_key,
+      "X-Forwarded-For", "203.0.113.99, 198.51.100.7", "X-Forwarded-For", "10.20.1.2",
+    ] }, (response) => { response.resume(); response.on("end", () => resolveStatus(response.statusCode)); });
+    request.on("error", reject);
+    request.end(body);
+  });
+  assert.equal(status, 201);
+  assert.equal((await server.get("/v1/events")).events[0].event_context.client_ip, "198.51.100.7");
+});
+
+test("IPv6 connection addresses are captured and can be trusted explicitly", async (t) => {
+  const server = await collector(t, { COLLECTOR_BIND: "[::1]:0" });
+  await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
+  assert.deepEqual((await server.get("/v1/events")).events[0].event_context, {
+    schema_version: 1, peer_ip: "::1", client_ip: "::1", client_ip_source: "connection",
+  });
+  await server.stop();
+  await server.start(binary, { COLLECTOR_TRUSTED_PROXIES: "::1/128" });
+  await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
+  assert.deepEqual((await server.get("/v1/events")).events.at(-1).event_context, {
+    schema_version: 1, peer_ip: "::1", client_ip: "2001:db8::4", client_ip_source: "x_forwarded_for",
+  });
+});
+
+test("invalid IP configuration fails at startup without changing events or credentials", async (t) => {
+  const server = await collector(t);
+  await server.send(sdkEvents()[0]);
+  const before = await server.get("/v1/events");
+  const keys = { ...server.keys };
+  await server.stop();
+  for (const settings of [
+    ...["0", "1", "yes", "FALSE", ""].map((value) => ({ COLLECTOR_STORE_IP: value })),
+    ...["*", "localhost", "127.0.0.1:80", "127.0.0.1/33", "::1/129", "127.0.0.1,", "::ffff:127.0.0.0/104"]
+      .map((value) => ({ COLLECTOR_TRUSTED_PROXIES: value })),
+  ]) {
+    const result = await server.command(["serve"], settings);
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, new RegExp(Object.keys(settings)[0]));
+  }
+  await server.reloadKeys();
+  assert.deepEqual(server.keys, keys);
+  await server.start(binary, { COLLECTOR_TRUSTED_PROXIES: " ::ffff:127.0.0.1 , 2001:db8::/32 " });
+  assert.deepEqual(await server.get("/v1/events"), before);
+  await server.send(sdkEvents()[0], { "X-Forwarded-For": "198.51.100.11" });
+  assert.equal((await server.get("/v1/events")).events.at(-1).event_context.client_ip, "198.51.100.11");
+});
+
+test("the browser Chunkify adapter persists context through authenticated ingestion, retries, and restart", async (t) => {
+  const fixture = createServer(async (request, response) => {
+    if (request.url === "/") {
+      response.writeHead(200, { "Content-Type": "text/html" }).end("<!doctype html><video></video>");
+    } else if (/^\/[a-z-]+\.js$/.test(request.url ?? "")) {
+      try {
+        const source = await readFile(resolve("packages/analytics/dist", request.url.slice(1)));
+        response.writeHead(200, { "Content-Type": "text/javascript" }).end(source);
+      } catch { response.writeHead(404).end(); }
+    } else { response.writeHead(404).end(); }
+  });
+  let browser;
+  t.after(async () => { await browser?.close(); await new Promise((done) => fixture.close(done)); });
+  fixture.listen(0, "127.0.0.1");
+  await once(fixture, "listening");
+  const origin = `http://127.0.0.1:${fixture.address().port}`;
+  const server = await collector(t, { COLLECTOR_ALLOWED_ORIGINS: origin });
+  browser = await chromium.launch();
+  const page = await browser.newPage({ locale: "fr-FR", timezoneId: "Europe/Paris", viewport: { width: 960, height: 540 } });
+  await page.goto(origin);
+  const destination = { endpoint: `${server.url}/v1/events`, ingestKey: server.keys.ingest_key };
+  const events = await page.evaluate(async ({ endpoint, ingestKey }) => {
+    const { attachAnalytics } = await import("/core.js");
+    const { createChunkifyAdapter } = await import("/chunkify.js");
+    const adapter = createChunkifyAdapter(endpoint, { ingestKey });
+    const events = [];
+    const pending = [];
+    const media = document.querySelector("video");
+    const session = attachAnalytics(media, { videoId: "browser-video", viewerId: "browser-viewer",
+      includeEvents: ["view_started", "view_ended"], destinations: [
+        { send(event) { pending.push(adapter.send(event)); } },
+        { send(event) { events.push(event); } },
+      ],
+    });
+    session.startAttempt();
+    media.dispatchEvent(new Event("playing"));
+    await new Promise((done) => setTimeout(done, 30));
+    session.destroy();
+    await Promise.all(pending);
+    return events;
+  }, destination);
+  const stored = await server.get("/v1/events");
+  assert.equal(stored.events.length, 2);
+  assert.deepEqual(stored.events.map(({ event: { browser_context, ...event } }) => event), events);
+  t.diagnostic(`Browser context added bytes per event: ${stored.events.map(({ event }, index) =>
+    Buffer.byteLength(JSON.stringify(event)) - Buffer.byteLength(JSON.stringify(events[index]))).join(", ")}`);
+  for (const { event, event_context } of stored.events) {
+    assert.equal(event.browser_context.browser_name, "Chrome");
+    assert.equal(event.browser_context.language, "fr-FR");
+    assert.equal(event.browser_context.timezone, "Europe/Paris");
+    assert.equal(event.browser_context.viewport_width_px, 960);
+    assert.deepEqual(event_context, { ...event.browser_context, peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection" });
+  }
+  assert.ok(events[1].playing_time_ms > 0);
+  assert.deepEqual(await server.get("/v1/summary"), {
+    views: 1, unique_viewers: 1, total_playing_time_ms: events[1].playing_time_ms,
+  });
+  await page.setViewportSize({ width: 640, height: 360 });
+  await page.evaluate(async ({ endpoint, ingestKey, event }) => {
+    const { createChunkifyAdapter } = await import("/chunkify.js");
+    await createChunkifyAdapter(endpoint, { ingestKey }).send(event);
+  }, { ...destination, event: events[0] });
+  assert.deepEqual(await server.get("/v1/events"), stored, "retry must preserve the first accepted context");
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events"), stored);
 });
 
 test("retention expires native and OTLP events by receipt time and updates summaries", async (t) => {
@@ -496,19 +735,35 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
 }, async (t) => {
   const server = await collector(t, {}, process.env.COLLECTOR_PREVIOUS_BINARY);
-  const events = sdkPlayback(t);
+  const events = sdkPlayback(t).map((event, index) => index % 2 ? event : {
+    ...event, browser_context: { schema_version: 1, browser_name: "Firefox", device_type: "desktop" },
+  });
   for (const event of events) await server.send(event);
   const original = await server.get("/v1/events");
+  const beforePage = await server.get("/v1/events?limit=2");
+  const expected = structuredClone(original);
+  for (const record of expected.events) {
+    if (record.event.browser_context) record.event_context = record.event.browser_context;
+  }
   const summary = await server.get("/v1/summary");
   await server.stop("SIGKILL");
   await server.start();
-  assert.deepEqual(await server.get("/v1/events"), original);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events"), expected);
+  const afterPage = await server.get(`/v1/events?limit=2&cursor=${encodeURIComponent(beforePage.next_cursor)}`);
+  assert.deepEqual(afterPage.events, expected.events.slice(2, 4), "pre-upgrade cursors retain their event ordering");
   assert.deepEqual(await server.get("/v1/summary"), summary);
+  for (const event of events) await server.sendOtlp(event);
+  assert.deepEqual(await server.get("/v1/events"), expected, "migration must not invent IP context for old events, even on retry");
   const added = sdkEvents("after-upgrade")[0];
   await server.sendOtlp(added);
   await server.stop("SIGKILL");
   await server.start();
-  assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [...events, added]);
+  const upgraded = (await server.get("/v1/events")).events;
+  assert.deepEqual(upgraded.map((record) => record.event), [...events, added]);
+  assert.deepEqual(upgraded.slice(0, events.length), expected.events);
+  assert.equal(upgraded.at(-1).event_context.client_ip, "127.0.0.1");
   assert.equal((await server.get("/v1/summary")).views, 2);
 });
 
@@ -544,7 +799,8 @@ test("the OTLP adapter preserves all seven SDK events and produces the same repo
 });
 
 test("OTLP gzip batches retain resource and scope context and deduplicate within a batch", async (t) => {
-  const events = [...sdkEvents("video-a"), ...sdkEvents("video-b")];
+  const events = [...sdkEvents("video-a"), ...sdkEvents("video-b")]
+    .map((event, index) => ({ ...event, browser_context: { schema_version: 1, browser_name: index < 2 ? "Firefox" : "Safari" } }));
   const extra = { enabled: true, fraction: 0.060875000000010004, tags: ["demo", "customer"], details: { count: 4 } };
   const envelopes = await otlpRequests(events, { mapAttributes: (event) => ({ ...event, extra }) });
   const logs = envelopes.map((envelope) => envelope.resourceLogs[0].scopeLogs[0].logRecords[0]);
@@ -562,12 +818,16 @@ test("OTLP gzip batches retain resource and scope context and deduplicate within
     ] },
     { scopeLogs: [{ logRecords: [...logs.slice(3), logs[0]] }] },
   ] };
-  const server = await collector(t);
-  const response = await postOtlp(server, gzipSync(JSON.stringify(batch)), { "Content-Encoding": "gzip" });
+  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1" });
+  const response = await postOtlp(server, gzipSync(JSON.stringify(batch)), {
+    "Content-Encoding": "gzip", "X-Forwarded-For": "198.51.100.50",
+  });
   assert.equal(response.status, 200, await response.clone().text());
   assert.deepEqual(await response.json(), {});
   const stored = (await server.get("/v1/events")).events;
   assert.deepEqual(stored.map((record) => record.event), events.map((event) => ({ ...event, extra })));
+  assert.ok(stored.every((record) => record.event_context.client_ip === "198.51.100.50"),
+    "the request IP describes the gateway while per-event browser contexts remain distinct");
   assert.deepEqual(stored[0].otlp, {
     resource_logs: { resource, schemaUrl: "https://example.com/resource" },
     scope_logs: { scope, schemaUrl: "https://example.com/scope" }, log_record: logs[0],

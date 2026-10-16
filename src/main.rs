@@ -1,5 +1,6 @@
 mod api;
 mod config;
+mod context;
 mod event;
 mod otlp;
 mod query;
@@ -41,7 +42,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
             println!("Listening on http://{}", listener.local_addr()?);
-            let result = axum::serve(listener, api::router(store.clone(), keys, &config))
+            let result = axum::serve(listener, api::router(store.clone(), keys, &config)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .with_graceful_shutdown(shutdown())
                 .await;
             if let Some(maintenance) = maintenance {

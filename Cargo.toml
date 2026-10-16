@@ -12,6 +12,7 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 duckdb = { version = "=1.10506.0", features = ["bundled"] }
 flate2 = "1"
+ipnet = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 subtle = "2.6"

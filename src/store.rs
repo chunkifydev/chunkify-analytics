@@ -1,5 +1,6 @@
 use crate::{
     api::ApiError,
+    context::{RequestContext, event_context},
     event::{self, IncomingEvent},
     query::{Cursor, Query},
 };
@@ -24,7 +25,7 @@ impl Store {
             INSERT INTO collector_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM collector_schema);")?;
         let version: i32 =
             tx.query_row("SELECT version FROM collector_schema", [], |r| r.get(0))?;
-        if !(1..=2).contains(&version) {
+        if !(1..=3).contains(&version) {
             return Err("Unsupported database schema version".into());
         }
         tx.execute_batch(
@@ -47,8 +48,55 @@ impl Store {
                 payload VARCHAR NOT NULL
             );",
         )?;
-        if version == 1 {
-            tx.execute_batch("UPDATE collector_schema SET version = 2;")?;
+        if version < 3 {
+            // ADD COLUMN fails during WAL replay in the pinned DuckDB version.
+            // Rebuild atomically using CREATE/RENAME, preserving IDs and sequence.
+            tx.execute_batch(
+                "CREATE TABLE events_v3 (
+                    ingest_id BIGINT PRIMARY KEY DEFAULT nextval('event_order'),
+                    event_id VARCHAR UNIQUE NOT NULL,
+                    view_id VARCHAR NOT NULL,
+                    video_id VARCHAR NOT NULL,
+                    viewer_id VARCHAR,
+                    event_name VARCHAR NOT NULL,
+                    sequence BIGINT NOT NULL,
+                    occurred_at_ms BIGINT NOT NULL,
+                    playing_time_ms DOUBLE,
+                    received_at_ms BIGINT NOT NULL,
+                    payload VARCHAR NOT NULL,
+                    event_context VARCHAR
+                );
+                INSERT INTO events_v3 SELECT *, NULL FROM events;
+                DROP TABLE events;
+                ALTER TABLE events_v3 RENAME TO events;
+                UPDATE collector_schema SET version = 3;",
+            )?;
+            // Backfill only browser context already present in the raw payload.
+            // Bound migration memory; old requests never receive an inferred IP.
+            let mut after = 0_i64;
+            loop {
+                let rows = {
+                    let mut statement = tx.prepare("SELECT ingest_id, payload FROM events WHERE ingest_id > ? ORDER BY ingest_id LIMIT 100")?;
+                    statement
+                        .query_map([after], |row| {
+                            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                        })?
+                        .collect::<duckdb::Result<Vec<_>>>()?
+                };
+                if rows.is_empty() {
+                    break;
+                }
+                for (id, payload) in rows {
+                    after = id;
+                    let event: Value = serde_json::from_str(&payload)?;
+                    if let Some(context) = event_context(&event, None) {
+                        tx.execute(
+                            "UPDATE events SET event_context = ? WHERE ingest_id = ?",
+                            params![context.to_string(), id],
+                        )?;
+                    }
+                }
+            }
         }
         tx.commit()?;
         let (sender, mut receiver) = mpsc::channel::<Job>(64);
@@ -75,9 +123,13 @@ impl Store {
         receiver.await.map_err(|_| ApiError::unavailable())?
     }
 
-    pub async fn insert(&self, event: Value) -> Result<bool, ApiError> {
+    pub async fn insert(
+        &self,
+        event: Value,
+        request_context: Option<RequestContext>,
+    ) -> Result<bool, ApiError> {
         Ok(self
-            .insert_batch(vec![IncomingEvent { event, otlp: None }])
+            .insert_batch(vec![IncomingEvent { event, otlp: None }], request_context)
             .await?
             > 0)
     }
@@ -106,19 +158,28 @@ impl Store {
         }).await
     }
 
-    pub async fn insert_batch(&self, events: Vec<IncomingEvent>) -> Result<usize, ApiError> {
+    pub async fn insert_batch(
+        &self,
+        events: Vec<IncomingEvent>,
+        request_context: Option<RequestContext>,
+    ) -> Result<usize, ApiError> {
+        let request_context = request_context
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|_| ApiError::internal())?;
         self.call(move |connection| {
             let tx = connection.transaction()?;
             let mut inserted = 0;
             let received_at = chrono::Utc::now().timestamp_millis();
             for record in events {
                 let event = record.event;
+                let context = event_context(&event, request_context.as_ref()).map(|value| value.to_string());
                 let added = tx.execute(
-                "INSERT INTO events (event_id, view_id, video_id, viewer_id, event_name, sequence, occurred_at_ms, playing_time_ms, received_at_ms, payload)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING",
+                "INSERT INTO events (event_id, view_id, video_id, viewer_id, event_name, sequence, occurred_at_ms, playing_time_ms, received_at_ms, payload, event_context)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING",
                 params![event["event_id"].as_str(), event["view_id"].as_str(), event["video_id"].as_str(), event["viewer_id"].as_str(),
                     event["event_name"].as_str(), event["sequence"].as_i64(), event::timestamp(event["occurred_at"].as_str().unwrap())?,
-                    event["playing_time_ms"].as_f64(), received_at, event.to_string()],
+                    event["playing_time_ms"].as_f64(), received_at, event.to_string(), context],
             )?;
                 if added > 0 {
                     if let Some(otlp) = record.otlp {
@@ -151,15 +212,15 @@ impl Store {
             let after = cursor.map_or(0, |c| c.after);
             let (conditions, mut values) = filters.sql();
             values.extend([SqlValue::BigInt(after), SqlValue::BigInt(through), SqlValue::BigInt((limit + 1) as i64)]);
-            let mut statement = connection.prepare(&format!("SELECT ingest_id, received_at_ms, events.payload, event_otlp.payload FROM events
+            let mut statement = connection.prepare(&format!("SELECT ingest_id, received_at_ms, events.payload, event_otlp.payload, event_context FROM events
                 LEFT JOIN event_otlp USING (event_id)
                 WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id LIMIT ?"))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))?;
+            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)))?;
             let mut events = Vec::new();
             let mut last = after;
             let mut next_cursor = None;
             for row in rows {
-                let (id, received, payload, otlp_payload) = row?;
+                let (id, received, payload, otlp_payload, context) = row?;
                 if events.len() == limit {
                     next_cursor = Some(Cursor { version: 1, kind: "events".into(), after: last, through, filters: filters.clone() }.encode()?);
                     break;
@@ -169,6 +230,9 @@ impl Store {
                 let mut record = json!({ "received_at": chrono::DateTime::from_timestamp_millis(received), "event": event });
                 if let Some(payload) = otlp_payload {
                     record["otlp"] = serde_json::from_str(&payload).map_err(|_| ApiError::internal())?;
+                }
+                if let Some(context) = context {
+                    record["event_context"] = serde_json::from_str(&context).map_err(|_| ApiError::internal())?;
                 }
                 events.push(record);
             }

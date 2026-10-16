@@ -11,12 +11,13 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.
    Implemented. See the [capacity report](capacity.md).
-5. Browser/device context in the SDK and request/IP context in the collector.
-   Specified in issue #381; not implemented. IP storage will default to enabled,
-   with a separate setting to disable it.
+5. Browser/device context through `createChunkifyAdapter`. Implemented in the SDK
+   and preserved in raw-event storage. Request IP collection, its opt-out, and
+   explicit trusted-proxy configuration are implemented in the collector.
+   Context filters remain specified in issue #381.
 
-This is a development version. Browser/device/IP enrichment is planned separately
-from the current playback-event collector. MCP is a separate potential follow-up.
+This is a development version. Context filters and the OpenAPI contract are pending.
+MCP is a separate potential follow-up.
 
 ## Build and run
 
@@ -48,8 +49,31 @@ close the database. A second writer using the same database file fails at startu
 The collector and administration commands hold an exclusive `collector.lock`
 file lock for their lifetime. Stop the collector before running administration
 commands. The OS releases the lock after a crash; leave the lock file in place.
-Startup upgrades a stage 1 database to schema version 2 without dropping events
-or changing keys. Stop the old service before starting the new executable.
+Startup upgrades schema versions 1 and 2 to version 3 without dropping events
+or changing keys. Existing events receive no invented IP context. Stop the old
+service and take a backup before starting the new executable. An older executable
+cannot open schema version 3; restore its pre-upgrade backup to roll back.
+
+### Database layout
+
+| Table | Contents |
+| --- | --- |
+| `events` | The full event JSON, a flat `event_context` JSON object stored in a nullable text column, and columns for filtering, deduplication and summaries. `event_id` is unique; `view_id` groups events for a viewing attempt. An internal `ingest_id` orders pagination. |
+| `event_otlp` | Original OTLP log/resource/scope JSON, keyed by `event_id`, for events first accepted through OTLP. |
+| `collector_schema` | The database schema version. |
+
+All data for an accepted event is written in one transaction. `event_context`
+combines supported browser fields with collector-derived IP fields in one flat
+object. The SDK's `browser_context` also remains inside the original event JSON
+to preserve the full submitted payload. Generated ingest and read keys stay in
+`keys.json`, outside the database.
+
+The upgrade rebuilds `events` within one transaction to add the column, preserving
+ingestion IDs, event ordering and the sequence. A direct `ADD COLUMN` triggered a
+WAL recovery error in the pinned DuckDB version during forced-restart testing.
+Allow extra disk space for a copy of the event table during migration. Existing
+browser context is copied from the retained payload; no IP is backfilled. The
+integration suite checks fresh databases and upgrades after forced restarts.
 
 ## Run with Docker
 
@@ -172,12 +196,12 @@ Use the analytics package from this branch:
 
 ```js
 import { monitor } from "@chunkify/analytics";
-import { createHttpAdapter } from "@chunkify/analytics/http";
+import { createChunkifyAdapter } from "@chunkify/analytics/chunkify";
 
 monitor(document.querySelector("video"), {
   videoId: "video-123",
-  destinations: [createHttpAdapter("http://127.0.0.1:4174/v1/events", {
-    headers: { "X-Chunkify-Ingest-Key": "COPY_YOUR_PUBLIC_INGEST_KEY" },
+  destinations: [createChunkifyAdapter("http://127.0.0.1:4174/v1/events", {
+    ingestKey: "COPY_YOUR_PUBLIC_INGEST_KEY",
   })],
 });
 ```
@@ -186,6 +210,16 @@ Send the complete SDK event. Custom mappings that remove required fields cannot
 be accepted. The collector stores the complete JSON object, including additional
 fields, and deduplicates by `event_id`. Repeating a valid event does not replace
 the first payload or count it twice.
+
+The Chunkify adapter adds `browser_context` to every event by default. Read it at
+`events[].event.browser_context` through `GET /v1/events`. Set
+`collectBrowserContext: false` to send playback events only. See the SDK's
+[field definitions and PostHog comparison](../../packages/analytics/README.md#browser-context-fields).
+Browser context uses the existing JSON payload storage. Browser/OS/device filters
+are not implemented yet. The collector adds request IP context separately below.
+
+Generic `createHttpAdapter(endpoint, { headers })` remains supported when you
+manage your own context. HTTP and OTLP adapters do not collect browser context.
 
 For OTLP/HTTP JSON logs, use the same key with the OTLP adapter:
 
@@ -216,6 +250,8 @@ Serve public traffic through your HTTPS ingress. Internal HTTP is supported.
 | `COLLECTOR_INGEST_PER_SECOND` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
 | `COLLECTOR_RETENTION_SECONDS` | `2592000` | Retention by server receipt time, in seconds. Default is 30 days. `0` disables expiration. Must be a non-negative whole number no larger than `9223372036854775`. |
 | `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. Ignored when retention is disabled. |
+| `COLLECTOR_STORE_IP` | `true` | Store collector-derived request IP context. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
+| `COLLECTOR_TRUSTED_PROXIES` | Empty | Comma-separated literal IPv4/IPv6 addresses or CIDRs allowed to supply `X-Forwarded-For`. Empty trusts no proxies. No hostnames, ports, or wildcards. Use IPv4 CIDRs for IPv4-mapped addresses. |
 
 Both ingestion endpoints share the rate limit. A batch consumes one request.
 The service rejects excess ingestion requests with HTTP 429 and `Retry-After: 1`.
@@ -286,6 +322,67 @@ have no `otlp` field. Deduplication is shared across formats: the first accepted
 payload and context win, and later duplicates do not enrich or replace them.
 Both formats feed the same filters, pagination, and summary calculations.
 
+### Flat event context and request IP
+
+`GET /v1/events` returns a flat `event_context` alongside the original `event` and
+optional `otlp`. For example:
+
+```json
+{
+  "schema_version": 1,
+  "browser_name": "Firefox",
+  "os_name": "Linux",
+  "device_type": "desktop",
+  "language": "fr-FR",
+  "peer_ip": "10.20.1.2",
+  "client_ip": "198.51.100.8",
+  "client_ip_source": "x_forwarded_for"
+}
+```
+
+The collector copies the supported scalar or null fields from schema version 1
+`event.browser_context` into this object. Unsupported fields and nested values
+remain only in the original payload. Browser values are client-reported, not
+verified identity. Only the collector supplies `peer_ip`, `client_ip`, and
+`client_ip_source`. When IP collection is disabled, these fields are absent and
+browser context is still available. Without either source, `event_context` is
+omitted. This context schema has its own `schema_version: 1`.
+
+`peer_ip` comes from the TCP connection. Without a trusted proxy, `client_ip`
+equals `peer_ip` and `client_ip_source` is `connection`. Browser-provided fields
+cannot replace this collector-derived context. IPv4-mapped IPv6 addresses are
+stored as IPv4. The collector makes no outbound IP lookup and does not infer
+viewer identity or location from the address.
+
+For a reverse proxy, configure only addresses or CIDRs you control. For example,
+`COLLECTOR_TRUSTED_PROXIES=10.20.1.2,2001:db8:abcd::/48`. Ensure each trusted proxy
+overwrites incoming `X-Forwarded-For` with the actual source IP, or correctly
+appends that source to the existing chain. Restrict direct access to the collector
+where possible. Broad trust ranges can allow clients to forge their address.
+
+The collector reads `X-Forwarded-For` only when the direct peer is trusted. It
+combines all header lines in order, walks from right to left, skips configured
+trusted hops, and selects the first untrusted address. This follows the
+[trusted-proxy selection described by MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For#selecting_an_ip_address).
+Only literal IPv4 or bare IPv6 entries are accepted, with at most 32 addresses
+and 4096 bytes across the header values. Missing, malformed, excessive, or entirely
+trusted chains leave `client_ip` and `client_ip_source` null while retaining
+`peer_ip`. The event is still accepted. `Forwarded`, `X-Real-IP`, and
+`CF-Connecting-IP` are ignored; configure the proxy to supply `X-Forwarded-For`.
+
+The IP describes the HTTP sender. When a gateway batches multiple viewers' events,
+the request context describes that gateway for every event in the batch. It cannot
+recover those viewers' individual IPs. NAT, Docker networking and VPNs can also
+change the visible address. Supplied `viewer_id` remains the basis for unique-viewer
+counts. IP data is available only through the private raw-event API, with no IP
+filter or GeoIP enrichment in this stage.
+
+Set `COLLECTOR_STORE_IP=false` and restart to omit IP fields for new events.
+Raw forwarding headers are neither stored nor logged, and normal request handling
+does not log IP values. First accepted delivery wins, including whether context
+was collected; retries never add or replace it. Retention and viewer deletion
+remove the event's context with its row.
+
 ### Filters and pagination
 
 All read endpoints accept `from`, `to`, `video_id`, and `viewer_id`. Timestamps use
@@ -351,8 +448,8 @@ an error and retries at the next interval; a failed startup sweep prevents start
 Retention uses the stored server `received_at`, independently of the client's
 `occurred_at`. An old client timestamp does not cause immediate removal, and a
 future client timestamp does not extend storage. Expiration removes the canonical
-event and its OTLP log/context in one transaction. Summaries use only retained
-events, so expiration also removes their contributions.
+event, its OTLP log/context, and its request context in one transaction.
+Summaries use only retained events, so expiration also removes their contributions.
 
 For 60 days, set `COLLECTOR_RETENTION_SECONDS=5184000`. For indefinite storage,
 set `COLLECTOR_RETENTION_SECONDS=0`. Restart the collector after changing settings.
@@ -369,8 +466,9 @@ Stop the collector, then run:
 ```
 
 The command matches the exact supplied `viewer_id` across all videos and both
-ingestion formats. It removes the matching events and OTLP context atomically,
-then prints a count such as `{"deleted_events":42}`. Other viewers and anonymous
+ingestion formats. It removes the matching events, OTLP context, and request
+context atomically, then prints a count such as `{"deleted_events":42}`.
+Other viewers and anonymous
 events remain. Repeating the command succeeds with zero deletions. Restart the
 collector to resume ingestion; queries and totals reflect the deletion.
 
@@ -438,9 +536,9 @@ on the restored copy before starting it.
 ## Development
 
 The collector is a Cargo project under `services/`, separate from the npm packages.
-Its integration tests use the real JavaScript analytics package and HTTP/OTLP adapters,
-then query a running service before and after a restart. Tests use temporary data
-directories and require no external services.
+Its integration tests use the real JavaScript analytics package and
+Chunkify/HTTP/OTLP adapters, then query a running service before and after a restart.
+Tests use temporary data directories and require no external services.
 They also exercise scheduled/startup retention, disabled retention, offline viewer
 deletion, key rotation, and backup/restore through the public CLI and HTTP interfaces.
 
@@ -448,6 +546,7 @@ From the repository root, with Cargo available on PATH:
 
 ```sh
 npm ci
+npx playwright install --with-deps --only-shell chromium
 npm run test:collector
 cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
 cargo clippy --locked --manifest-path services/analytics-collector/Cargo.toml -- -D warnings
@@ -473,8 +572,8 @@ npm run test:collector:docker
 
 This uses the real native and OTLP adapters, verifies non-root execution and health
 reporting, stops the container gracefully, and creates a replacement with the same
-volume. It checks the original credentials, raw events, OTLP context, deduplication,
-and summary after replacement. The dedicated CI container job runs this test.
+volume. It checks the original credentials, raw events, OTLP and IP context,
+deduplication, and summary after replacement. The dedicated CI container job runs this test.
 Test resources use unique names and are removed afterward. To test another prebuilt
 image, set `COLLECTOR_IMAGE` when running the Node test directly.
 

@@ -13,6 +13,8 @@ pub struct Config {
     pub ingest_per_second: u32,
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
+    pub store_ip: bool,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -91,6 +93,13 @@ impl Config {
             return Err("COLLECTOR_RETENTION_INTERVAL_SECONDS must be between 1 and 86400".into());
         }
         Ok(Self {
+            trusted_proxies: crate::context::trusted_proxies(
+                &env::var("COLLECTOR_TRUSTED_PROXIES").unwrap_or_default(),
+            )?,
+            store_ip: env::var("COLLECTOR_STORE_IP")
+                .unwrap_or_else(|_| "true".into())
+                .parse()
+                .map_err(|_| "COLLECTOR_STORE_IP must be true or false")?,
             data_dir: env::var_os("COLLECTOR_DATA_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| "data".into()),

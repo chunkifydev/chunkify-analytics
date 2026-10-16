@@ -1,0 +1,39 @@
+name: Analytics collector
+
+on:
+  push:
+    paths:
+      - "services/analytics-collector/**"
+      - "packages/analytics/**"
+      - "tests/collector/**"
+      - "package*.json"
+      - ".github/workflows/collector.yml"
+  pull_request:
+    paths:
+      - "services/analytics-collector/**"
+      - "packages/analytics/**"
+      - "tests/collector/**"
+      - "package*.json"
+      - ".github/workflows/collector.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 4
+      RUSTUP_TOOLCHAIN: "1.99.0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - run: npm ci
+      - run: cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
+      - run: npm run test:collector
+      - run: cargo clippy --locked --manifest-path services/analytics-collector/Cargo.toml -- -D warnings

@@ -1,0 +1,171 @@
+# Chunkify analytics collector
+
+A Rust service that stores Chunkify playback events in an embedded DuckDB file.
+The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/issues/381).
+
+## Implementation stages
+
+1. Native HTTP ingestion, durable storage, separate ingest/read keys, event queries,
+   and summary metrics. This branch implements this stage.
+2. OTLP/HTTP JSON ingestion, including batched logs and gzip.
+3. Retention, viewer deletion, key rotation, and backup/restore procedures.
+4. Docker packaging, container lifecycle tests, and measured capacity guidance.
+
+This is a development version. Events currently remain until the data directory
+is removed. The 30-day retention default and administration commands in the full
+specification are still pending. MCP is a separate potential follow-up.
+
+## Build and run
+
+Install Rust and a C++ compiler. CI uses Rust 1.99.0 and Node.js 24. DuckDB is compiled into the executable, so the
+first build takes longer than later builds. No separate database server is needed.
+The lockfile records the exact Rust dependencies.
+
+From this directory:
+
+```sh
+cargo build --locked
+export COLLECTOR_DATA_DIR="$PWD/data"
+export COLLECTOR_ALLOWED_ORIGINS="http://127.0.0.1:4173"
+./target/debug/chunkify-analytics-collector init
+./target/debug/chunkify-analytics-collector serve
+```
+
+`init` creates `keys.json` in the data directory and refuses to overwrite existing
+keys. On Unix, a new data directory has mode `0700` and the key file has mode `0600`.
+Read the file locally to configure your application. The public `ingest_key`
+permits event submission. Keep `read_token` on your dashboard backend.
+
+One process owns `analytics.duckdb` and its write-ahead log. Keep the entire data
+directory. Accepted events survive restarts, including an abrupt process stop.
+SIGINT and SIGTERM stop accepting new connections, finish active requests, and
+close the database. A second writer using the same database file fails at startup.
+
+## Send analytics
+
+Use the analytics package from this branch:
+
+```js
+import { monitor } from "@chunkify/analytics";
+import { createHttpAdapter } from "@chunkify/analytics/http";
+
+monitor(document.querySelector("video"), {
+  videoId: "video-123",
+  destinations: [createHttpAdapter("http://127.0.0.1:4174/v1/events", {
+    headers: { "X-Chunkify-Ingest-Key": "COPY_YOUR_PUBLIC_INGEST_KEY" },
+  })],
+});
+```
+
+Send the complete SDK event. Custom mappings that remove required fields cannot
+be accepted. The collector stores the complete JSON object, including additional
+fields, and deduplicates by `event_id`. Repeating a valid event does not replace
+the first payload or count it twice.
+
+The ingest key is visible to browsers. CORS limits which websites browsers may
+submit from; it does not prove that a request came from a trusted viewer.
+Serve public traffic through your HTTPS ingress. Internal HTTP is supported.
+
+## Configuration
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `COLLECTOR_DATA_DIR` | `./data` | Directory for keys, database, and write-ahead log, relative to the working directory. |
+| `COLLECTOR_BIND` | `127.0.0.1:4174` | Listening IP address and port. Use `0.0.0.0:4174` behind an ingress when needed. |
+| `COLLECTOR_ALLOWED_ORIGINS` | Empty | Comma-separated exact website origins, without paths or trailing slashes. Empty denies requests with an Origin header. Server requests without Origin still require the ingest key. |
+| `COLLECTOR_MAX_BODY_BYTES` | `65536` | Maximum JSON request body size. Must be positive. |
+| `COLLECTOR_INGEST_PER_SECOND` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
+
+The service rejects excess ingestion requests with HTTP 429 and `Retry-After: 1`.
+The database queue holds at most 64 waiting operations; a full queue returns 503.
+The SDK continues to send once without retrying. Limits are configurable safeguards,
+not a measured throughput guarantee. Configure connection and request timeouts at
+your ingress before exposing this development service publicly.
+
+## HTTP API
+
+| Method and path | Authorization | Response |
+| --- | --- | --- |
+| `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
+| `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after commit; 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
+| `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"received_at":"...","event":{...}}],"next_cursor":null}` |
+| `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
+
+Native ingestion accepts `Content-Type: application/json` and one complete schema
+version 1 event. It validates all seven event shapes emitted by the SDK. Malformed
+or invalid payloads return 400; unsupported media types return 415; oversized bodies
+return 413. Missing or invalid keys return 401. Disallowed origins return 403.
+
+Only the ingest endpoint enables CORS, including preflight for the ingest header.
+Read endpoints are intended for the customer's backend and do not enable CORS.
+Keys are never accepted in a query string. Responses are marked `no-store`.
+
+### Filters and pagination
+
+All read endpoints accept `from`, `to`, `video_id`, and `viewer_id`. Timestamps use
+RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
+exclusive. The raw event endpoint also accepts `event_name`.
+
+`/v1/events` and `/v1/videos` accept `limit` from 1 to 1000, defaulting to 100.
+Follow `next_cursor` until it is null. Keep the same filters when following a
+cursor. Invalid cursors, changed filters, unknown parameters, and invalid ranges
+return 400. Treat cursors as opaque.
+
+Events are ordered by their server ingestion sequence, oldest first. Videos are
+ordered by `video_id`. A pagination sequence is limited to events already committed
+at its first page, so later arrivals do not shift pages or change video totals
+within that sequence. Start without a cursor to refresh. This is not an indefinite
+export snapshot; future retention and deletion can remove records between requests.
+
+For example, run this from your dashboard backend or terminal, using a local
+`READ_TOKEN` environment variable containing the private token:
+
+```sh
+curl -H "Authorization: Bearer $READ_TOKEN" \
+  'http://127.0.0.1:4174/v1/summary?video_id=video-123'
+```
+
+### Metric definitions
+
+- A view is a distinct `view_id` with a retained `view_started` event. It represents
+  a playback attempt, including attempts that fail before playback.
+- Summary filters select views by the occurrence time and identity of their start
+  event. Each selected view contributes its entire retained cumulative playing
+  time, including a final event that arrives after the selected date range. Raw
+  queries instead filter each event's own `occurred_at`.
+- Playing time uses the final `view_ended` value when present, otherwise the latest
+  retained `view_snapshot`, otherwise zero. Records are ranked by SDK sequence,
+  then occurrence time and ingestion order. Snapshots are never added together.
+- A view without a retained start event is excluded from summaries. Its events
+  remain available through raw queries. Duplicate starts for one view use the
+  first start by SDK sequence, occurrence time, then ingestion order.
+- Unique viewers are distinct non-null supplied `viewer_id` values on selected
+  starts. Anonymous views still count as views. This does not identify verified
+  people, and per-video viewer counts should not be summed for a global count.
+- Final events do not imply video completion. Missing events can make metrics
+  incomplete. Client occurrence times and metric values are supplied by the SDK;
+  an ingest key does not verify their authenticity.
+
+The server stores receipt time separately for operations and the later retention
+implementation. Operational messages use stdout/stderr and contain no keys.
+
+## Development
+
+The collector is a Cargo project under `services/`, separate from the npm packages.
+Its integration tests use the real JavaScript analytics package and HTTP adapter,
+then query a running service before and after a restart. Tests use temporary data
+directories and require no external services.
+
+From the repository root, with Cargo available on PATH:
+
+```sh
+npm ci
+npm run test:collector
+cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
+cargo clippy --locked --manifest-path services/analytics-collector/Cargo.toml -- -D warnings
+```
+
+The dedicated collector CI job runs these checks. Existing npm and browser checks
+continue in the main CI job. `COLLECTOR_BINARY` can point the Node integration
+tests at another built collector executable.

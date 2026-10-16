@@ -1,0 +1,22 @@
+[package]
+name = "chunkify-analytics-collector"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "Self-hosted storage and queries for Chunkify playback analytics"
+
+[dependencies]
+axum = "0.8.9"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+duckdb = { version = "=1.10506.0", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2.6"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.dev]
+debug = 0
+

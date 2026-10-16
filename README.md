@@ -478,36 +478,134 @@ and summary after replacement. The dedicated CI container job runs this test.
 Test resources use unique names and are removed afterward. To test another prebuilt
 image, set `COLLECTOR_IMAGE` when running the Node test directly.
 
-Run the capacity benchmark separately; it is not a CI speed threshold:
+Run capacity measurements separately; throughput is not a CI pass/fail gate:
 
 ```sh
 COLLECTOR_LOAD_REPORT=/tmp/collector-capacity.json npm run benchmark:collector
 ```
 
-Each case starts with an empty named volume and a container limited to two CPUs
-and 2 GiB of RAM with no extra swap. It measures native JSON and OTLP JSON, one
-event per request, at target rates of 50 and 100 requests per second and with
-eight unpaced clients. Each case lasts 30 seconds by default; set
-`COLLECTOR_LOAD_SECONDS` from 5 to 300 to change that duration. The benchmark raises
-the ingestion limit to 10,000 requests per second to measure storage capacity.
-The normal service default remains 100.
+The command builds the SDK and image, then runs the matrix below. To reuse an
+already built image, run `node tests/collector/docker/load.mjs` directly. Set
+`COLLECTOR_IMAGE` to select a different local image. The JSON report records its
+immutable image ID separately from the current checkout's source revision.
 
-Events come from real SDK playback attempts across ten videos and up to 1,000
-viewer IDs. The fixture starts and destroys each attempt without playing media,
-producing start, state-change, and final events with zero playing time. A summary
-query runs approximately once a second alongside ingestion. At most eight requests
-are in flight; slower responses reduce the achieved rate rather than building an
-unbounded client queue. Each case replaces the container and reads every page to
-verify all acknowledged events survived.
+List the plan without contacting Docker:
 
-The JSON report contains achieved throughput, all-request latency percentiles,
-HTTP/transport failures, summary latency, sampled process RSS, checkpointed data
-directory size, image identity, and hardware details. RSS excludes filesystem
-cache and is sampled rather than an exact peak. Storage size is logical bytes
-after a checkpoint. No keys are included in the report.
+```sh
+node tests/collector/docker/load.mjs --list
+```
 
-These short runs on a fresh database do not establish capacity for 30 days of
-retained traffic, large custom payloads, gzip batches, slow disks, or many dashboard
-queries. Measure with the intended retention, payloads, and hardware before setting
-deployment limits. The [16 October 2026 capacity report](capacity.md) records the
-measured setup and results, including persistence verification after each run.
+| Cases | Workload |
+| --- | --- |
+| `native-100`, `native-200`, `native-400`, `native-800`, `native-1600` | One native event per request, at the named requests/s |
+| `otlp-100`, `otlp-200`, `otlp-400`, `otlp-800` | One OTLP record per request, at the named requests/s |
+| `otlp-batch10`, `otlp-batch25`, `otlp-batch25-gzip` | 100 requests/s with 10 or 25 records, optionally compressed |
+| `otlp-batch10-low`, `otlp-batch25-low` | 250 records/s using 25 requests/s of 10 records or 10 requests/s of 25 records |
+| `mixed` | Alternating native and 10-record OTLP requests, 100 requests/s, every fifth request repeats acknowledged events |
+| `mixed-large` | Mixed requests at 50 requests/s; every fourth new event has a synthetic 16 KiB mapper property; OTLP uses gzip |
+| `preloaded-mixed` | Same traffic as `mixed`, after inserting 50,000 events through OTLP |
+| `burst-recovery` | Native traffic at 100, then 1,600, then 100 requests/s; 20%, 40%, 40% of the duration |
+| `rate-cap` | 400 OTLP requests/s with 10 records each, against the normal 100-request/s admission limit |
+
+Each case has its own temporary volume and a container with two CPUs, 2 GiB RAM,
+and no extra swap. The default duration is 30 seconds per case, excluding preload,
+startup, restart, and correctness checks. The complete matrix takes several
+minutes. Other running containers are counted in the report and left running.
+
+### Benchmark controls
+
+| Environment variable | Default | Allowed values |
+| --- | --- | --- |
+| `COLLECTOR_LOAD_SECONDS` | `30` | 5..300 seconds per case |
+| `COLLECTOR_LOAD_CASES` | all cases | Comma-separated names from the table |
+| `COLLECTOR_LOAD_PRELOAD_EVENTS` | `50000` | 0..100000, used by `preloaded-mixed` |
+| `COLLECTOR_LOAD_CONCURRENCY` | `128` | 1..512 requests in flight |
+| `COLLECTOR_LOAD_REPORT` | stdout | Output JSON path, saved after each completed case |
+| `COLLECTOR_IMAGE` | `chunkify-analytics-collector:test` | Existing local image name |
+
+For a longer measurement around a candidate rate, using the existing image:
+
+```sh
+COLLECTOR_LOAD_CASES=native-200,otlp-200 \
+COLLECTOR_LOAD_SECONDS=120 \
+COLLECTOR_LOAD_REPORT=/tmp/collector-longer.json \
+node tests/collector/docker/load.mjs
+```
+
+The collector's benchmark settings raise the rate cap to 10,000 requests/s,
+except in `rate-cap`, and raise the request body bound to 1 MiB for OTLP batches.
+The record limit remains 100. Retention scans run every five seconds with the
+normal 30-day lifetime. This exercises concurrent scans, but does not benchmark
+large expired-data deletions. These settings do not change deployment defaults.
+
+### Workload and measurements
+
+The runner records all seven event types from a real SDK playback with nonzero
+playing time, and captures the public HTTP and OTLP adapters' actual wire output.
+It replays those templates with fresh event/view IDs, video/viewer IDs, and event
+occurrence timestamps. There are ten video IDs and up to 1,000 viewer IDs. OTLP
+batching and compression model a gateway; neither SDK adapter batches events.
+The optional larger property is repeatable synthetic text, not browser metadata.
+
+Traffic follows a schedule independent of response completion. If the generator
+is full, or more than 50 ms behind schedule, it records skipped requests instead
+of accumulating an unbounded queue. The report separates scheduled, submitted,
+successful, and rejected traffic; requests/s and records/s; and newly acknowledged
+events from duplicate acknowledgements. HTTP errors, timeouts, and uncertain
+records have separate counts. Persistence checks report committed records whose
+response was not received.
+
+A generator pause longer than five seconds invalidates the case and stops the
+run, for example if the machine sleeps. Keep the host awake during measurement;
+on macOS, `caffeinate -i node tests/collector/docker/load.mjs` holds a temporary
+idle-sleep assertion for the command's lifetime.
+
+Request latency measures HTTP delivery after serialization and compression.
+Preparation time and scheduling lag are reported separately. Distributions include
+p50, p95, and p99; successful-request latency is also separate, because fast error
+responses can make an overloaded collector appear faster. Summary, per-video,
+and paginated raw-event reads run concurrently. Their latency distributions cover
+successful responses, and failures have separate counts. Burst phases drain
+outstanding requests between phases and report the drain duration.
+
+Resource sampling requires Linux cgroup v2, including inside Docker Desktop.
+Samples include process RSS, cgroup memory including filesystem cache,
+container CPU, data-directory and WAL sizes, free host/volume disk, and generator
+RSS. The generator also reports CPU and event-loop delay. Sampling incurs Docker
+exec overhead and can miss peaks. Internal database queue wait/depth, transaction
+commit duration, and achieved write batch sizes require future instrumentation;
+HTTP latency cannot isolate those costs.
+
+The runner stops at a sampled 512 MiB data directory, less than 4 GiB free disk
+on either the host or volume, 1,800 MiB container memory, 1 GiB generator RSS, or
+200,000 submitted unique events in one case. HTTP requests time out after ten
+seconds. Docker also enforces the hard 2 GiB memory limit. Safety stops and
+correctness failures make the command exit unsuccessfully and retain the partial
+report. Temporary containers and volumes are removed in cleanup. SIGINT/SIGTERM
+stop admission and trigger cleanup; a forced termination can leave test resources.
+
+Before the matrix runs, probe thresholds are fixed at 99% of scheduled requests
+sent, 99% HTTP success, successful-ingest p95 at most 250 ms, query p95 at most
+500 ms with no query failures, and scheduling-lag p95 at most 20 ms. An overload
+or rate-limit case is expected to miss these thresholds. Missing a performance
+threshold is reported, but does not fail CI or invalidate the measured result.
+A short passing probe is only a candidate operating rate, not a sustained limit.
+
+After each case, the runner replaces the container and reads every event page.
+It checks acknowledged IDs, full canonical payloads, original OTLP context,
+deduplication, global/per-video views, unique viewers, and cumulative playing time.
+The compressed 25-record case uses SIGKILL; other cases use graceful shutdown.
+Shutdown and startup times and final checkpointed storage size are reported.
+The small benchmark-accounting and lifecycle tests run in Docker CI without
+asserting a machine-specific throughput target.
+
+The [expanded capacity report](capacity-expanded.md) contains the measured results
+and raw JSON reports, including the rejected interrupted measurement.
+The [initial capacity report](capacity.md) preserves the earlier six-case baseline.
+The expanded matrix has different playback fixtures, scheduling, queries, and
+host activity, so it should not be treated as a direct speed comparison with that
+baseline. Compare future collector changes using the same runner, settings,
+hardware, retained dataset, and workload. Thirty-day capacity needs a larger,
+representative retained dataset and deployment-specific measurements. These
+reports predate browser/IP enrichment and the flat context column; they do not
+measure the storage or throughput cost of this stage.

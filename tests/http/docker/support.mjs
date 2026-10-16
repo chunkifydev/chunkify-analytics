@@ -36,8 +36,8 @@ export async function containerCollector({ settings = {}, resources = [] } = {})
       }
       throw new Error(`Container did not become healthy: ${await docker(["logs", name])}`);
     },
-    async stop() {
-      await docker(["stop", "--time", "20", name]);
+    async stop(signal = "stop") {
+      await docker(signal === "kill" ? ["kill", "--signal", "KILL", name] : ["stop", "--time", "20", name]);
       const state = JSON.parse(await docker(["inspect", "--format", "{{json .State}}", name]));
       await docker(["rm", name]);
       name = undefined;

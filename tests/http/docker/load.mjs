@@ -1,157 +1,113 @@
-import assert from "node:assert/strict";
-import { cpus, platform, arch } from "node:os";
-import { writeFile } from "node:fs/promises";
-import { setTimeout as delay } from "node:timers/promises";
-import { attachAnalytics } from "@chunkify/analytics";
-import { createHttpAdapter } from "@chunkify/analytics/http";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
-import { containerCollector, docker, image } from "./support.mjs";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { cpus, platform, arch, loadavg } from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { captureWorkload, measure, safety, thresholds, hostFreeBytes } from "./benchmark.mjs";
+import { docker, image } from "./support.mjs";
 
-const seconds = Number(process.env.COLLECTOR_LOAD_SECONDS ?? 30);
-if (!Number.isInteger(seconds) || seconds < 5 || seconds > 300) throw new Error("COLLECTOR_LOAD_SECONDS must be 5..300");
-const concurrency = 8;
-const resources = ["--cpus=2", "--memory=2g", "--memory-swap=2g"];
-
-function playback(index) {
-  const events = [];
-  const media = Object.assign(new EventTarget(), { duration: 120, currentTime: 0, src: "", currentSrc: "",
-    ownerDocument: { defaultView: null } });
-  const session = attachAnalytics(media, { videoId: `video-${index % 10}`, viewerId: `viewer-${index % 1000}`,
-    destinations: [{ send(event) { events.push(event); } }] });
-  session.startAttempt();
-  session.destroy();
-  return events;
+const execute = promisify(execFile);
+function integer(name, fallback, min, max) {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be ${min}..${max}`);
+  return value;
 }
-
-function distribution(values) {
-  const sorted = [...values].sort((a, b) => a - b);
-  const percentile = (p) => sorted.length ? +sorted[Math.ceil(sorted.length * p) - 1].toFixed(2) : null;
-  return { count: sorted.length, p50_ms: percentile(0.5), p95_ms: percentile(0.95), p99_ms: percentile(0.99) };
-}
-
-async function readAll(server) {
-  const records = new Map();
-  let cursor;
-  do {
-    const page = await server.get(`/v1/events?limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
-    for (const record of page.events) records.set(record.event.event_id, record.event);
-    cursor = page.next_cursor;
-  } while (cursor);
-  return records;
-}
-
-async function measure(format, rate) {
-  // Raise the rate cap to measure storage capacity, rather than the default 100/s policy.
-  const server = await containerCollector({ resources, settings: { COLLECTOR_INGEST_PER_SECOND: "10000" } });
-  try {
-    const adapter = (format === "native" ? createHttpAdapter : createOtlpAdapter)(
-      `${server.url}${format === "native" ? "/v1/events" : "/v1/logs"}`,
-      { headers: { "X-Chunkify-Ingest-Key": server.keys.ingest_key } },
-    );
-    const accepted = new Map();
-    const latency = [];
-    const readLatency = [];
-    const failures = {};
-    let readFailures = 0;
-    let peakRssKiB = 0;
-    let samples = 0;
-    let active = true;
-    let issued = 0;
-    let views = 0;
-    let canonicalBytes = 0;
-    let monitorError;
-    const start = performance.now();
-    const monitor = (async () => {
-      while (active) {
-        const before = performance.now();
-        try {
-          await server.get("/v1/summary");
-          readLatency.push(performance.now() - before);
-        } catch { readFailures++; }
-        const status = await docker(["exec", server.name, "cat", "/proc/1/status"]);
-        peakRssKiB = Math.max(peakRssKiB, Number(status.match(/^VmRSS:\s+(\d+) kB$/m)?.[1] ?? 0));
-        samples++;
-        await delay(1000);
-      }
-    })().catch((error) => { monitorError = error; active = false; });
-    // Closed-loop clients, capped at eight concurrent requests. Paced runs share a
-    // target schedule; overload reduces achieved rate instead of growing a queue.
-    await Promise.all(Array.from({ length: concurrency }, async () => {
-      let pending = [];
-      while (active) {
-        const ticket = issued++;
-        const due = rate ? start + ticket * 1000 / rate : performance.now();
-        if (due >= start + seconds * 1000) break;
-        if (due > performance.now()) await delay(due - performance.now());
-        if (performance.now() - start >= seconds * 1000) break;
-        if (!pending.length) pending = playback(views++);
-        const event = pending.shift();
-        canonicalBytes += Buffer.byteLength(JSON.stringify(event));
-        const before = performance.now();
-        try {
-          await adapter.send(event);
-          accepted.set(event.event_id, event);
-        } catch (error) {
-          const reason = error.message.match(/HTTP (\d+)/)?.[1] ?? "transport";
-          failures[reason] = (failures[reason] ?? 0) + 1;
-        }
-        latency.push(performance.now() - before);
-      }
-    }));
-    const elapsed = (performance.now() - start) / 1000;
-    active = false;
-    await monitor;
-    if (monitorError) throw monitorError;
-    const stopped = await server.stop();
-    assert.equal(stopped.ExitCode, 0);
-    assert.equal(stopped.OOMKilled, false);
-    const dataBytes = Number((await docker(["run", "--rm", "--mount", `type=volume,src=${server.volume},dst=/data,readonly`,
-      "--entrypoint", "du", image, "-sb", "/data"])).split(/\s/)[0]);
-    await server.start();
-    const persisted = await readAll(server);
-    for (const [id, event] of accepted) assert.deepEqual(persisted.get(id), event, "acknowledged event must survive replacement");
-    // The response may be lost after a successful commit. Report any extra records separately.
-    assert.ok(persisted.size <= latency.length);
-    const summary = await server.get("/v1/summary");
-    const starts = [...persisted.values()].filter((event) => event.event_name === "chunkify.video.view_started");
-    assert.equal(summary.views, starts.length);
-    assert.equal(summary.unique_viewers, new Set(starts.map((event) => event.viewer_id)).size);
-    return {
-      format, target_requests_per_second: rate ?? "unpaced", concurrency, requested_seconds: seconds,
-      elapsed_seconds: +elapsed.toFixed(3), attempted: latency.length, accepted: accepted.size, failures,
-      accepted_per_second: +(accepted.size / elapsed).toFixed(2), request_latency: distribution(latency),
-      summary_latency: distribution(readLatency), summary_failures: readFailures,
-      sampled_peak_process_rss_mib: +(peakRssKiB / 1024).toFixed(2), memory_samples: samples,
-      mean_canonical_event_bytes: Math.round(canonicalBytes / latency.length), checkpointed_data_bytes: dataBytes,
-      persisted_events: persisted.size, persisted_without_ack: persisted.size - accepted.size,
-      summary, replacement_verified: true,
-    };
-  } finally { await server.close(); }
-}
-
-const report = {
-  measured_at: new Date().toISOString(),
-  host: { os: platform(), architecture: arch(), cpu: cpus()[0]?.model, logical_cpus: cpus().length, node: process.version },
-  engine: JSON.parse(await docker(["info", "--format", '{{json .}}'])),
-  image: JSON.parse(await docker(["image", "inspect", "--format", '{{json .}}', image])),
-  container_limits: { cpus: 2, memory_mib: 2048, swap_mib: 0 },
-  ingest_rate_limit: 10000, results: [],
-};
-// Keep the report free of machine paths, registry configuration, and environment values.
-report.engine = { version: report.engine.ServerVersion, architecture: report.engine.Architecture,
-  cpus: report.engine.NCPU, memory_bytes: report.engine.MemTotal, os: report.engine.OperatingSystem };
-report.image = { id: report.image.Id, architecture: report.image.Architecture, size_bytes: report.image.Size };
-for (const format of ["native", "otlp"]) {
-  for (const rate of [50, 100, null]) {
-    console.error(`Measuring ${format}, ${rate ?? "unpaced"} requests/s for ${seconds}s...`);
-    const result = await measure(format, rate);
-    report.results.push(result);
-    if (process.env.COLLECTOR_LOAD_REPORT) {
-      await writeFile(process.env.COLLECTOR_LOAD_REPORT, `${JSON.stringify(report, null, 2)}\n`);
-    }
-    console.error(`${result.accepted_per_second} accepted/s; p95 ${result.request_latency.p95_ms}ms; failures ${JSON.stringify(result.failures)}`);
+const seconds = integer("COLLECTOR_LOAD_SECONDS", 30, 5, 300);
+const preload = integer("COLLECTOR_LOAD_PRELOAD_EVENTS", 50000, 0, 100000);
+const concurrency = integer("COLLECTOR_LOAD_CONCURRENCY", 128, 1, 512);
+const cases = [
+  ...[100, 200, 400, 800, 1600].map((rate) => ({ name: `native-${rate}`, format: "native", rate })),
+  ...[100, 200, 400, 800].map((rate) => ({ name: `otlp-${rate}`, format: "otlp", rate })),
+  { name: "otlp-batch10", format: "otlp", batch_size: 10, rate: 100 },
+  { name: "otlp-batch25", format: "otlp", batch_size: 25, rate: 100 },
+  { name: "otlp-batch10-low", format: "otlp", batch_size: 10, rate: 25 },
+  { name: "otlp-batch25-low", format: "otlp", batch_size: 25, rate: 10 },
+  { name: "otlp-batch25-gzip", format: "otlp", batch_size: 25, gzip: true, rate: 100, shutdown: "kill" },
+  { name: "mixed", format: "mixed", batch_size: 10, duplicate_every: 5, rate: 100 },
+  { name: "mixed-large", format: "mixed", batch_size: 10, large_every: 4, gzip: true, duplicate_every: 5, rate: 50 },
+  { name: "preloaded-mixed", format: "mixed", batch_size: 10, duplicate_every: 5, rate: 100, preload },
+  { name: "burst-recovery", format: "native", phases: [
+    { name: "warm", rate: 100, seconds: seconds * 0.2 },
+    { name: "burst", rate: 1600, seconds: seconds * 0.4 },
+    { name: "recovery", rate: 100, seconds: seconds * 0.4 },
+  ] },
+  { name: "rate-cap", format: "otlp", batch_size: 10, rate: 400, rate_limit: 100 },
+];
+const selected = process.env.COLLECTOR_LOAD_CASES?.split(",");
+for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure COLLECTOR_LOAD_* environment variables.`);
+for (const name of selected ?? []) if (!cases.some((item) => item.name === name)) throw new Error(`Unknown benchmark case: ${name}`);
+const plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, ...item }));
+if (process.argv.includes("--list")) {
+  console.log(JSON.stringify({ cases: plan, thresholds, safety }, null, 2));
+} else {
+  const controller = new AbortController();
+  const interrupt = () => { controller.abort(); console.error("Stopping traffic and cleaning up benchmark resources..."); };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
+  const info = JSON.parse(await docker(["info", "--format", "{{json .}}"]));
+  const inspected = JSON.parse(await docker(["image", "inspect", "--format", "{{json .}}", image]));
+  const git = async (...args) => (await execute("git", args)).stdout.trim();
+  const runnerHash = createHash("sha256");
+  for (const file of ["load.mjs", "benchmark.mjs", "workload.mjs", "support.mjs"]) {
+    runnerHash.update(file).update(await readFile(new URL(file, import.meta.url)));
   }
+  const report = {
+    report_version: 2, measured_at: new Date().toISOString(),
+    source: { git_head: await git("rev-parse", "HEAD"),
+      collector_source_commit: await git("log", "-1", "--format=%H", "--", "services/analytics-collector/src"),
+      collector_source_modified: Boolean(await git("status", "--porcelain", "--", "services/analytics-collector/src", "services/analytics-collector/Cargo.lock")),
+      runner_sha256: runnerHash.digest("hex") },
+    host: { os: platform(), architecture: arch(), cpu: cpus()[0]?.model, logical_cpus: cpus().length,
+      node: process.version, load_average_at_start: loadavg(), free_disk_bytes_at_start: await hostFreeBytes() },
+    engine: { version: info.ServerVersion, architecture: info.Architecture, cpus: info.NCPU,
+      memory_bytes: info.MemTotal, os: info.OperatingSystem, storage_driver: info.Driver,
+      other_running_containers_at_start: info.ContainersRunning },
+    image: { id: inspected.Id, architecture: inspected.Architecture, size_bytes: inspected.Size },
+    storage: "local Docker named volume; loopback HTTP; no TLS or artificial network delay",
+    container_limits: { cpus: 2, memory_mib: 2048, swap_mib: 0 }, thresholds, safety,
+    limitations: [
+      "Short probes identify candidate rates, not sustained or 30-day capacity.",
+      "Shared host workloads may affect results; no other containers are stopped.",
+      "SDK events and adapter wire output are recorded once, then replayed with new identities.",
+      "OTLP batching and gzip model a gateway; SDK adapters still send one event per request.",
+      "Request latency starts after serialization/compression; preparation and schedule lag are reported separately.",
+      "Resource sampling includes Docker exec overhead and may miss peaks. Container memory includes filesystem cache.",
+      "Scheduled retention scans run every five seconds with a 30-day TTL; these runs do not measure deletion of expired data.",
+      "Internal queue depth/wait, commit time and achieved database batch sizes are unavailable without collector instrumentation.",
+      "Image ID identifies the executable. Git source provenance is the local checkout and cannot attest to a separately supplied image.",
+    ],
+    plan, results: [], status: "running",
+  };
+  const save = async () => {
+    if (process.env.COLLECTOR_LOAD_REPORT) await writeFile(process.env.COLLECTOR_LOAD_REPORT, `${JSON.stringify(report, null, 2)}\n`);
+  };
+  const workload = await captureWorkload();
+  report.workload = workload.description;
+  await save();
+  for (const config of plan) {
+    console.error(`Measuring ${config.name} for ${config.seconds}s${config.preload ? ` after preloading ${config.preload} events` : ""}...`);
+    try {
+      const result = await measure(config, workload, { signal: controller.signal });
+      report.results.push(result);
+      await save();
+      console.error(`${result.requests.successful_per_second} successful requests/s; ${result.records.newly_acknowledged_per_second} new events/s; successful p95 ${result.successful_request_latency.p95_ms}ms; failures ${JSON.stringify(result.requests.failures)}; probe thresholds ${result.meets_probe_thresholds ? "met" : "not met"}`);
+      if (!result.completed) {
+        report.status = controller.signal.aborted ? "interrupted" : "safety_stopped";
+        process.exitCode = controller.signal.aborted ? 130 : 1;
+        break;
+      }
+    } catch (error) {
+      report.status = controller.signal.aborted ? "interrupted" : "failed";
+      report.failure = { case: config.name, message: error.message };
+      process.exitCode = controller.signal.aborted ? 130 : 1;
+      console.error(`${config.name} failed: ${error.message}`);
+      break;
+    }
+  }
+  if (report.status === "running") report.status = "completed";
+  report.finished_at = new Date().toISOString();
+  await save();
+  process.off("SIGINT", interrupt);
+  process.off("SIGTERM", interrupt);
+  if (!process.env.COLLECTOR_LOAD_REPORT) console.log(JSON.stringify(report, null, 2));
 }
-const output = `${JSON.stringify(report, null, 2)}\n`;
-if (process.env.COLLECTOR_LOAD_REPORT) await writeFile(process.env.COLLECTOR_LOAD_REPORT, output);
-else console.log(output);

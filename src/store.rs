@@ -1,6 +1,6 @@
 use crate::{
     api::ApiError,
-    event,
+    event::{self, IncomingEvent},
     query::{Cursor, Query},
 };
 use duckdb::{Connection, params, params_from_iter, types::Value as SqlValue};
@@ -24,7 +24,7 @@ impl Store {
             INSERT INTO collector_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM collector_schema);")?;
         let version: i32 =
             tx.query_row("SELECT version FROM collector_schema", [], |r| r.get(0))?;
-        if version != 1 {
+        if !(1..=2).contains(&version) {
             return Err("Unsupported database schema version".into());
         }
         tx.execute_batch(
@@ -41,8 +41,15 @@ impl Store {
                 playing_time_ms DOUBLE,
                 received_at_ms BIGINT NOT NULL,
                 payload VARCHAR NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS event_otlp (
+                event_id VARCHAR PRIMARY KEY,
+                payload VARCHAR NOT NULL
             );",
         )?;
+        if version == 1 {
+            tx.execute_batch("UPDATE collector_schema SET version = 2;")?;
+        }
         tx.commit()?;
         let (sender, mut receiver) = mpsc::channel::<Job>(64);
         let worker = thread::spawn(move || {
@@ -69,17 +76,35 @@ impl Store {
     }
 
     pub async fn insert(&self, event: Value) -> Result<bool, ApiError> {
+        Ok(self
+            .insert_batch(vec![IncomingEvent { event, otlp: None }])
+            .await?
+            > 0)
+    }
+
+    pub async fn insert_batch(&self, events: Vec<IncomingEvent>) -> Result<usize, ApiError> {
         self.call(move |connection| {
             let tx = connection.transaction()?;
-            let inserted = tx.execute(
+            let mut inserted = 0;
+            let received_at = chrono::Utc::now().timestamp_millis();
+            for record in events {
+                let event = record.event;
+                let added = tx.execute(
                 "INSERT INTO events (event_id, view_id, video_id, viewer_id, event_name, sequence, occurred_at_ms, playing_time_ms, received_at_ms, payload)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING",
                 params![event["event_id"].as_str(), event["view_id"].as_str(), event["video_id"].as_str(), event["viewer_id"].as_str(),
                     event["event_name"].as_str(), event["sequence"].as_i64(), event::timestamp(event["occurred_at"].as_str().unwrap())?,
-                    event["playing_time_ms"].as_f64(), chrono::Utc::now().timestamp_millis(), event.to_string()],
+                    event["playing_time_ms"].as_f64(), received_at, event.to_string()],
             )?;
+                if added > 0 {
+                    if let Some(otlp) = record.otlp {
+                        tx.execute("INSERT INTO event_otlp VALUES (?, ?)", params![event["event_id"].as_str(), otlp.to_string()])?;
+                    }
+                    inserted += added;
+                }
+            }
             tx.commit()?;
-            Ok(inserted > 0)
+            Ok(inserted)
         }).await
     }
 
@@ -102,21 +127,26 @@ impl Store {
             let after = cursor.map_or(0, |c| c.after);
             let (conditions, mut values) = filters.sql();
             values.extend([SqlValue::BigInt(after), SqlValue::BigInt(through), SqlValue::BigInt((limit + 1) as i64)]);
-            let mut statement = connection.prepare(&format!("SELECT ingest_id, received_at_ms, payload FROM events
+            let mut statement = connection.prepare(&format!("SELECT ingest_id, received_at_ms, events.payload, event_otlp.payload FROM events
+                LEFT JOIN event_otlp USING (event_id)
                 WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id LIMIT ?"))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)))?;
+            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?)))?;
             let mut events = Vec::new();
             let mut last = after;
             let mut next_cursor = None;
             for row in rows {
-                let (id, received, payload) = row?;
+                let (id, received, payload, otlp_payload) = row?;
                 if events.len() == limit {
                     next_cursor = Some(Cursor { version: 1, kind: "events".into(), after: last, through, filters: filters.clone() }.encode()?);
                     break;
                 }
                 last = id;
                 let event: Value = serde_json::from_str(&payload).map_err(|_| ApiError::internal())?;
-                events.push(json!({ "received_at": chrono::DateTime::from_timestamp_millis(received), "event": event }));
+                let mut record = json!({ "received_at": chrono::DateTime::from_timestamp_millis(received), "event": event });
+                if let Some(payload) = otlp_payload {
+                    record["otlp"] = serde_json::from_str(&payload).map_err(|_| ApiError::internal())?;
+                }
+                events.push(record);
             }
             Ok(json!({ "events": events, "next_cursor": next_cursor }))
         }).await

@@ -9,6 +9,7 @@ pub struct Config {
     pub bind: SocketAddr,
     pub allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
+    pub max_otlp_records: usize,
     pub ingest_per_second: u32,
 }
 
@@ -45,6 +46,12 @@ impl Config {
         if max_body_bytes == 0 {
             return Err("COLLECTOR_MAX_BODY_BYTES must be positive".into());
         }
+        let max_otlp_records = env::var("COLLECTOR_MAX_OTLP_RECORDS")
+            .unwrap_or_else(|_| "100".into())
+            .parse()?;
+        if max_otlp_records == 0 {
+            return Err("COLLECTOR_MAX_OTLP_RECORDS must be positive".into());
+        }
         let ingest_per_second = env::var("COLLECTOR_INGEST_PER_SECOND")
             .unwrap_or_else(|_| "100".into())
             .parse()?;
@@ -60,6 +67,7 @@ impl Config {
                 .parse()?,
             allowed_origins,
             max_body_bytes,
+            max_otlp_records,
             ingest_per_second,
         })
     }

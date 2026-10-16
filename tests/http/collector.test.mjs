@@ -3,20 +3,49 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
+import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("services/analytics-collector/target/debug/chunkify-analytics-collector");
 
-async function collector(t, settings = {}) {
+// Capture the public adapter's actual HTTP output for tests of gateway batching.
+async function otlpRequests(events, options) {
+  const requests = [];
+  const receiver = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    response.writeHead(200, { "Content-Type": "application/json" }).end("{}");
+  });
+  receiver.listen(0, "127.0.0.1");
+  await once(receiver, "listening");
+  try {
+    const adapter = createOtlpAdapter(`http://127.0.0.1:${receiver.address().port}/v1/logs`, options);
+    for (const event of events) await adapter.send(event);
+    return requests;
+  } finally {
+    await new Promise((resolveClose) => receiver.close(resolveClose));
+  }
+}
+
+function postOtlp(server, body, headers = {}) {
+  return fetch(`${server.url}/v1/logs`, { method: "POST", body,
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, ...headers },
+  });
+}
+
+async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
   const env = { ...process.env, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
     COLLECTOR_ALLOWED_ORIGINS: "https://player.example", ...settings };
-  const init = spawn(binary, ["init"], { env, stdio: "pipe" });
+  const init = spawn(initialBinary, ["init"], { env, stdio: "pipe" });
   let errors = "";
   init.stderr.on("data", (chunk) => { errors += chunk; });
   assert.equal((await once(init, "exit"))[0], 0, errors);
@@ -25,8 +54,8 @@ async function collector(t, settings = {}) {
   let exited;
   server = {
     keys,
-    async start() {
-      child = spawn(binary, ["serve"], { env, stdio: "pipe" });
+    async start(executable = binary) {
+      child = spawn(executable, ["serve"], { env, stdio: "pipe" });
       exited = once(child, "exit");
       let output = "";
       errors = "";
@@ -56,8 +85,13 @@ async function collector(t, settings = {}) {
     async send(event) {
       await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.ingest_key } }).send(event);
     },
+    async sendOtlp(event, options = {}) {
+      await createOtlpAdapter(`${server.url}/v1/logs`, {
+        ...options, headers: { "X-Chunkify-Ingest-Key": keys.ingest_key },
+      }).send(event);
+    },
   };
-  await server.start();
+  await server.start(initialBinary);
   return server;
 }
 
@@ -233,15 +267,173 @@ test("summaries count views and viewers and use final or latest cumulative playt
 });
 
 test("ingestion rate limits reject excess requests without storing more events", async (t) => {
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1" });
   const event = sdkEvents()[0];
-  const responses = await Promise.all(Array.from({ length: 8 }, () => fetch(`${server.url}/v1/events`, {
+  const [envelope] = await otlpRequests([event]);
+  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1" });
+  const responses = await Promise.all(Array.from({ length: 8 }, (_, index) => fetch(`${server.url}/v1/${index % 2 ? "logs" : "events"}`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
-    body: JSON.stringify({ ...event, event_id: crypto.randomUUID() }),
+    body: JSON.stringify(index % 2 ? envelope : event),
   })));
-  assert.equal(responses.filter((response) => response.status === 201).length, 1);
+  assert.equal(responses.filter((response) => response.ok).length, 1);
   assert.equal(responses.filter((response) => response.status === 429).length, 7);
   assert.equal(responses.find((response) => response.status === 429).headers.get("retry-after"), "1");
+  for (const response of responses.filter((response) => response.status === 429 && response.url.endsWith("/v1/logs"))) {
+    assert.equal(typeof (await response.json()).message, "string");
+  }
   assert.equal((await server.get("/v1/events")).events.length, 1);
   assert.deepEqual(await (await fetch(`${server.url}/healthz`)).json(), { status: "ok" });
+});
+
+test("upgrading a previous collector preserves events and keys and accepts OTLP", {
+  skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
+}, async (t) => {
+  const server = await collector(t, {}, process.env.COLLECTOR_PREVIOUS_BINARY);
+  const events = sdkPlayback(t);
+  for (const event of events) await server.send(event);
+  const original = await server.get("/v1/events");
+  const summary = await server.get("/v1/summary");
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events"), original);
+  assert.deepEqual(await server.get("/v1/summary"), summary);
+  const added = sdkEvents("after-upgrade")[0];
+  await server.sendOtlp(added);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [...events, added]);
+  assert.equal((await server.get("/v1/summary")).views, 2);
+});
+
+test("the OTLP adapter preserves all seven SDK events and produces the same reports as native ingestion", async (t) => {
+  const events = sdkPlayback(t);
+  const native = await collector(t);
+  const otlp = await collector(t);
+  for (const event of events) {
+    await native.send(event);
+    await otlp.sendOtlp(event);
+  }
+  const records = (await otlp.get("/v1/events")).events;
+  assert.deepEqual(records.map((record) => record.event), events);
+  for (const record of records) {
+    assert.equal(record.otlp.log_record.eventName, record.event.event_name);
+    assert.equal(record.otlp.scope_logs.scope.name, "@chunkify/analytics");
+    assert.deepEqual(record.otlp.resource_logs, {});
+  }
+  for (const path of ["/v1/summary", "/v1/videos", "/v1/summary?video_id=video-a&viewer_id=viewer-a"]) {
+    assert.deepEqual(await otlp.get(path), await native.get(path));
+  }
+  // First delivery wins, whichever transport arrives first.
+  for (const event of events) {
+    await native.sendOtlp(event);
+    await otlp.send(event);
+    await otlp.sendOtlp(event);
+  }
+  assert.equal((await native.get("/v1/events")).events.length, events.length);
+  assert.deepEqual((await otlp.get("/v1/events")).events, records);
+  await otlp.stop("SIGKILL");
+  await otlp.start();
+  assert.deepEqual((await otlp.get("/v1/events")).events, records);
+});
+
+test("OTLP gzip batches retain resource and scope context and deduplicate within a batch", async (t) => {
+  const events = [...sdkEvents("video-a"), ...sdkEvents("video-b")];
+  const extra = { enabled: true, fraction: 0.060875000000010004, tags: ["demo", "customer"], details: { count: 4 } };
+  const envelopes = await otlpRequests(events, { mapAttributes: (event) => ({ ...event, extra }) });
+  const logs = envelopes.map((envelope) => envelope.resourceLogs[0].scopeLogs[0].logRecords[0]);
+  // ProtoJSON permits int64 values as JSON numbers as well as decimal strings.
+  for (const log of logs) {
+    const sequence = log.attributes.find((attribute) => attribute.key === "sequence");
+    sequence.value.intValue = Number(sequence.value.intValue);
+  }
+  const resource = { attributes: [{ key: "service.name", value: { stringValue: "customer-player" } }] };
+  const scope = { name: "customer-gateway", version: "1.0" };
+  const batch = { futureField: true, resourceLogs: [
+    { resource, schemaUrl: "https://example.com/resource", scopeLogs: [
+      { scope, schemaUrl: "https://example.com/scope", logRecords: logs.slice(0, 2) },
+      { logRecords: logs.slice(2, 3) },
+    ] },
+    { scopeLogs: [{ logRecords: [...logs.slice(3), logs[0]] }] },
+  ] };
+  const server = await collector(t);
+  const response = await postOtlp(server, gzipSync(JSON.stringify(batch)), { "Content-Encoding": "gzip" });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual(await response.json(), {});
+  const stored = (await server.get("/v1/events")).events;
+  assert.deepEqual(stored.map((record) => record.event), events.map((event) => ({ ...event, extra })));
+  assert.deepEqual(stored[0].otlp, {
+    resource_logs: { resource, schemaUrl: "https://example.com/resource" },
+    scope_logs: { scope, schemaUrl: "https://example.com/scope" }, log_record: logs[0],
+  });
+  assert.deepEqual(stored[2].otlp.scope_logs, {});
+  assert.deepEqual(stored[3].otlp.resource_logs, {});
+  assert.deepEqual(await server.get("/v1/summary"), { views: 2, unique_viewers: 1, total_playing_time_ms: 0 });
+  assert.equal((await postOtlp(server, JSON.stringify(batch))).status, 200);
+  assert.deepEqual((await server.get("/v1/events")).events, stored);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events, stored);
+});
+
+test("OTLP rejects invalid or excessive exports atomically with protocol errors", async (t) => {
+  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "32768", COLLECTOR_MAX_OTLP_RECORDS: "2" });
+  const event = sdkEvents()[0];
+  const [envelope] = await otlpRequests([event]);
+  const log = envelope.resourceLogs[0].scopeLogs[0].logRecords[0];
+  const body = JSON.stringify(envelope);
+  const batch = (logs) => JSON.stringify({ resourceLogs: [{ scopeLogs: [{ logRecords: logs }] }] });
+  async function rejected(payload, status, headers = {}) {
+    const response = await postOtlp(server, payload, headers);
+    assert.equal(response.status, status, await response.clone().text());
+    assert.match(response.headers.get("content-type"), /^application\/json/);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const error = await response.json();
+    assert.equal(typeof error.message, "string");
+    assert.ok(error.message.length > 0);
+    assert.equal(error.error, undefined);
+    assert.deepEqual((await server.get("/v1/events")).events, []);
+    assert.equal((await server.get("/v1/summary")).views, 0);
+  }
+  await rejected(body, 401, { "X-Chunkify-Ingest-Key": "" });
+  await rejected(body, 401, { "X-Chunkify-Ingest-Key": server.keys.read_token });
+  await rejected(body, 403, { Origin: "https://elsewhere.example" });
+  await rejected(body, 415, { "Content-Type": "application/x-protobuf" });
+  await rejected(body, 415, { "Content-Encoding": "br" });
+  await rejected("{", 400);
+  await rejected("null", 400);
+  await rejected('{"resourceLogs":{}}', 400);
+  await rejected(Buffer.from("not gzip"), 400, { "Content-Encoding": "gzip" });
+  await rejected(gzipSync(body).subarray(0, -8), 400, { "Content-Encoding": "gzip" });
+  await rejected(" ".repeat(32769), 413);
+  await rejected(gzipSync(" ".repeat(32769)), 413, { "Content-Encoding": "gzip" });
+  await rejected(batch([log, log, log]), 413);
+  const invalidAttributes = [
+    log.attributes.filter((attribute) => attribute.key !== "video_id"),
+    log.attributes.map((attribute) => attribute.key === "schema_version" ? { ...attribute, value: { intValue: "2" } } : attribute),
+    log.attributes.map((attribute) => attribute.key === "event_name" ? { ...attribute, value: { stringValue: "unknown" } } : attribute),
+    [...log.attributes, log.attributes[0]],
+    [...log.attributes, { key: 3, value: { stringValue: "invalid key" } }],
+    [...log.attributes, { key: "extra", value: { intValue: "one" } }],
+    [...log.attributes, { key: "extra", value: { stringValue: "x", boolValue: true } }],
+  ];
+  for (const attributes of invalidAttributes) {
+    await rejected(batch([log, { ...log, attributes }]), 400);
+  }
+  await assert.rejects(server.sendOtlp(event, { mapAttributes: () => ({ video_id: "only-one-field" }) }));
+  assert.deepEqual((await server.get("/v1/events")).events, []);
+  for (const empty of [{}, { resourceLogs: [] }, { resourceLogs: [{ scopeLogs: [{ logRecords: [] }] }] }]) {
+    const response = await postOtlp(server, JSON.stringify(empty));
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {});
+  }
+  const preflight = await fetch(`${server.url}/v1/logs`, { method: "OPTIONS", headers: {
+    Origin: "https://player.example", "Access-Control-Request-Method": "POST",
+    "Access-Control-Request-Headers": "content-type,content-encoding,x-chunkify-ingest-key",
+  } });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://player.example");
+  assert.match(preflight.headers.get("access-control-allow-headers"), /content-encoding/i);
+  const accepted = await postOtlp(server, body, { Origin: "https://player.example" });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.headers.get("access-control-allow-origin"), "https://player.example");
+  assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
 });

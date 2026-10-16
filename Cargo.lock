@@ -359,6 +359,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "duckdb",
+ "flate2",
  "serde",
  "serde_json",
  "subtle",

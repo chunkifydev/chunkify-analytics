@@ -1,6 +1,7 @@
 mod api;
 mod config;
 mod event;
+mod otlp;
 mod query;
 mod store;
 

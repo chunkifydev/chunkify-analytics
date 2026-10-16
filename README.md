@@ -10,9 +10,13 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 2. OTLP/HTTP JSON ingestion, including batched logs and gzip. Implemented.
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.
+   Implemented. See the [capacity report](capacity.md).
+5. Browser/device context in the SDK and request/IP context in the collector.
+   Specified in issue #381; not implemented. IP storage will default to enabled,
+   with a separate setting to disable it.
 
-This is a development version. Docker packaging and capacity measurements remain
-for stage 4. MCP is a separate potential follow-up.
+This is a development version. Browser/device/IP enrichment is planned separately
+from the current playback-event collector. MCP is a separate potential follow-up.
 
 ## Build and run
 
@@ -46,6 +50,121 @@ file lock for their lifetime. Stop the collector before running administration
 commands. The OS releases the lock after a crash; leave the lock file in place.
 Startup upgrades a stage 1 database to schema version 2 without dropping events
 or changing keys. Stop the old service before starting the new executable.
+
+## Run with Docker
+
+Docker Engine 25 or later with BuildKit is required. From the repository root:
+
+```sh
+docker build -t chunkify-analytics-collector:local services/analytics-collector
+docker volume create chunkify-analytics-data
+docker run --rm \
+  --mount type=volume,src=chunkify-analytics-data,dst=/data \
+  chunkify-analytics-collector:local init
+docker run -d --name chunkify-analytics --restart unless-stopped \
+  --mount type=volume,src=chunkify-analytics-data,dst=/data \
+  -p 127.0.0.1:4174:4174 \
+  -e COLLECTOR_ALLOWED_ORIGINS=https://player.example.com \
+  chunkify-analytics-collector:local
+```
+
+The image runs as UID/GID `10001:10001`. A new named volume inherits the private
+`/data` directory from the image, allowing `init` and `serve` to run without root.
+Always mount the same volume at `/data` for the server and administrative commands.
+Deleting a container keeps its named volume; deleting the volume removes the data.
+See Docker's [volume documentation](https://docs.docker.com/engine/storage/volumes/).
+
+The first build compiles bundled DuckDB and needs several minutes, sufficient free
+disk space, and memory for a C++ compiler. It defaults to two compilation jobs;
+use `--build-arg BUILD_JOBS=1` on a smaller build machine. Rust, Debian base images,
+and Cargo dependencies are pinned. Runtime packages use a dated
+[Debian snapshot](https://snapshot.debian.org/). Update those pins deliberately for
+dependency and security updates. The final image contains no Rust/C++ toolchain.
+No prebuilt image is published by this change.
+
+Read the generated credentials locally:
+
+```sh
+docker run --rm \
+  --mount type=volume,src=chunkify-analytics-data,dst=/data,readonly \
+  --entrypoint cat chunkify-analytics-collector:local /data/keys.json
+```
+
+Keep this output private. Only `ingest_key` belongs in browser code.
+Configuration uses the same environment variables as the executable. The image
+defaults to `COLLECTOR_BIND=0.0.0.0:4174` and `COLLECTOR_DATA_DIR=/data`.
+The example publishes the port on host loopback for a host-based HTTPS ingress.
+An ingress in another container can instead share a Docker network and reach
+`chunkify-analytics:4174` without a published host port.
+
+Check health and operational logs with:
+
+```sh
+docker inspect --format '{{.State.Health.Status}}' chunkify-analytics
+docker logs chunkify-analytics
+curl --fail http://127.0.0.1:4174/healthz
+```
+
+The image's health check calls `/healthz`, including its database check, at the
+configured bind address. `unhealthy` alone does not restart a Docker container.
+The collector runs directly as PID 1, receives SIGTERM, drains requests, and
+checkpoints its database. Allow at least 20 seconds when stopping it, and longer
+if a larger database needs more time to checkpoint:
+
+```sh
+docker stop --time 20 chunkify-analytics
+```
+
+For an upgrade, stop the old container, take a backup, remove that stopped
+container, and run the new image with the same volume and environment settings.
+Run `init` only for a new installation. Keep one running writer per volume.
+
+The service supports a read-only root filesystem when `/data` stays writable.
+Optional run settings are `--read-only --tmpfs /tmp:rw,nosuid,noexec,size=64m
+--cap-drop=ALL --security-opt=no-new-privileges`. For a host bind mount instead of
+a named volume, create its directory with owner `10001:10001` and mode `0700`
+before mounting it at `/data`.
+
+### Container administration and backups
+
+Stop the server first. For example, rotate the ingest key with:
+
+```sh
+docker stop --time 20 chunkify-analytics
+docker run --rm \
+  --mount type=volume,src=chunkify-analytics-data,dst=/data \
+  chunkify-analytics-collector:local rotate-key ingest
+docker start chunkify-analytics
+```
+
+Use `rotate-key read` or `delete-viewer 'viewer-123'` in the same position for the
+other commands. Read and distribute the replacement credential as described below.
+
+To back up the named volume, keep the server stopped until the archive is complete.
+Choose a new backup filename and keep its contents private:
+
+```sh
+docker stop --time 20 chunkify-analytics
+umask 077
+docker run --rm \
+  --mount type=volume,src=chunkify-analytics-data,dst=/data,readonly \
+  --entrypoint tar chunkify-analytics-collector:local -C /data -czf - . \
+  > analytics-backup.tar.gz
+docker start chunkify-analytics
+```
+
+Restore to a new, unused named volume:
+
+```sh
+docker volume create chunkify-analytics-restored
+docker run --rm -i \
+  --mount type=volume,src=chunkify-analytics-restored,dst=/data \
+  --entrypoint tar chunkify-analytics-collector:local -C /data -xzpf - \
+  < analytics-backup.tar.gz
+```
+
+Start the collector using that restored volume without running `init`. Follow the
+same version, retention, deletion, and credential rules in the backup section below.
 
 ## Send analytics
 
@@ -102,7 +221,7 @@ Both ingestion endpoints share the rate limit. A batch consumes one request.
 The service rejects excess ingestion requests with HTTP 429 and `Retry-After: 1`.
 The database queue holds at most 64 waiting operations; a full queue returns 503.
 The SDK continues to send once without retrying. Limits are configurable safeguards,
-not a measured throughput guarantee. Configure connection and request timeouts at
+not a throughput guarantee. Configure connection and request timeouts at
 your ingress before exposing this development service publicly.
 
 ## HTTP API
@@ -343,3 +462,52 @@ collector executable when running `npm run test:collector`. The upgrade test wri
 through that service, stops it abruptly, starts the current service with the same
 data directory, and checks the old records, keys, new OTLP writes, and another restart.
 Without this setting, the upgrade test is skipped.
+
+### Container checks and capacity measurements
+
+With Docker running, build and exercise the image from the repository root:
+
+```sh
+npm run test:collector:docker
+```
+
+This uses the real native and OTLP adapters, verifies non-root execution and health
+reporting, stops the container gracefully, and creates a replacement with the same
+volume. It checks the original credentials, raw events, OTLP context, deduplication,
+and summary after replacement. The dedicated CI container job runs this test.
+Test resources use unique names and are removed afterward. To test another prebuilt
+image, set `COLLECTOR_IMAGE` when running the Node test directly.
+
+Run the capacity benchmark separately; it is not a CI speed threshold:
+
+```sh
+COLLECTOR_LOAD_REPORT=/tmp/collector-capacity.json npm run benchmark:collector
+```
+
+Each case starts with an empty named volume and a container limited to two CPUs
+and 2 GiB of RAM with no extra swap. It measures native JSON and OTLP JSON, one
+event per request, at target rates of 50 and 100 requests per second and with
+eight unpaced clients. Each case lasts 30 seconds by default; set
+`COLLECTOR_LOAD_SECONDS` from 5 to 300 to change that duration. The benchmark raises
+the ingestion limit to 10,000 requests per second to measure storage capacity.
+The normal service default remains 100.
+
+Events come from real SDK playback attempts across ten videos and up to 1,000
+viewer IDs. The fixture starts and destroys each attempt without playing media,
+producing start, state-change, and final events with zero playing time. A summary
+query runs approximately once a second alongside ingestion. At most eight requests
+are in flight; slower responses reduce the achieved rate rather than building an
+unbounded client queue. Each case replaces the container and reads every page to
+verify all acknowledged events survived.
+
+The JSON report contains achieved throughput, all-request latency percentiles,
+HTTP/transport failures, summary latency, sampled process RSS, checkpointed data
+directory size, image identity, and hardware details. RSS excludes filesystem
+cache and is sampled rather than an exact peak. Storage size is logical bytes
+after a checkpoint. No keys are included in the report.
+
+These short runs on a fresh database do not establish capacity for 30 days of
+retained traffic, large custom payloads, gzip batches, slow disks, or many dashboard
+queries. Measure with the intended retention, payloads, and hardware before setting
+deployment limits. The [16 October 2026 capacity report](capacity.md) records the
+measured setup and results, including persistence verification after each run.

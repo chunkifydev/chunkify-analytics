@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { getHeapStatistics } from "node:v8";
 import { captureWorkload, measure, safety, thresholds, hostFreeBytes } from "./benchmark.mjs";
 import { docker, image } from "./support.mjs";
+import { checkEngineBudget, containerLimits } from "./resources.mjs";
 
 const execute = promisify(execFile);
 const generator_runtime = { exec_args: process.execArgv, v8_heap_limit_bytes: getHeapStatistics().heap_size_limit };
@@ -82,17 +83,18 @@ if (compareReads) {
   ];
 }
 if (process.argv.includes("--list")) {
-  console.log(JSON.stringify({ cases: plan, thresholds, safety, generator_runtime }, null, 2));
+  console.log(JSON.stringify({ cases: plan, thresholds, safety, generator_runtime, container_limits: containerLimits }, null, 2));
 } else {
   const controller = new AbortController();
   const interrupt = () => { controller.abort(); console.error("Stopping traffic and cleaning up benchmark resources..."); };
   process.on("SIGINT", interrupt);
   process.on("SIGTERM", interrupt);
   const info = JSON.parse(await docker(["info", "--format", "{{json .}}"]));
+  checkEngineBudget(info);
   const inspected = JSON.parse(await docker(["image", "inspect", "--format", "{{json .}}", image]));
   const git = async (...args) => (await execute("git", args)).stdout.trim();
   const runnerHash = createHash("sha256");
-  for (const file of ["load.mjs", "load-worker.mjs", "benchmark.mjs", "workload.mjs", "support.mjs"]) {
+  for (const file of ["load.mjs", "load-worker.mjs", "benchmark.mjs", "workload.mjs", "support.mjs", "resources.mjs"]) {
     runnerHash.update(file).update(await readFile(new URL(file, import.meta.url)));
   }
   const collector_files_sha256 = {};
@@ -101,7 +103,7 @@ if (process.argv.includes("--list")) {
     collector_files_sha256[file] = createHash("sha256").update(await readFile(`services/analytics-collector/${file}`)).digest("hex");
   }
   const report = {
-    report_version: 5, measured_at: new Date().toISOString(), generator_runtime,
+    report_version: 6, measured_at: new Date().toISOString(), generator_runtime,
     source: { git_head: await git("rev-parse", "HEAD"),
       collector_source_commit: await git("log", "-1", "--format=%H", "--", "services/analytics-collector/src"),
       collector_source_modified: Boolean(await git("status", "--porcelain", "--", "services/analytics-collector/src", "services/analytics-collector/Cargo.lock")),
@@ -113,7 +115,7 @@ if (process.argv.includes("--list")) {
       other_running_containers_at_start: info.ContainersRunning },
     image: { id: inspected.Id, architecture: inspected.Architecture, size_bytes: inspected.Size },
     storage: "local Docker named volume; loopback HTTP; no TLS or artificial network delay",
-    container_limits: { cpus: 2, memory_mib: 2048, swap_mib: 0 }, thresholds, safety,
+    container_limits: containerLimits, thresholds, safety,
     limitations: [
       "Short probes identify candidate rates, not sustained or 30-day capacity.",
       "Shared host workloads may affect results; no other containers are stopped.",

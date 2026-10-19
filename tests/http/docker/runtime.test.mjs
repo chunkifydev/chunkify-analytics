@@ -32,3 +32,18 @@ test("the worker rejects an oversized heap before starting a benchmark", async (
   await assert.rejects(execute(process.execPath, ["--max-old-space-size=1024", worker, "--list"]),
     (error) => error.code === 1 && /Generator heap exceeds the 768 MiB budget/.test(error.stderr));
 });
+
+test("resource overrides configure the container and preserve proportional memory headroom", async () => {
+  const { stdout } = await execute(process.execPath, [command, "--list"], {
+    env: { ...process.env, COLLECTOR_LOAD_CPUS: "2", COLLECTOR_LOAD_MEMORY_MIB: "4096" },
+  });
+  const plan = JSON.parse(stdout);
+  assert.deepEqual(plan.container_limits, { cpus: 2, memory_mib: 4096, swap_mib: 0 });
+  assert.equal(plan.safety.max_container_memory_mib, 3600);
+  assert.equal(plan.safety.max_generator_rss_mib, 1024);
+  for (const [name, value] of [["COLLECTOR_LOAD_CPUS", "0"], ["COLLECTOR_LOAD_MEMORY_MIB", "32768"]]) {
+    await assert.rejects(execute(process.execPath, [command, "--list"], {
+      env: { ...process.env, [name]: value },
+    }), (error) => error.code === 1 && error.stderr.includes(name));
+  }
+});

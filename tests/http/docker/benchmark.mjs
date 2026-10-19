@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 import { containerCollector, docker, image } from "./support.mjs";
 import { captureWorkload, originalOtlp, otlpBody } from "./workload.mjs";
+import { containerMemoryGuardMiB, parseMemoryStats, resources } from "./resources.mjs";
 
 export { captureWorkload };
 const compress = promisify(gzip);
@@ -18,10 +19,10 @@ function limit(name, fallback, min, max) {
   return value;
 }
 export const safety = { max_data_mib: limit("COLLECTOR_LOAD_MAX_DATA_MIB", 512, 512, 4096), min_free_disk_mib: 4096,
-  max_container_memory_mib: 1800, max_generator_rss_mib: 1024,
+  max_container_memory_mib: containerMemoryGuardMiB, max_generator_rss_mib: 1024,
   max_unique_events: limit("COLLECTOR_LOAD_MAX_EVENTS", 200000, 1, 1000000), request_timeout_ms: 10000, max_schedule_lag_ms: 50,
   max_generator_pause_ms: 5000 };
-export const resources = ["--cpus=2", "--memory=2g", "--memory-swap=2g"];
+export { resources };
 
 export function distribution(values) {
   const sorted = [...values].sort((a, b) => a - b);
@@ -38,7 +39,7 @@ export async function hostFreeBytes() {
 // does not. These are sampled values, not continuous profiling or exact peaks.
 async function sample(server) {
   const raw = await docker(["exec", server.name, "sh", "-c",
-    "cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.stat /proc/1/status; du -sb /data; df -Pk /data; find /data -name '*.wal' -printf 'wal_bytes %s\\n'"]);
+    "cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.stat /proc/1/status /sys/fs/cgroup/memory.stat /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.pressure; du -sb /data; df -Pk /data; find /data -name '*.wal' -printf 'wal_bytes %s\\n'"]);
   const disk = raw.split("\n").find((line) => /^\S+\s+\d+\s+\d+\s+\d+\s+\d+%\s/.test(line))?.trim().split(/\s+/);
   assert.ok(disk, "container disk measurement must be available");
   const memory = process.memoryUsage();
@@ -50,7 +51,7 @@ async function sample(server) {
     volume_free_bytes: Number(disk[3]) * 1024, host_free_bytes: await hostFreeBytes(),
     generator_rss_bytes: memory.rss, generator_heap_used_bytes: memory.heapUsed,
     generator_heap_total_bytes: memory.heapTotal, generator_external_bytes: memory.external,
-    generator_array_buffer_bytes: memory.arrayBuffers };
+    generator_array_buffer_bytes: memory.arrayBuffers, ...parseMemoryStats(raw) };
   for (const [key, value] of Object.entries(point)) {
     assert.ok(Number.isFinite(value) && value >= 0, `Resource sample unavailable: ${key}. The benchmark requires Linux cgroup v2.`);
   }
@@ -269,12 +270,12 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     const waitForQueue = async (started = performance.now()) => {
       while (true) {
         const point = await queueSample();
-        if (!point || point.pending_requests === 0) return performance.now() - started;
-        if (performance.now() - started > 20000) { abortReason ??= "Queue did not drain within 20 seconds"; return performance.now() - started; }
+        if (!point || point.pending_requests === 0) return { completed: true, elapsed_ms: performance.now() - started, last_sample: point };
+        if (performance.now() - started > 20000) { abortReason ??= "Queue did not drain within 20 seconds"; return { completed: false, elapsed_ms: performance.now() - started, last_sample: point }; }
         const resources = await sample(server);
         samples.push({ phase: trafficStart === null ? "preload_drain" : "queue_drain", at_seconds: trafficStart === null ? 0 : +((performance.now() - trafficStart) / 1000).toFixed(3), ...resources });
         const reason = checkSafety(resources);
-        if (reason) { abortReason ??= `Queue drain safety stop: ${reason}`; return performance.now() - started; }
+        if (reason) { abortReason ??= `Queue drain safety stop: ${reason}`; return { completed: false, elapsed_ms: performance.now() - started, last_sample: point }; }
         await delay(100);
       }
     };
@@ -409,7 +410,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     running = false;
     const queueDrainStarted = performance.now();
     const queueAtTrafficEnd = await queueSample();
-    const queueDrainMs = await waitForQueue(queueDrainStarted);
+    const queueDrain = await waitForQueue(queueDrainStarted);
     await monitoring;
     const after = await sample(server);
     samples.push({ at_seconds: +((performance.now() - start) / 1000).toFixed(3), ...after });
@@ -464,7 +465,10 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
         duplicate_acknowledgements: records.acknowledged - (acknowledged.size - preloadIds.size),
         newly_acknowledged_per_second: +((acknowledged.size - preloadIds.size) / elapsed).toFixed(2),
         persisted_new: checked.persisted_new, persisted_without_ack: checked.persisted_without_ack },
-      durable_queue: queueEnabled ? { samples: queueSamples, after_http_completion: queueAtTrafficEnd, drain_ms: +queueDrainMs.toFixed(2) } : null,
+      durable_queue: queueEnabled ? { samples: queueSamples, after_http_completion: queueAtTrafficEnd,
+        drain_completed: queueDrain.completed, after_drain_wait: queueDrain.last_sample,
+        drain_ms: queueDrain.completed ? +queueDrain.elapsed_ms.toFixed(2) : null,
+        drain_wait_ms: +queueDrain.elapsed_ms.toFixed(2) } : null,
       request_latency: latency, successful_request_latency: successfulLatency, schedule_lag: lag,
       preparation_latency: distribution(preparation), queries, collector_profile: collectorProfile, reader_profile: readerProfile, max_inflight: maxInflight,
       payload: { total_wire_bytes: wireBytes, total_decoded_bytes: decodedBytes,

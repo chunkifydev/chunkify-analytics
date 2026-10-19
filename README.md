@@ -701,6 +701,8 @@ minutes. Other running containers are counted in the report and left running.
 | Environment variable | Default | Allowed values |
 | --- | --- | --- |
 | `COLLECTOR_LOAD_SECONDS` | `30` | 5..300 seconds per case |
+| `COLLECTOR_LOAD_CPUS` | `2` | 1..16 CPUs, no more than the Docker engine provides |
+| `COLLECTOR_LOAD_MEMORY_MIB` | `2048` | 1024..16384 MiB hard container limit with swap disabled. Must leave at least 512 MiB for the Docker VM; concurrent workloads require additional headroom. |
 | `COLLECTOR_LOAD_CASES` | all cases | Comma-separated names from the table |
 | `COLLECTOR_LOAD_PRELOAD_EVENTS` | `50000` | 0..100000, used by `preloaded-mixed` and `preloaded-native-*`; preload and timed traffic share the 200,000 unique-event guard |
 | `COLLECTOR_LOAD_CONCURRENCY` | `128` | 1..4096 requests in flight; higher concurrency still uses the same memory and disk guards |
@@ -762,8 +764,15 @@ and paginated raw-event reads run concurrently. Their latency distributions cove
 successful responses, and failures have separate counts. Burst phases drain
 outstanding requests between phases and report the drain duration.
 
-Resource sampling requires Linux cgroup v2, including inside Docker Desktop.
-Samples include process RSS, cgroup memory including filesystem cache,
+Resource sampling requires Linux cgroup v2 and memory pressure accounting,
+including inside Docker Desktop. Samples include process RSS, cgroup memory,
+anonymous memory, file cache, inactive file pages, dirty/writeback pages, memory
+limit/OOM counters and cumulative `some`/`full` pressure stall time in microseconds.
+These categories can overlap; do not add them together or assume all inactive
+file pages are immediately reclaimable. The
+[Linux cgroup documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html)
+defines these counters, and [PSI documentation](https://docs.kernel.org/accounting/psi.html)
+explains stall accounting. Samples also include
 container CPU, data-directory and WAL sizes, free host/volume disk, and generator
 RSS, V8 heap usage/capacity, external memory and array-buffer memory. The generator
 also reports CPU and event-loop delay. Sampling incurs Docker
@@ -795,10 +804,13 @@ clean shutdown. The runner also verifies the exit status and persisted records.
 SIGKILL produces no shutdown profile. Compare runs with profiling enabled on both
 versions, because instrumentation itself has a cost.
 
-The runner stops at a sampled 512 MiB data directory, less than 4 GiB free disk
+By default, the runner stops at a sampled 512 MiB data directory, less than 4 GiB free disk
 on either the host or volume, 1,800 MiB container memory, 1 GiB generator RSS, or
 200,000 submitted unique events in one case. HTTP requests time out after ten
-seconds. Docker also enforces the hard 2 GiB memory limit. Safety stops and
+seconds. Docker also enforces the configured hard memory limit without swap.
+Changing `COLLECTOR_LOAD_MEMORY_MIB` scales the early-stop guard by the same
+1,800/2,048 ratio, rounded down. A 4 GiB limit therefore has a 3,600 MiB guard.
+The report records both limits. Safety stops and
 correctness failures make the command exit unsuccessfully and retain the partial
 report. Temporary containers and volumes are removed in cleanup. SIGINT/SIGTERM
 stop admission and trigger cleanup; a forced termination can leave test resources.
@@ -932,8 +944,10 @@ ceiling. Explicit overrides allow `COLLECTOR_LOAD_MAX_EVENTS=1000000` and
 50,000-event preload. Event limits cannot exceed one million, and the data limit
 cannot exceed 4 GiB. Preload and reused fixtures count toward the event limit.
 Before starting, free host disk must cover the data budget plus the 4 GiB floor.
-Runtime disk, 1,800 MiB container-memory and 1,024 MiB generator-memory guards
-remain active. The container still has a hard 2 GiB memory limit without swap.
+Runtime disk, proportional container-memory and 1,024 MiB generator-memory guards
+remain active. The default container limit is 2 GiB without swap; set
+`COLLECTOR_LOAD_MEMORY_MIB=4096` to compare a 4 GiB budget without changing the
+CPU limit or collector workload.
 
 The public `load.mjs` command launches its worker with a 512 MiB old-generation
 budget and a 64 MiB semi-space budget. On the tested Node 24 runtime this gives
@@ -956,6 +970,12 @@ requests use their intended submission time. Overall latency and full-delivery
 thresholds remain unchanged. `COLLECTOR_LOAD_SECONDS=300` sets five minutes;
 enable both `COLLECTOR_LOAD_DURABLE_QUEUE=1` and `COLLECTOR_LOAD_READ_WORKER=1` to
 exercise the two optional features together.
+
+Report version 6 also distinguishes completed queue drains from interrupted waits.
+`durable_queue.drain_completed` is true only after an empty queue sample.
+`after_drain_wait` preserves the last sample, `drain_wait_ms` records elapsed wait
+time in either case, and `drain_ms` is null when the wait stops before observing
+an empty queue. Graceful shutdown and restart verification remain separate checks.
 
 The [five-minute stability attempt](stability.md) stopped after 101 seconds when
 the generator exceeded its memory guard. All acknowledged events survived

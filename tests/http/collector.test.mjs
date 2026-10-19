@@ -1124,6 +1124,58 @@ test("OTLP gzip batches retain resource and scope context and deduplicate within
   assert.deepEqual((await server.get("/v1/events")).events, stored);
 });
 
+test("large OTLP batches decode promptly and preserve each scope's original metadata", async (t) => {
+  const event = { ...sdkEvents()[0], browser_context: {
+    schema_version: 1, browser_name: "Chrome", browser_version: "130.0.0.0",
+    os_name: "macOS", os_version: "14.6", device_type: "desktop", language: "fr-FR",
+    timezone: "Europe/Paris", screen_width_px: 1920, screen_height_px: 1080,
+  } };
+  const [template] = await otlpRequests([event]);
+  const log = template.resourceLogs[0].scopeLogs[0].logRecords[0];
+  const resource = { resource: { attributes: [{ key: "service.name", value: { stringValue: "batch-test" } }] },
+    schemaUrl: "https://example.test/resource", future_field: { retained: true } };
+  const expected = new Map();
+  const scopeLogs = ["first", "second"].map((name) => {
+    const metadata = { scope: { name, version: "1" }, schemaUrl: `https://example.test/${name}`,
+      future_field: { retained: name } };
+    const logRecords = Array.from({ length: 500 }, () => {
+      const event_id = crypto.randomUUID();
+      const record = { ...log, attributes: log.attributes.map((attribute) => attribute.key === "event_id"
+        ? { key: "event_id", value: { stringValue: event_id } } : attribute) };
+      expected.set(event_id, { event: { ...event, event_id },
+        otlp: { resource_logs: resource, scope_logs: metadata, log_record: record } });
+      return record;
+    });
+    return { ...metadata, logRecords };
+  });
+  const server = await collector(t, { COLLECTOR_MAX_OTLP_RECORDS: "1000", COLLECTOR_BATCH_MAX_EVENTS: "1000",
+    COLLECTOR_MAX_BODY_BYTES: "16777216", COLLECTOR_BATCH_MAX_BYTES: "16777216",
+    COLLECTOR_QUEUE_MAX_BYTES: "67108864" });
+  // A generous request deadline catches repeated whole-batch copies before persistence.
+  // Kill a failed test server promptly rather than waiting for the expensive decode.
+  try {
+    const response = await fetch(`${server.url}/v1/logs`, { method: "POST",
+      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+      body: JSON.stringify({ resourceLogs: [{ ...resource, scopeLogs }] }), signal: AbortSignal.timeout(10000) });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.deepEqual(await response.json(), {});
+  } catch (error) {
+    await server.stop("SIGKILL");
+    throw error;
+  }
+  const records = await server.get("/v1/events?limit=1000");
+  assert.equal(records.next_cursor, null);
+  assert.equal(records.events.length, expected.size);
+  for (const record of records.events) {
+    const original = expected.get(record.event.event_id);
+    assert.deepEqual(record.event, original.event);
+    assert.deepEqual(record.otlp, original.otlp);
+  }
+  await server.stop();
+  await server.start();
+  assert.deepEqual(await server.get("/v1/events?limit=1000"), records);
+});
+
 test("OTLP rejects invalid or excessive exports atomically with protocol errors", async (t) => {
   const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "32768", COLLECTOR_MAX_OTLP_RECORDS: "2" });
   const event = sdkEvents()[0];

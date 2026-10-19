@@ -991,3 +991,10 @@ container-memory guard. All 377,112 acknowledged events survived restart, and
 aggregate latency targets passed. It still failed the planned five-minute run;
 the report distinguishes cgroup memory from process RSS and identifies the next
 memory measurements and resource comparison.
+
+The subsequent [4 GiB comparison](capacity-4g.md) completed five minutes with
+2 CPUs, but failed the capacity targets. It averaged 2,832.35 successful
+requests/s, returned 48,411 HTTP 503 responses as the durable queue approached
+its byte limit, and exceeded the dashboard p95 targets. All 900,890 acknowledged
+events survived restart. Memory counters, queue growth and database profiles
+identify the next optimization work in that report.

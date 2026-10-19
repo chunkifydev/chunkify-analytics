@@ -78,7 +78,7 @@ function assertSummary(actual, expected) {
   assert.ok(Math.abs(actual.total_playing_time_ms - expected.total_playing_time_ms) < 0.01, "cumulative playtime must match retained view measurements");
 }
 
-async function verify(server, sent, acknowledged, preloadIds) {
+async function verify(server, sent, acknowledged, preloadIds, workload) {
   const retained = new Map();
   let cursor;
   do {
@@ -86,13 +86,23 @@ async function verify(server, sent, acknowledged, preloadIds) {
     for (const record of page.events) {
       const id = record.event.event_id;
       assert.ok(!retained.has(id), "pagination must not repeat events");
-      const expected = sent.get(id);
-      assert.ok(expected, "stored event must have been submitted");
+      const submitted = sent.get(id);
+      assert.ok(submitted, "stored event must have been submitted");
+      const expected = workload.replay(submitted.replay);
       assert.deepEqual(record.event, expected.event, "full canonical payload must survive restart");
-      if (expected.format === "otlp") assert.deepEqual(record.otlp, originalOtlp(expected), "original OTLP context must survive restart");
+      if (expected.event.browser_context) {
+        for (const [key, value] of Object.entries(expected.event.browser_context)) {
+          assert.deepEqual(record.event_context[key], value, "flat browser context must survive restart");
+        }
+        assert.ok(record.event_context.client_ip, "request IP must remain alongside browser context");
+      }
+      if (submitted.format === "otlp") assert.deepEqual(record.otlp, originalOtlp(expected), "original OTLP context must survive restart");
       else assert.equal(record.otlp, undefined);
       assert.ok(Number.isFinite(Date.parse(record.received_at)));
-      retained.set(id, expected);
+      // Full payloads were checked above. Only these fields are needed for the
+      // independent summary calculations after pagination finishes.
+      const { event_name, view_id, video_id, viewer_id, sequence, playing_time_ms } = expected.event;
+      retained.set(id, { event: { event_name, view_id, video_id, viewer_id, sequence, playing_time_ms } });
     }
     cursor = page.next_cursor;
   } while (cursor);
@@ -114,10 +124,11 @@ async function verify(server, sent, acknowledged, preloadIds) {
 
 export async function measure(input, workload, { signal } = {}) {
   const config = { batch_size: 1, gzip: false, duplicate_every: 0, large_every: 0,
-    preload: 0, concurrency: 128, shutdown: "stop", rate_limit: 10000, ...input };
+    preload: 0, concurrency: 128, shutdown: "stop", rate_limit: 10000, queries: true, profile: false, ...input };
   if (await hostFreeBytes() < safety.min_free_disk_mib * mib) throw new Error("Benchmark requires at least 4 GiB free host disk");
   const settings = { COLLECTOR_INGEST_PER_SECOND: String(config.rate_limit), COLLECTOR_MAX_BODY_BYTES: "1048576",
-    COLLECTOR_MAX_OTLP_RECORDS: "100", COLLECTOR_RETENTION_SECONDS: "2592000", COLLECTOR_RETENTION_INTERVAL_SECONDS: "5" };
+    COLLECTOR_MAX_OTLP_RECORDS: "100", COLLECTOR_RETENTION_SECONDS: "2592000", COLLECTOR_RETENTION_INTERVAL_SECONDS: "5",
+    COLLECTOR_PROFILE: String(config.profile), ...config.write_settings };
   const server = await containerCollector({ resources, settings });
   const sent = new Map();
   const acknowledged = new Set();
@@ -158,7 +169,9 @@ export async function measure(input, workload, { signal } = {}) {
       requests.sent++;
       records.submitted += batch.length;
     }
-    for (const record of batch) if (!sent.has(record.event.event_id)) sent.set(record.event.event_id, { ...record, format });
+    for (const record of batch) if (!sent.has(record.event.event_id)) {
+      sent.set(record.event.event_id, { replay: record.replay, format });
+    }
     const start = performance.now();
     try {
       const response = await fetch(`${server.url}${format === "native" ? "/v1/events" : "/v1/logs"}`, {
@@ -221,7 +234,7 @@ export async function measure(input, workload, { signal } = {}) {
     };
     monitoring = (async () => {
       while (running) {
-        await Promise.all([
+        if (config.queries) await Promise.all([
           query("summary", "/v1/summary"), query("videos", "/v1/videos?limit=10"),
           query("events", `/v1/events?limit=100${eventCursor ? `&cursor=${encodeURIComponent(eventCursor)}` : ""}`),
         ]);
@@ -295,13 +308,16 @@ export async function measure(input, workload, { signal } = {}) {
     abortReason ??= checkSafety(after);
     const stopStart = performance.now();
     const stopped = await server.stop(config.shutdown);
+    const profileLine = server.lastLogs.split("\n").find((line) => line.startsWith('{"type":"collector_profile"'));
+    const collectorProfile = profileLine ? JSON.parse(profileLine) : null;
+    if (config.profile && config.shutdown === "stop") assert.ok(collectorProfile, "collector profile must be available after graceful shutdown");
     const shutdownMs = performance.now() - stopStart;
     assert.equal(stopped.OOMKilled, false, "benchmark must stay within memory limits");
     assert.equal(stopped.ExitCode, config.shutdown === "kill" ? 137 : 0);
     const restartStart = performance.now();
     await server.start();
     const restartMs = performance.now() - restartStart;
-    const checked = await verify(server, sent, acknowledged, preloadIds);
+    const checked = await verify(server, sent, acknowledged, preloadIds, workload);
     await server.stop();
     const dataBytes = Number((await docker(["run", "--rm", "--mount", `type=volume,src=${server.volume},dst=/data,readonly`,
       "--entrypoint", "du", image, "-sb", "/data"])).split(/\s/)[0]);
@@ -315,7 +331,7 @@ export async function measure(input, workload, { signal } = {}) {
     const pass = !abortReason && requests.sent / requests.scheduled >= thresholds.scheduled_request_fraction &&
       requests.successful / requests.sent >= thresholds.successful_request_fraction && successfulLatency.p95_ms !== null &&
       successfulLatency.p95_ms <= thresholds.ingestion_p95_ms && lag.p95_ms <= thresholds.schedule_lag_p95_ms &&
-      !queryFailures && Object.values(queries).every((value) => value.latency.count > 0 && value.latency.p95_ms <= thresholds.query_p95_ms);
+      !queryFailures && (!config.queries || Object.values(queries).every((value) => value.latency.count > 0 && value.latency.p95_ms <= thresholds.query_p95_ms));
     const peak = (field) => Math.max(before[field], ...samples.map((point) => point[field]));
     return { ...config, collector_settings: settings, completed: !abortReason, abort_reason: abortReason,
       elapsed_seconds: +elapsed.toFixed(3), offered_seconds: offeredSeconds, phases: phaseResults,
@@ -327,7 +343,7 @@ export async function measure(input, workload, { signal } = {}) {
         newly_acknowledged_per_second: +((acknowledged.size - preloadIds.size) / elapsed).toFixed(2),
         persisted_new: checked.persisted_new, persisted_without_ack: checked.persisted_without_ack },
       request_latency: latency, successful_request_latency: successfulLatency, schedule_lag: lag,
-      preparation_latency: distribution(preparation), queries, max_inflight: maxInflight,
+      preparation_latency: distribution(preparation), queries, collector_profile: collectorProfile, max_inflight: maxInflight,
       payload: { total_wire_bytes: wireBytes, total_decoded_bytes: decodedBytes,
         mean_wire_bytes_per_request: requests.sent ? Math.round(wireBytes / requests.sent) : null },
       resources: { samples, peak_process_rss_mib: +(peak("process_rss_bytes") / mib).toFixed(2),
@@ -339,7 +355,9 @@ export async function measure(input, workload, { signal } = {}) {
         generator_event_loop_p99_ms: +(loopDelay.percentile(99) / 1e6).toFixed(2) },
       restart: { shutdown_ms: +shutdownMs.toFixed(2), startup_ms: +restartMs.toFixed(2) },
       summary: checked.summary, verification: { ...checked.verification, shutdown: config.shutdown },
-      meets_probe_thresholds: pass, sustainable_capacity_established: false };
+      meets_probe_thresholds: pass,
+      meets_full_delivery_thresholds: pass && requests.sent === requests.scheduled && requests.successful === requests.sent,
+      sustainable_capacity_established: false };
   } finally {
     running = false;
     signal?.removeEventListener("abort", interrupt);

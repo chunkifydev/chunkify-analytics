@@ -3,9 +3,9 @@ import test from "node:test";
 import { captureWorkload, measure } from "./benchmark.mjs";
 
 test("benchmark distinguishes duplicate records from new events and verifies playback after a crash", { timeout: 120000 }, async () => {
-  const workload = await captureWorkload();
+  const workload = await captureWorkload({ browserContext: true });
   const result = await measure({ name: "accounting-check", format: "mixed", batch_size: 5,
-    gzip: true, duplicate_every: 2, rate: 10, seconds: 2, preload: 20, shutdown: "kill" }, workload);
+    gzip: true, duplicate_every: 2, large_every: 3, rate: 10, seconds: 2, preload: 20, shutdown: "kill" }, workload);
   assert.equal(result.completed, true);
   assert.equal(result.requests.scheduled, 20);
   assert.equal(result.requests.sent + result.requests.skipped_late + result.requests.skipped_concurrency, 20);
@@ -26,7 +26,7 @@ test("benchmark distinguishes duplicate records from new events and verifies pla
 
 test("benchmark reports rate-limited OTLP records separately from accepted records", { timeout: 120000 }, async () => {
   const result = await measure({ name: "rejection-check", format: "otlp", batch_size: 5,
-    rate: 40, rate_limit: 10, seconds: 2 }, await captureWorkload());
+    rate: 40, rate_limit: 10, seconds: 2, profile: true, queries: false }, await captureWorkload());
   assert.equal(result.requests.scheduled, 80);
   assert.equal(result.requests.sent + result.requests.skipped_late + result.requests.skipped_concurrency, 80);
   assert.ok(result.requests.failures[429] > 0);
@@ -35,5 +35,12 @@ test("benchmark reports rate-limited OTLP records separately from accepted recor
   assert.equal(result.records.persisted_new, result.records.acknowledged);
   assert.equal(result.records.duplicate_acknowledgements, 0);
   assert.equal(result.records.uncertain, 0);
+  assert.equal(result.collector_profile.ingest.requests, result.requests.successful);
+  assert.ok(result.collector_profile.ingest.transactions <= result.requests.successful);
+  assert.equal(result.collector_profile.ingest.received_records, result.records.acknowledged);
+  assert.equal(result.collector_profile.ingest.inserted_records, result.records.newly_acknowledged);
+  assert.equal(result.collector_profile.ingest.max_records, result.collector_profile.ingest.max_requests * 5);
+  assert.ok(Object.values(result.queries).every((query) => query.latency.count === 0));
   assert.equal(result.meets_probe_thresholds, false);
+  assert.equal(result.meets_full_delivery_thresholds, false);
 });

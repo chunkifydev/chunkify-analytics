@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { cpus, platform, arch, loadavg } from "node:os";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { captureWorkload, measure, safety, thresholds, hostFreeBytes } from "./benchmark.mjs";
 import { docker, image } from "./support.mjs";
@@ -14,10 +14,30 @@ function integer(name, fallback, min, max) {
 }
 const seconds = integer("COLLECTOR_LOAD_SECONDS", 30, 5, 300);
 const preload = integer("COLLECTOR_LOAD_PRELOAD_EVENTS", 50000, 0, 100000);
-const concurrency = integer("COLLECTOR_LOAD_CONCURRENCY", 128, 1, 512);
+const concurrency = integer("COLLECTOR_LOAD_CONCURRENCY", 128, 1, 4096);
+const profile = integer("COLLECTOR_LOAD_PROFILE", 0, 0, 1) === 1;
+const queries = integer("COLLECTOR_LOAD_QUERIES", 1, 0, 1) === 1;
+const browserContext = integer("COLLECTOR_LOAD_BROWSER_CONTEXT", 0, 0, 1) === 1;
+const write_settings = {};
+for (const [name, fallback, min, max] of [
+  ["BATCH_MAX_EVENTS", 100, 1, 10000], ["BATCH_MAX_BYTES", 1048576, 1, 67108864],
+  ["BATCH_DELAY_MS", 10, 0, 1000], ["QUEUE_MAX_BYTES", 16777216, 1, 268435456],
+  ["QUEUE_MAX_REQUESTS", 256, 1, 4096],
+  ["CHECKPOINT_THRESHOLD_MIB", 16, 1, 1024],
+]) {
+  if (process.env[`COLLECTOR_LOAD_${name}`] !== undefined) {
+    write_settings[`COLLECTOR_${name}`] = String(integer(`COLLECTOR_LOAD_${name}`, fallback, min, max));
+  }
+}
+const insertMode = process.env.COLLECTOR_LOAD_INSERT_MODE;
+if (insertMode !== undefined) {
+  if (!["row", "bulk"].includes(insertMode)) throw new Error("COLLECTOR_LOAD_INSERT_MODE must be row or bulk");
+  write_settings.COLLECTOR_INSERT_MODE = insertMode;
+}
 const cases = [
-  ...[100, 200, 400, 800, 1600].map((rate) => ({ name: `native-${rate}`, format: "native", rate })),
-  ...[100, 200, 400, 800].map((rate) => ({ name: `otlp-${rate}`, format: "otlp", rate })),
+  ...[100, 200, 400, 500, 750, 800, 1000, 1600, 2000, 3000, 4000].map((rate) => ({ name: `native-${rate}`, format: "native", rate })),
+  ...[750, 1000, 2000, 3000].map((rate) => ({ name: `preloaded-native-${rate}`, format: "native", rate, preload })),
+  ...[100, 200, 400, 800, 1000].map((rate) => ({ name: `otlp-${rate}`, format: "otlp", rate })),
   { name: "otlp-batch10", format: "otlp", batch_size: 10, rate: 100 },
   { name: "otlp-batch25", format: "otlp", batch_size: 25, rate: 100 },
   { name: "otlp-batch10-low", format: "otlp", batch_size: 10, rate: 25 },
@@ -36,7 +56,7 @@ const cases = [
 const selected = process.env.COLLECTOR_LOAD_CASES?.split(",");
 for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure COLLECTOR_LOAD_* environment variables.`);
 for (const name of selected ?? []) if (!cases.some((item) => item.name === name)) throw new Error(`Unknown benchmark case: ${name}`);
-const plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, ...item }));
+const plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, profile, queries, write_settings, ...item }));
 if (process.argv.includes("--list")) {
   console.log(JSON.stringify({ cases: plan, thresholds, safety }, null, 2));
 } else {
@@ -51,12 +71,17 @@ if (process.argv.includes("--list")) {
   for (const file of ["load.mjs", "benchmark.mjs", "workload.mjs", "support.mjs"]) {
     runnerHash.update(file).update(await readFile(new URL(file, import.meta.url)));
   }
+  const collector_files_sha256 = {};
+  for (const file of ["Cargo.toml", "Cargo.lock", "Dockerfile",
+    ...(await readdir("services/analytics-collector/src")).filter((file) => file.endsWith(".rs")).sort().map((file) => `src/${file}`)]) {
+    collector_files_sha256[file] = createHash("sha256").update(await readFile(`services/analytics-collector/${file}`)).digest("hex");
+  }
   const report = {
-    report_version: 2, measured_at: new Date().toISOString(),
+    report_version: 3, measured_at: new Date().toISOString(),
     source: { git_head: await git("rev-parse", "HEAD"),
       collector_source_commit: await git("log", "-1", "--format=%H", "--", "services/analytics-collector/src"),
       collector_source_modified: Boolean(await git("status", "--porcelain", "--", "services/analytics-collector/src", "services/analytics-collector/Cargo.lock")),
-      runner_sha256: runnerHash.digest("hex") },
+      runner_sha256: runnerHash.digest("hex"), collector_files_sha256 },
     host: { os: platform(), architecture: arch(), cpu: cpus()[0]?.model, logical_cpus: cpus().length,
       node: process.version, load_average_at_start: loadavg(), free_disk_bytes_at_start: await hostFreeBytes() },
     engine: { version: info.ServerVersion, architecture: info.Architecture, cpus: info.NCPU,
@@ -69,11 +94,12 @@ if (process.argv.includes("--list")) {
       "Short probes identify candidate rates, not sustained or 30-day capacity.",
       "Shared host workloads may affect results; no other containers are stopped.",
       "SDK events and adapter wire output are recorded once, then replayed with new identities.",
+      "Verification retains compact replay descriptions; complete expected payloads are reconstructed and compared after restart.",
       "OTLP batching and gzip model a gateway; SDK adapters still send one event per request.",
       "Request latency starts after serialization/compression; preparation and schedule lag are reported separately.",
       "Resource sampling includes Docker exec overhead and may miss peaks. Container memory includes filesystem cache.",
       "Scheduled retention scans run every five seconds with a 30-day TTL; these runs do not measure deletion of expired data.",
-      "Internal queue depth/wait, commit time and achieved database batch sizes are unavailable without collector instrumentation.",
+      "Optional aggregate profiling covers the process lifetime, including preload, health checks and startup retention, but excludes schema initialization and final checkpoint. It is unavailable after SIGKILL. Queue depth and internal timing percentiles are not measured.",
       "Image ID identifies the executable. Git source provenance is the local checkout and cannot attest to a separately supplied image.",
     ],
     plan, results: [], status: "running",
@@ -81,7 +107,7 @@ if (process.argv.includes("--list")) {
   const save = async () => {
     if (process.env.COLLECTOR_LOAD_REPORT) await writeFile(process.env.COLLECTOR_LOAD_REPORT, `${JSON.stringify(report, null, 2)}\n`);
   };
-  const workload = await captureWorkload();
+  const workload = await captureWorkload({ browserContext });
   report.workload = workload.description;
   await save();
   for (const config of plan) {
@@ -90,7 +116,7 @@ if (process.argv.includes("--list")) {
       const result = await measure(config, workload, { signal: controller.signal });
       report.results.push(result);
       await save();
-      console.error(`${result.requests.successful_per_second} successful requests/s; ${result.records.newly_acknowledged_per_second} new events/s; successful p95 ${result.successful_request_latency.p95_ms}ms; failures ${JSON.stringify(result.requests.failures)}; probe thresholds ${result.meets_probe_thresholds ? "met" : "not met"}`);
+      console.error(`${result.requests.successful_per_second} successful requests/s; ${result.records.newly_acknowledged_per_second} new events/s; successful p95 ${result.successful_request_latency.p95_ms}ms; failures ${JSON.stringify(result.requests.failures)}; probe thresholds ${result.meets_probe_thresholds ? "met" : "not met"}; full-delivery thresholds ${result.meets_full_delivery_thresholds ? "met" : "not met"}`);
       if (!result.completed) {
         report.status = controller.signal.aborted ? "interrupted" : "safety_stopped";
         process.exitCode = controller.signal.aborted ? 130 : 1;

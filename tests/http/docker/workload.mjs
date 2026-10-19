@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
@@ -9,7 +11,7 @@ import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 
 // Record a real SDK playback and the public adapters' wire output before timing.
 // Load generation replays these templates with new identities and timestamps.
-export async function captureWorkload() {
+export async function captureWorkload({ browserContext = false } = {}) {
   const events = [];
   const media = Object.assign(new EventTarget(), { duration: 120, currentTime: 0, src: "", currentSrc: "",
     ownerDocument: { defaultView: null } });
@@ -38,6 +40,16 @@ export async function captureWorkload() {
 
   const captured = [];
   const receiver = createServer(async (request, response) => {
+    if (request.method === "GET") {
+      if (request.url === "/") response.writeHead(200, { "Content-Type": "text/html" }).end("<!doctype html><video></video>");
+      else if (/^\/[a-z-]+\.js$/.test(request.url ?? "")) {
+        try {
+          const source = await readFile(resolve("packages/analytics/dist", request.url.slice(1)));
+          response.writeHead(200, { "Content-Type": "text/javascript" }).end(source);
+        } catch { response.writeHead(404).end(); }
+      } else response.writeHead(404).end();
+      return;
+    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     captured.push(JSON.parse(Buffer.concat(chunks)));
@@ -49,10 +61,29 @@ export async function captureWorkload() {
   // moderately compressible text, not a claim about future browser metadata.
   const padding = Array.from({ length: 256 }, (_, i) => createHash("sha256").update(String(i)).digest("hex")).join("");
   const variants = {};
+  let context;
   try {
     const url = `http://127.0.0.1:${receiver.address().port}`;
+    if (browserContext) {
+      const { chromium } = await import("@playwright/test");
+      const browser = await chromium.launch();
+      try {
+        const page = await browser.newPage({ locale: "fr-FR", timezoneId: "Europe/Paris", viewport: { width: 960, height: 540 } });
+        await page.goto(url);
+        await page.evaluate(async (event) => {
+          const { createChunkifyAdapter } = await import("/chunkify.js");
+          await createChunkifyAdapter(`${location.origin}/native`, { ingestKey: "benchmark-fixture" }).send(event);
+        }, events[0]);
+        // OTLP drops null custom attributes. Use the same representable browser
+        // fields in both replay formats so mixed duplicates have equal payloads.
+        context = Object.fromEntries(Object.entries(captured.shift().browser_context).filter(([, value]) => value !== null));
+        assert.equal(context.browser_name, "Chrome");
+        assert.equal(context.viewport_width_px, 960);
+      } finally { await browser.close(); }
+    }
     for (const size of ["small", "large"]) {
-      const map = size === "large" ? (event) => ({ ...event, benchmark_payload: padding }) : (event) => event;
+      const map = (event) => ({ ...event, ...(context ? { browser_context: context } : {}),
+        ...(size === "large" ? { benchmark_payload: padding } : {}) });
       const native = createHttpAdapter(`${url}/native`, { mapEvent: map });
       const otlp = createOtlpAdapter(`${url}/otlp`, { mapAttributes: map });
       variants[size] = [];
@@ -67,10 +98,23 @@ export async function captureWorkload() {
     }
   } finally { await new Promise((resolve) => receiver.close(resolve)); }
 
+  // Keep captured templates once. A retained replay description contains only
+  // the chosen template and the identity/timestamp fields that changed.
+  const replayRecord = ({ position, large, fields }) => {
+    const template = variants[large ? "large" : "small"][position];
+    const event = { ...template.event, ...fields };
+    const log = { ...template.log, timeUnixNano: String(BigInt(Date.parse(event.occurred_at)) * 1000000n),
+      attributes: template.log.attributes.map((attribute) => Object.hasOwn(fields, attribute.key)
+        ? { key: attribute.key, value: { stringValue: fields[attribute.key] } } : attribute) };
+    return { event, log, scope: template.scope };
+  };
+
   return {
     description: { event_names: [...new Set(events.map((event) => event.event_name))],
       events_per_view: events.length, recorded_playing_time_ms: events.at(-1).playing_time_ms,
-      large_property_bytes: padding.length, videos: 10, viewers: 1000 },
+      large_property_bytes: padding.length, videos: 10, viewers: 1000,
+      browser_context: context ?? null, browser_context_nulls_omitted: Boolean(context) },
+    replay: replayRecord,
     generator() {
       let index = 0;
       let view;
@@ -86,11 +130,8 @@ export async function captureWorkload() {
         const fields = { event_id: randomUUID(), view_id: view, video_id: `video-${viewIndex % 10}`,
           viewer_id: `viewer-${viewIndex % 1000}`,
           occurred_at: new Date(Date.parse(template.event.occurred_at) + offset).toISOString() };
-        const event = { ...template.event, ...fields };
-        const log = { ...template.log, timeUnixNano: String(BigInt(Date.parse(event.occurred_at)) * 1000000n),
-          attributes: template.log.attributes.map((attribute) => Object.hasOwn(fields, attribute.key)
-            ? { key: attribute.key, value: { stringValue: fields[attribute.key] } } : attribute) };
-        return { event, log, scope: template.scope };
+        const replay = { position, large, fields };
+        return { ...replayRecord(replay), replay };
       };
     },
   };

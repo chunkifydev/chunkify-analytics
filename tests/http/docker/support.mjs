@@ -11,6 +11,11 @@ export async function docker(args) {
   return stdout.trim();
 }
 
+async function containerLogs(name) {
+  const { stdout, stderr } = await execute("docker", ["logs", name], { timeout: 60000, maxBuffer: 1024 * 1024 });
+  return `${stdout}\n${stderr}`;
+}
+
 // Docker CLI and public HTTP interfaces only. Never open the database directly.
 export async function containerCollector({ settings = {}, resources = [] } = {}) {
   const volume = `chunkify-collector-test-${randomUUID()}`;
@@ -39,6 +44,7 @@ export async function containerCollector({ settings = {}, resources = [] } = {})
     async stop(signal = "stop") {
       await docker(signal === "kill" ? ["kill", "--signal", "KILL", name] : ["stop", "--time", "20", name]);
       const state = JSON.parse(await docker(["inspect", "--format", "{{json .State}}", name]));
+      server.lastLogs = await containerLogs(name);
       await docker(["rm", name]);
       name = undefined;
       return state;

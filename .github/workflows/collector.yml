@@ -34,6 +34,7 @@ jobs:
           cache: npm
       - run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
       - run: npm ci
+      - run: npm run check:collector:openapi
       - run: npx playwright install --with-deps --only-shell chromium
       - run: cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
       - run: npm run test:collector

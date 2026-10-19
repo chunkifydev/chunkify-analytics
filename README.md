@@ -31,8 +31,19 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
    explicit trusted-proxy configuration are implemented in the collector.
    Browser, OS and device-type filters are available on all read endpoints.
 
-This is a development version. The OpenAPI contract is pending.
-MCP is a separate potential follow-up.
+This is a development version. Multiple projects/tenants and MCP remain separate
+potential follow-ups.
+
+## API contract
+
+The [OpenAPI 3.1.1 document](openapi.json) describes ingestion, read endpoints,
+authentication, filters, pagination, event/context schemas and error responses.
+It also documents the experimental durable queue's acknowledgement and read
+visibility behavior. It describes the current single-project collector.
+
+`npm run check:collector:openapi` validates the document, schemas and examples.
+`npm run test:collector` builds the SDK and collector, then checks the contract
+against real HTTP responses alongside the integration suite. CI runs both checks.
 
 ## Build and run
 

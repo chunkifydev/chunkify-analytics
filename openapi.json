@@ -1,0 +1,3866 @@
+{
+  "openapi": "3.1.1",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Chunkify analytics collector API",
+    "version": "1.0.0",
+    "description": "Self-hosted single-installation analytics collector. This contract describes implemented /v1 endpoints, including explicitly experimental ingestion/reader modes. Multi-tenant accounts, project APIs and MCP are future work and are not exposed here. Public browser ingestion uses a write-only ingest key; private reads use a separate bearer token kept on the dashboard backend. Deploy HTTPS at the ingress; loopback HTTP is for local development. JSON examples contain invented IDs and no credentials.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:4174",
+      "description": "Default local development address. Replace with your HTTPS collector origin."
+    }
+  ],
+  "tags": [
+    {
+      "name": "Ingestion",
+      "description": "Public-key writes and browser preflight."
+    },
+    {
+      "name": "Queries",
+      "description": "Private retained-event and view-cohort queries."
+    },
+    {
+      "name": "Operations",
+      "description": "Health and private ingestion status."
+    }
+  ],
+  "security": [
+    {
+      "readToken": []
+    }
+  ],
+  "paths": {
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Check collector health",
+        "description": "Unauthenticated database/worker health check. Does not expose keys or queue contents.",
+        "tags": [
+          "Operations"
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Healthy database and workers.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                },
+                "example": {
+                  "status": "ok"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage health check failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A worker is unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ingestion": {
+      "get": {
+        "operationId": "getIngestionStatus",
+        "summary": "Inspect ingestion mode and pending queue",
+        "description": "Private operational status. Default direct mode has no queue object. Experimental durable_queue mode reports pending entries, including duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only and is not a new response mode.",
+        "tags": [
+          "Operations"
+        ],
+        "responses": {
+          "200": {
+            "description": "Current ingestion status.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestionStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "operationId": "listEvents",
+        "summary": "Read retained analytics events",
+        "description": "Returns full canonical payloads in ascending server ingestion order, with receipt time and optional context. All filters combine using AND; time filters use event occurred_at, not receipt time. Unknown query parameters are rejected. Private reads have no cross-origin browser access headers.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/event_name"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Event page; next_cursor is null at the end.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "ingestEvent",
+        "summary": "Ingest one native Chunkify event",
+        "description": "Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with COLLECTOR_MAX_BODY_BYTES. Extra fields are preserved. Direct mode acknowledges after the DuckDB transaction commits. Repeated valid event_id values preserve the first payload and context and count once. In experimental durable queue mode, 202 means the SQLite queue entry is committed durably; DuckDB visibility and deduplication happen asynchronously. Queue mode returns 202 even for duplicates. COLLECTOR_EXPERIMENTAL_READ_WORKER changes read scheduling without changing acknowledgment guarantees.",
+        "tags": [
+          "Ingestion"
+        ],
+        "security": [
+          {
+            "ingestKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/origin"
+          },
+          {
+            "$ref": "#/components/parameters/identity_encoding"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalyticsEvent"
+              },
+              "example": {
+                "schema_version": 1,
+                "event_name": "chunkify.video.view_started",
+                "event_id": "35c9ab04-7c09-4c09-ae70-a214f4a637c0",
+                "sequence": 1,
+                "occurred_at": "2026-10-19T12:00:00.000Z",
+                "view_id": "616992d2-6db6-4578-8361-3f8813e963be",
+                "video_id": "demo-video",
+                "sdk_name": "@chunkify/analytics",
+                "sdk_version": "0.3.0",
+                "connector_name": "html-media",
+                "connector_version": null,
+                "player_name": null,
+                "player_version": null,
+                "delivery_hostname": null,
+                "environment": null,
+                "viewer_id": null,
+                "reason": null,
+                "startup_outcome": null,
+                "error_category": null,
+                "error_code": null,
+                "error_fatal": null,
+                "error_playhead_seconds": null,
+                "playing_time_ms": 0,
+                "rebuffer_count": 0,
+                "rebuffer_duration_ms": 0,
+                "seek_count": 0,
+                "seek_duration_ms": 0,
+                "maximum_playhead_seconds": 0,
+                "media_duration_seconds": null,
+                "startup_time_ms": null,
+                "first_video_frame_time_ms": null,
+                "rebuffer_ratio": null,
+                "furthest_progress_ratio": null,
+                "media_width_px": null,
+                "media_height_px": null,
+                "player_width_px": null,
+                "player_height_px": null,
+                "dropped_video_frames": null,
+                "total_video_frames": null,
+                "selected_rendition_width": null,
+                "selected_rendition_height": null,
+                "selected_rendition_bitrate_bps": null,
+                "rendition_switch_count": null,
+                "delivery_request_count": null,
+                "delivery_transferred_bytes": null,
+                "delivery_throughput_bps": null,
+                "selected_rendition_codec": null,
+                "rendition_playing_time": null
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Direct mode: event_id already existed; no data was replaced.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
+              },
+              "Vary": {
+                "schema": {
+                  "const": "Origin"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "const": "POST"
+                }
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeDuplicate"
+                },
+                "example": {
+                  "accepted": false,
+                  "duplicate": true
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Direct mode: a new event was committed to DuckDB.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
+              },
+              "Vary": {
+                "schema": {
+                  "const": "Origin"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "const": "POST"
+                }
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeCreated"
+                },
+                "example": {
+                  "accepted": true,
+                  "duplicate": false
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Experimental queue mode: durably queued, possibly not queryable yet.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
+              },
+              "Vary": {
+                "schema": {
+                  "const": "Origin"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "const": "POST"
+                }
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeQueued"
+                },
+                "example": {
+                  "accepted": true,
+                  "queued": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON, gzip or event; unsupported schema/name, missing required field or invalid batch. A batch is rejected atomically.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid ingest key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin or preflight is not allowed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or decompressed body exceeds the configured limit; too many OTLP records; or prepared event/queue entry exceeds its byte budget.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Content-Type or Content-Encoding.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Installation-wide ingestion token bucket exceeded. Counts HTTP requests, including duplicate deliveries and invalid payloads after authentication. Default 100 requests/s with a burst capacity of 100.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "1"
+                },
+                "description": "Suggested delay in seconds."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy, queue is full, or a worker is unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "operationId": "preflightEvents",
+        "summary": "Check browser ingest preflight",
+        "description": "Requires an explicitly allowed Origin and Access-Control-Request-Method: POST. No ingest key is required on preflight. Requested header names are case-insensitive and limited to Content-Type, Content-Encoding and X-Chunkify-Ingest-Key. Credentials and cross-origin reads are not enabled. CORS does not authenticate a sender.",
+        "tags": [
+          "Ingestion"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional browser origin. When supplied it must exactly match COLLECTOR_ALLOWED_ORIGINS. Origin-less server requests are allowed with the ingest key.",
+            "required": true
+          },
+          {
+            "name": "Access-Control-Request-Method",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "POST"
+            }
+          },
+          {
+            "name": "Access-Control-Request-Headers",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "example": "Content-Type, X-Chunkify-Ingest-Key"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Browser may submit a POST using the listed headers.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
+              },
+              "Vary": {
+                "schema": {
+                  "const": "Origin"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "const": "POST"
+                }
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin, method or requested headers are not allowed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/logs": {
+      "post": {
+        "operationId": "exportLogs",
+        "summary": "Ingest OTLP/HTTP JSON logs",
+        "description": "Supports JSON logs, including multiple resources/scopes and gzip. Protobuf, gRPC, metrics and traces are outside this API. Log attributes must normalize to one of the seven AnalyticsEvent variants. Omitted nullable SDK attributes are restored to null; required identity and measurements remain mandatory. Original resource/scope/log data are preserved. The entire valid batch is committed atomically. Duplicates across native and OTLP delivery count once and preserve first delivery. Default direct mode returns 200 after DuckDB commit. Experimental durable queue mode returns the same OTLP 200 response after durable queue commit, before asynchronous DuckDB visibility; inspect /v1/ingestion to determine mode. The response never reports partial success.",
+        "tags": [
+          "Ingestion"
+        ],
+        "security": [
+          {
+            "ingestKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/origin"
+          },
+          {
+            "$ref": "#/components/parameters/otlp_encoding"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OtlpExportRequest"
+              },
+              "example": {
+                "resourceLogs": [
+                  {
+                    "scopeLogs": [
+                      {
+                        "scope": {
+                          "name": "@chunkify/analytics",
+                          "version": "0.3.0"
+                        },
+                        "logRecords": [
+                          {
+                            "timeUnixNano": "1792411200000000000",
+                            "eventName": "chunkify.video.view_started",
+                            "attributes": [
+                              {
+                                "key": "schema_version",
+                                "value": {
+                                  "intValue": "1"
+                                }
+                              },
+                              {
+                                "key": "event_name",
+                                "value": {
+                                  "stringValue": "chunkify.video.view_started"
+                                }
+                              },
+                              {
+                                "key": "event_id",
+                                "value": {
+                                  "stringValue": "35c9ab04-7c09-4c09-ae70-a214f4a637c0"
+                                }
+                              },
+                              {
+                                "key": "sequence",
+                                "value": {
+                                  "intValue": "1"
+                                }
+                              },
+                              {
+                                "key": "occurred_at",
+                                "value": {
+                                  "stringValue": "2026-10-19T12:00:00.000Z"
+                                }
+                              },
+                              {
+                                "key": "view_id",
+                                "value": {
+                                  "stringValue": "616992d2-6db6-4578-8361-3f8813e963be"
+                                }
+                              },
+                              {
+                                "key": "video_id",
+                                "value": {
+                                  "stringValue": "demo-video"
+                                }
+                              },
+                              {
+                                "key": "sdk_name",
+                                "value": {
+                                  "stringValue": "@chunkify/analytics"
+                                }
+                              },
+                              {
+                                "key": "sdk_version",
+                                "value": {
+                                  "stringValue": "0.3.0"
+                                }
+                              },
+                              {
+                                "key": "connector_name",
+                                "value": {
+                                  "stringValue": "html-media"
+                                }
+                              },
+                              {
+                                "key": "playing_time_ms",
+                                "value": {
+                                  "intValue": "0"
+                                }
+                              },
+                              {
+                                "key": "rebuffer_count",
+                                "value": {
+                                  "intValue": "0"
+                                }
+                              },
+                              {
+                                "key": "rebuffer_duration_ms",
+                                "value": {
+                                  "intValue": "0"
+                                }
+                              },
+                              {
+                                "key": "seek_count",
+                                "value": {
+                                  "intValue": "0"
+                                }
+                              },
+                              {
+                                "key": "seek_duration_ms",
+                                "value": {
+                                  "intValue": "0"
+                                }
+                              },
+                              {
+                                "key": "maximum_playhead_seconds",
+                                "value": {
+                                  "intValue": "0"
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful complete export, including empty batches and duplicates. See mode-specific durability above.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
+              },
+              "Vary": {
+                "schema": {
+                  "const": "Origin"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "const": "POST"
+                }
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpSuccess"
+                },
+                "example": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed JSON, gzip or event; unsupported schema/name, missing required field or invalid batch. A batch is rejected atomically.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid ingest key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin or preflight is not allowed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request or decompressed body exceeds the configured limit; too many OTLP records; or prepared event/queue entry exceeds its byte budget.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Content-Type or Content-Encoding.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Installation-wide ingestion token bucket exceeded. Counts HTTP requests, including duplicate deliveries and invalid payloads after authentication. Default 100 requests/s with a burst capacity of 100.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "schema": {
+                  "const": "1"
+                },
+                "description": "Suggested delay in seconds."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy, queue is full, or a worker is unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "options": {
+        "operationId": "preflightLogs",
+        "summary": "Check browser ingest preflight",
+        "description": "Requires an explicitly allowed Origin and Access-Control-Request-Method: POST. No ingest key is required on preflight. Requested header names are case-insensitive and limited to Content-Type, Content-Encoding and X-Chunkify-Ingest-Key. Credentials and cross-origin reads are not enabled. CORS does not authenticate a sender.",
+        "tags": [
+          "Ingestion"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "name": "Origin",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional browser origin. When supplied it must exactly match COLLECTOR_ALLOWED_ORIGINS. Origin-less server requests are allowed with the ingest key.",
+            "required": true
+          },
+          {
+            "name": "Access-Control-Request-Method",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "const": "POST"
+            }
+          },
+          {
+            "name": "Access-Control-Request-Headers",
+            "in": "header",
+            "schema": {
+              "type": "string"
+            },
+            "example": "Content-Type, X-Chunkify-Ingest-Key"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Browser may submit a POST using the listed headers.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Access-Control-Allow-Origin": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
+              },
+              "Vary": {
+                "schema": {
+                  "const": "Origin"
+                }
+              },
+              "Access-Control-Allow-Methods": {
+                "schema": {
+                  "const": "POST"
+                }
+              },
+              "Access-Control-Allow-Headers": {
+                "schema": {
+                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Origin, method or requested headers are not allowed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OtlpError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/summary": {
+      "get": {
+        "operationId": "getSummary",
+        "summary": "Read totals for a view cohort",
+        "description": "Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Unknown query parameters, event_name, cursor and limit are rejected.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Totals for the selected starts.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Metrics"
+                },
+                "example": {
+                  "views": 2,
+                  "unique_viewers": 1,
+                  "total_playing_time_ms": 15000
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/videos": {
+      "get": {
+        "operationId": "listVideoMetrics",
+        "summary": "Read paginated totals by video",
+        "description": "Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Rows are ordered by video_id ascending. unique_viewers is per video and must not be summed to obtain portfolio unique viewers. Unknown query parameters and event_name are rejected.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Video page; next_cursor is null at the end.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VideoPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ingestKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Chunkify-Ingest-Key",
+        "description": "Public write-only key generated by collector init. Does not authorize reads and does not authenticate a viewer. Never send credentials in query parameters."
+      },
+      "readToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Private opaque read token generated by collector init. This is not a JWT. Keep it on your dashboard backend; the exact Authorization prefix is Bearer."
+      }
+    },
+    "parameters": {
+      "from": {
+        "name": "from",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": "Inclusive RFC3339 occurrence-time lower bound, with timezone. Summary/video queries apply it to the selected view_started event. Must be before to."
+      },
+      "to": {
+        "name": "to",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": "Exclusive RFC3339 occurrence-time upper bound, with timezone. Summary/video queries apply it to the selected view_started event."
+      },
+      "video_id": {
+        "name": "video_id",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Exact video ID. Combined with all other filters using AND."
+      },
+      "viewer_id": {
+        "name": "viewer_id",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Exact supplied viewer ID. Missing/null viewer IDs do not match."
+      },
+      "event_name": {
+        "name": "event_name",
+        "in": "query",
+        "schema": {
+          "enum": [
+            "chunkify.video.view_started",
+            "chunkify.video.view_snapshot",
+            "chunkify.video.playback_error",
+            "chunkify.video.view_ended",
+            "chunkify.video.playback_state_changed",
+            "chunkify.video.rendition_changed",
+            "chunkify.video.seek_completed"
+          ]
+        },
+        "description": "Raw-event queries only. Summaries and videos reject this parameter."
+      },
+      "browser_name": {
+        "name": "browser_name",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": "Exact case-sensitive browser name in event_context, for example Chrome. No trimming/coercion. Unknown names are valid and match no records. Missing/null values do not match. Summary/video queries use the selected view_started event."
+      },
+      "os_name": {
+        "name": "os_name",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "description": "Exact case-sensitive OS name in event_context, for example macOS. No trimming/coercion. Unknown names are valid and match no records. Missing/null values do not match. Summary/video queries use the selected view_started event."
+      },
+      "device_type": {
+        "name": "device_type",
+        "in": "query",
+        "schema": {
+          "enum": [
+            "desktop",
+            "mobile",
+            "tablet",
+            "unknown"
+          ]
+        },
+        "description": "Exact event_context device class. unknown matches only an explicit unknown value, not missing/null fields. Summary/video queries use the selected view_started event."
+      },
+      "limit": {
+        "name": "limit",
+        "in": "query",
+        "schema": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "description": "Maximum rows on this page. Only events and videos support pagination."
+      },
+      "cursor": {
+        "name": "cursor",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Opaque next_cursor from the same endpoint and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention or deletion can remove records between pages. A cursor is not a durable database snapshot or authorization token."
+      },
+      "origin": {
+        "name": "Origin",
+        "in": "header",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Optional browser origin. When supplied it must exactly match COLLECTOR_ALLOWED_ORIGINS. Origin-less server requests are allowed with the ingest key."
+      },
+      "identity_encoding": {
+        "name": "Content-Encoding",
+        "in": "header",
+        "schema": {
+          "enum": [
+            "identity"
+          ]
+        },
+        "description": "Native JSON accepts an absent header or identity. gzip is supported only on /v1/logs."
+      },
+      "otlp_encoding": {
+        "name": "Content-Encoding",
+        "in": "header",
+        "schema": {
+          "enum": [
+            "identity",
+            "gzip"
+          ]
+        },
+        "description": "Optional gzip. Both compressed and decompressed body sizes are bounded by COLLECTOR_MAX_BODY_BYTES, default 65536 bytes."
+      }
+    },
+    "schemas": {
+      "AnalyticsEvent": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ViewStarted"
+          },
+          {
+            "$ref": "#/components/schemas/ViewSnapshot"
+          },
+          {
+            "$ref": "#/components/schemas/PlaybackError"
+          },
+          {
+            "$ref": "#/components/schemas/ViewEnded"
+          },
+          {
+            "$ref": "#/components/schemas/PlaybackStateChanged"
+          },
+          {
+            "$ref": "#/components/schemas/RenditionChanged"
+          },
+          {
+            "$ref": "#/components/schemas/SeekCompleted"
+          }
+        ],
+        "description": "One of the seven schema_version 1 SDK events. Native JSON must include required nullable fields as null. Extra properties are preserved. Millisecond measurements are cumulative for a view unless the field names an individual state or seek interval. Counts and dimensions accept non-negative JSON numbers as the current collector does."
+      },
+      "EventEnvelope": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "event_name": {
+            "enum": [
+              "chunkify.video.view_started",
+              "chunkify.video.view_snapshot",
+              "chunkify.video.playback_error",
+              "chunkify.video.view_ended",
+              "chunkify.video.playback_state_changed",
+              "chunkify.video.rendition_changed",
+              "chunkify.video.seek_completed"
+            ]
+          },
+          "event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sequence": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "view_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "video_id": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "sdk_name": {
+            "const": "@chunkify/analytics"
+          },
+          "sdk_version": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "connector_name": {
+            "type": "string",
+            "pattern": "\\S"
+          },
+          "connector_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "player_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "player_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delivery_hostname": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "viewer_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "enum": [
+              "ended",
+              "destroyed",
+              "source_changed",
+              "page_exit",
+              null
+            ]
+          },
+          "startup_outcome": {
+            "enum": [
+              "started",
+              "failed_before_start",
+              "ended_before_start",
+              null
+            ]
+          },
+          "error_category": {
+            "enum": [
+              "aborted",
+              "network",
+              "decode",
+              "unsupported",
+              "unknown",
+              null
+            ]
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "number",
+              "null"
+            ]
+          },
+          "error_fatal": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "error_playhead_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "rebuffer_count": {
+            "type": "number",
+            "minimum": 0
+          },
+          "rebuffer_duration_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "seek_count": {
+            "type": "number",
+            "minimum": 0
+          },
+          "seek_duration_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "maximum_playhead_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "media_duration_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "startup_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "first_video_frame_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "rebuffer_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "furthest_progress_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "media_width_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "media_height_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "player_width_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "player_height_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "dropped_video_frames": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "total_video_frames": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_height": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_bitrate_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "rendition_switch_count": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "delivery_request_count": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "delivery_transferred_bytes": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "delivery_throughput_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_codec": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rendition_playing_time": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RenditionPlayingTime"
+            }
+          },
+          "browser_context": {
+            "description": "Optional caller-supplied context. The Chunkify adapter emits the BrowserContext schema. The collector preserves this raw property without validating its shape. It copies supported primitive fields from schema_version 1 objects into event_context; do not treat caller-supplied metadata as authenticated."
+          }
+        },
+        "required": [
+          "schema_version",
+          "event_name",
+          "event_id",
+          "sequence",
+          "occurred_at",
+          "view_id",
+          "video_id",
+          "sdk_name",
+          "sdk_version",
+          "connector_name",
+          "connector_version",
+          "player_name",
+          "player_version",
+          "delivery_hostname",
+          "environment",
+          "viewer_id",
+          "reason",
+          "startup_outcome",
+          "error_category",
+          "error_code",
+          "error_fatal",
+          "error_playhead_seconds"
+        ]
+      },
+      "ViewMetrics": {
+        "type": "object",
+        "properties": {
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "rebuffer_count": {
+            "type": "number",
+            "minimum": 0
+          },
+          "rebuffer_duration_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "seek_count": {
+            "type": "number",
+            "minimum": 0
+          },
+          "seek_duration_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "maximum_playhead_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "media_duration_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "startup_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "first_video_frame_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "rebuffer_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "furthest_progress_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "media_width_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "media_height_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "player_width_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "player_height_px": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "dropped_video_frames": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "total_video_frames": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_height": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_bitrate_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "rendition_switch_count": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "delivery_request_count": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "delivery_transferred_bytes": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "delivery_throughput_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "selected_rendition_codec": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rendition_playing_time": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RenditionPlayingTime"
+            }
+          }
+        },
+        "required": [
+          "playing_time_ms",
+          "rebuffer_count",
+          "rebuffer_duration_ms",
+          "seek_count",
+          "seek_duration_ms",
+          "maximum_playhead_seconds",
+          "media_duration_seconds",
+          "startup_time_ms",
+          "first_video_frame_time_ms",
+          "rebuffer_ratio",
+          "furthest_progress_ratio",
+          "media_width_px",
+          "media_height_px",
+          "player_width_px",
+          "player_height_px",
+          "dropped_video_frames",
+          "total_video_frames",
+          "selected_rendition_width",
+          "selected_rendition_height",
+          "selected_rendition_bitrate_bps",
+          "rendition_switch_count",
+          "delivery_request_count",
+          "delivery_transferred_bytes",
+          "delivery_throughput_bps",
+          "selected_rendition_codec",
+          "rendition_playing_time"
+        ]
+      },
+      "RenditionPlayingTime": {
+        "type": "object",
+        "properties": {
+          "width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "height": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "codec": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bitrate_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "frame_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "width",
+          "height",
+          "codec",
+          "bitrate_bps",
+          "frame_rate",
+          "playing_time_ms"
+        ]
+      },
+      "BrowserContext": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 512
+          },
+          "browser_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "browser_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "os_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "os_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "device_type": {
+            "enum": [
+              "desktop",
+              "mobile",
+              "tablet",
+              "unknown"
+            ]
+          },
+          "device_family": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "language_prefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 128
+          },
+          "timezone_offset_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": -1440,
+            "maximum": 1440
+          },
+          "screen_width_px": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "screen_height_px": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "viewport_width_px": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "viewport_height_px": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 1000000
+          },
+          "pixel_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "exclusiveMinimum": 0,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "schema_version",
+          "user_agent",
+          "browser_name",
+          "browser_version",
+          "os_name",
+          "os_version",
+          "device_type",
+          "device_family",
+          "language",
+          "language_prefix",
+          "timezone",
+          "timezone_offset_minutes",
+          "screen_width_px",
+          "screen_height_px",
+          "viewport_width_px",
+          "viewport_height_px",
+          "pixel_ratio"
+        ],
+        "description": "Shape emitted by createChunkifyAdapter in a browser. Measurements unavailable through browser APIs are null. Stable context is cached per adapter; viewport, screen, pixel ratio and UTC-minus-local timezone offset are read per send. The adapter does not supply client IP or viewer identity."
+      },
+      "EventContext": {
+        "type": "object",
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "user_agent": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.user_agent when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "browser_name": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.browser_name when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "browser_version": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.browser_version when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "os_name": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.os_name when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "os_version": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.os_version when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "device_type": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.device_type when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "device_family": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.device_family when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "language": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.language when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "language_prefix": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.language_prefix when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "timezone": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.timezone when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "timezone_offset_minutes": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.timezone_offset_minutes when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "screen_width_px": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.screen_width_px when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "screen_height_px": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.screen_height_px when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "viewport_width_px": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.viewport_width_px when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "viewport_height_px": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.viewport_height_px when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "pixel_ratio": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "description": "Copied from browser_context.pixel_ratio when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
+          },
+          "peer_ip": {
+            "type": "string",
+            "description": "Direct TCP peer IP, canonical IPv4 or IPv6."
+          },
+          "client_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Request sender IP. Direct peer unless it is an explicitly trusted proxy. Null when a trusted proxy has no usable forwarding chain. A gateway sender may not be the viewer."
+          },
+          "client_ip_source": {
+            "enum": [
+              "connection",
+              "x_forwarded_for",
+              null
+            ]
+          }
+        },
+        "required": [
+          "schema_version"
+        ],
+        "additionalProperties": false,
+        "description": "Flat derived context. Browser fields are optional and may be null. Server IP fields are present only when IP storage is enabled, which is the default. Trusted proxies use the rightmost untrusted X-Forwarded-For hop. Request-derived fields cannot be overridden by event properties. Omitted when no context is available."
+      },
+      "StoredEvent": {
+        "type": "object",
+        "properties": {
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "event": {
+            "$ref": "#/components/schemas/AnalyticsEvent"
+          },
+          "event_context": {
+            "$ref": "#/components/schemas/EventContext"
+          },
+          "otlp": {
+            "$ref": "#/components/schemas/StoredOtlpContext"
+          }
+        },
+        "required": [
+          "received_at",
+          "event"
+        ],
+        "additionalProperties": false
+      },
+      "EventPage": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredEvent"
+            },
+            "maxItems": 1000
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "events",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
+      "Metrics": {
+        "type": "object",
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unique_viewers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "views",
+          "unique_viewers",
+          "total_playing_time_ms"
+        ],
+        "additionalProperties": false
+      },
+      "VideoMetrics": {
+        "type": "object",
+        "properties": {
+          "video_id": {
+            "type": "string"
+          },
+          "views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unique_viewers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "video_id",
+          "views",
+          "unique_viewers",
+          "total_playing_time_ms"
+        ],
+        "additionalProperties": false
+      },
+      "VideoPage": {
+        "type": "object",
+        "properties": {
+          "videos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VideoMetrics"
+            },
+            "maxItems": 1000
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "videos",
+          "next_cursor"
+        ],
+        "additionalProperties": false
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "ok"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "NativeCreated": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "const": true
+          },
+          "duplicate": {
+            "const": false
+          }
+        },
+        "required": [
+          "accepted",
+          "duplicate"
+        ],
+        "additionalProperties": false
+      },
+      "NativeDuplicate": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "const": false
+          },
+          "duplicate": {
+            "const": true
+          }
+        },
+        "required": [
+          "accepted",
+          "duplicate"
+        ],
+        "additionalProperties": false
+      },
+      "NativeQueued": {
+        "type": "object",
+        "properties": {
+          "accepted": {
+            "const": true
+          },
+          "queued": {
+            "const": true
+          }
+        },
+        "required": [
+          "accepted",
+          "queued"
+        ],
+        "additionalProperties": false
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "additionalProperties": false
+      },
+      "OtlpError": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "additionalProperties": false,
+        "description": "OTLP JSON google.rpc.Status subset emitted by this collector. The optional code and details fields are omitted; use the HTTP status for classification."
+      },
+      "OtlpSuccess": {
+        "type": "object",
+        "maxProperties": 0,
+        "description": "ExportLogsServiceResponse with no partialSuccess. Entire batch succeeded or the whole request returned an error."
+      },
+      "IngestionStatus": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "const": "direct"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "const": "durable_queue"
+              },
+              "queue": {
+                "$ref": "#/components/schemas/QueueStatus"
+              }
+            },
+            "required": [
+              "mode",
+              "queue"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "QueueStatus": {
+        "type": "object",
+        "properties": {
+          "pending_requests": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pending_events": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pending_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "oldest_age_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pending_requests",
+          "pending_events",
+          "pending_bytes",
+          "oldest_age_ms",
+          "failed"
+        ],
+        "additionalProperties": false,
+        "description": "Queue totals before DuckDB deduplication. pending_bytes counts serialized pending payload bytes, not the total SQLite file or filesystem allocation. Zero pending requests means the queue is drained at the instant sampled; failed reports a worker failure."
+      },
+      "ViewStarted": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/ViewMetrics"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.view_started"
+              }
+            },
+            "required": [
+              "event_name"
+            ]
+          }
+        ]
+      },
+      "ViewSnapshot": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/ViewMetrics"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.view_snapshot"
+              }
+            },
+            "required": [
+              "event_name"
+            ]
+          }
+        ]
+      },
+      "PlaybackError": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/ViewMetrics"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.playback_error"
+              }
+            },
+            "required": [
+              "event_name"
+            ]
+          }
+        ]
+      },
+      "ViewEnded": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "$ref": "#/components/schemas/ViewMetrics"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.view_ended"
+              }
+            },
+            "required": [
+              "event_name"
+            ]
+          }
+        ]
+      },
+      "PlaybackStateChanged": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.playback_state_changed"
+              },
+              "playhead_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "from_state": {
+                "enum": [
+                  "startup",
+                  "resuming",
+                  "playing",
+                  "paused",
+                  "buffering",
+                  "seeking",
+                  "error",
+                  "ended",
+                  "stopped"
+                ]
+              },
+              "to_state": {
+                "enum": [
+                  "startup",
+                  "resuming",
+                  "playing",
+                  "paused",
+                  "buffering",
+                  "seeking",
+                  "error",
+                  "ended",
+                  "stopped"
+                ]
+              },
+              "previous_state_duration_ms": {
+                "type": "number",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "event_name",
+              "playhead_seconds",
+              "from_state",
+              "to_state",
+              "previous_state_duration_ms"
+            ]
+          }
+        ]
+      },
+      "RenditionChanged": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.rendition_changed"
+              },
+              "playhead_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "player_width_px": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "player_height_px": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "previous_rendition_width": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "previous_rendition_height": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "previous_rendition_codec": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "previous_rendition_bitrate_bps": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "previous_rendition_frame_rate": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "selected_rendition_width": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "selected_rendition_height": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "selected_rendition_codec": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "selected_rendition_bitrate_bps": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "selected_rendition_frame_rate": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            },
+            "required": [
+              "event_name",
+              "playhead_seconds",
+              "player_width_px",
+              "player_height_px",
+              "previous_rendition_width",
+              "previous_rendition_height",
+              "previous_rendition_codec",
+              "previous_rendition_bitrate_bps",
+              "previous_rendition_frame_rate",
+              "selected_rendition_width",
+              "selected_rendition_height",
+              "selected_rendition_codec",
+              "selected_rendition_bitrate_bps",
+              "selected_rendition_frame_rate"
+            ]
+          }
+        ]
+      },
+      "SeekCompleted": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.seek_completed"
+              },
+              "seek_started_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "last_seeked_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "playback_resumed_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "state_before_seek": {
+                "enum": [
+                  "startup",
+                  "resuming",
+                  "playing",
+                  "paused",
+                  "buffering",
+                  "seeking",
+                  "error",
+                  "ended",
+                  "stopped"
+                ]
+              },
+              "state_after_seek": {
+                "enum": [
+                  "startup",
+                  "resuming",
+                  "playing",
+                  "paused",
+                  "buffering",
+                  "seeking",
+                  "error",
+                  "ended",
+                  "stopped"
+                ]
+              },
+              "from_playhead_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "to_playhead_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "seek_interaction_duration_ms": {
+                "type": "number",
+                "minimum": 0
+              },
+              "seek_resume_wait_ms": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "seek_outcome": {
+                "enum": [
+                  "resumed",
+                  "paused",
+                  "interrupted"
+                ]
+              }
+            },
+            "required": [
+              "event_name",
+              "seek_started_at",
+              "last_seeked_at",
+              "playback_resumed_at",
+              "state_before_seek",
+              "state_after_seek",
+              "from_playhead_seconds",
+              "to_playhead_seconds",
+              "seek_interaction_duration_ms",
+              "seek_resume_wait_ms",
+              "seek_outcome"
+            ]
+          }
+        ]
+      },
+      "OtlpAttributeValue": {
+        "anyOf": [
+          {
+            "type": "null"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "stringValue": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "boolValue": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "intValue": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "pattern": "^-?[0-9]+$"
+                  },
+                  {
+                    "type": "integer",
+                    "minimum": -9223372036854776000,
+                    "maximum": 9223372036854776000
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Signed int64. Strings avoid JavaScript precision loss."
+              },
+              "doubleValue": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "arrayValue": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "values": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "$ref": "#/components/schemas/OtlpAttributeValue"
+                    }
+                  }
+                },
+                "required": []
+              },
+              "kvlistValue": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "values": {
+                    "type": [
+                      "array",
+                      "null"
+                    ],
+                    "items": {
+                      "$ref": "#/components/schemas/OtlpAttribute"
+                    }
+                  }
+                },
+                "required": []
+              },
+              "bytesValue": {
+                "type": "null",
+                "description": "Only an explicit null is accepted; non-null bytesValue attributes are unsupported."
+              }
+            },
+            "required": [],
+            "oneOf": [
+              {
+                "properties": {
+                  "stringValue": {
+                    "type": "null"
+                  },
+                  "boolValue": {
+                    "type": "null"
+                  },
+                  "intValue": {
+                    "type": "null"
+                  },
+                  "doubleValue": {
+                    "type": "null"
+                  },
+                  "arrayValue": {
+                    "type": "null"
+                  },
+                  "kvlistValue": {
+                    "type": "null"
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "stringValue"
+                ],
+                "properties": {
+                  "stringValue": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "boolValue": {
+                    "type": "null"
+                  },
+                  "intValue": {
+                    "type": "null"
+                  },
+                  "doubleValue": {
+                    "type": "null"
+                  },
+                  "arrayValue": {
+                    "type": "null"
+                  },
+                  "kvlistValue": {
+                    "type": "null"
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "boolValue"
+                ],
+                "properties": {
+                  "stringValue": {
+                    "type": "null"
+                  },
+                  "boolValue": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "intValue": {
+                    "type": "null"
+                  },
+                  "doubleValue": {
+                    "type": "null"
+                  },
+                  "arrayValue": {
+                    "type": "null"
+                  },
+                  "kvlistValue": {
+                    "type": "null"
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "intValue"
+                ],
+                "properties": {
+                  "stringValue": {
+                    "type": "null"
+                  },
+                  "boolValue": {
+                    "type": "null"
+                  },
+                  "intValue": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "doubleValue": {
+                    "type": "null"
+                  },
+                  "arrayValue": {
+                    "type": "null"
+                  },
+                  "kvlistValue": {
+                    "type": "null"
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "doubleValue"
+                ],
+                "properties": {
+                  "stringValue": {
+                    "type": "null"
+                  },
+                  "boolValue": {
+                    "type": "null"
+                  },
+                  "intValue": {
+                    "type": "null"
+                  },
+                  "doubleValue": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "arrayValue": {
+                    "type": "null"
+                  },
+                  "kvlistValue": {
+                    "type": "null"
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "arrayValue"
+                ],
+                "properties": {
+                  "stringValue": {
+                    "type": "null"
+                  },
+                  "boolValue": {
+                    "type": "null"
+                  },
+                  "intValue": {
+                    "type": "null"
+                  },
+                  "doubleValue": {
+                    "type": "null"
+                  },
+                  "arrayValue": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "kvlistValue": {
+                    "type": "null"
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              },
+              {
+                "required": [
+                  "kvlistValue"
+                ],
+                "properties": {
+                  "stringValue": {
+                    "type": "null"
+                  },
+                  "boolValue": {
+                    "type": "null"
+                  },
+                  "intValue": {
+                    "type": "null"
+                  },
+                  "doubleValue": {
+                    "type": "null"
+                  },
+                  "arrayValue": {
+                    "type": "null"
+                  },
+                  "kvlistValue": {
+                    "not": {
+                      "type": "null"
+                    }
+                  },
+                  "bytesValue": {
+                    "type": "null"
+                  }
+                }
+              }
+            ],
+            "additionalProperties": true
+          }
+        ],
+        "description": "Supported typed log attribute values. An absent, empty, or all-null typed value decodes to null. At most one known typed field may be non-null. Non-null bytesValue attributes are unsupported. Unknown properties are ignored while the original record is preserved. Nested arrays and key/value lists are supported; absent/null values arrays decode as empty."
+      },
+      "OtlpAttribute": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "$ref": "#/components/schemas/OtlpAttributeValue"
+          }
+        },
+        "required": [],
+        "description": "An absent or null key decodes to the empty string; duplicate decoded keys reject the request. An absent value decodes to null."
+      },
+      "OtlpAnyValue": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "Standard OTLP AnyValue in a preserved resource, scope or body. This collector does not decode these fields into the event.",
+        "properties": {
+          "stringValue": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "boolValue": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "intValue": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^-?[0-9]+$"
+              },
+              {
+                "type": "integer",
+                "minimum": -9223372036854776000,
+                "maximum": 9223372036854776000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Signed int64. Strings avoid JavaScript precision loss."
+          },
+          "doubleValue": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "arrayValue": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "values": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/components/schemas/OtlpAnyValue"
+                }
+              }
+            }
+          },
+          "kvlistValue": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "values": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "$ref": "#/components/schemas/OtlpContextAttribute"
+                }
+              }
+            }
+          },
+          "bytesValue": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "contentEncoding": "base64"
+          }
+        },
+        "additionalProperties": true
+      },
+      "OtlpContextAttribute": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "value": {
+            "$ref": "#/components/schemas/OtlpAnyValue"
+          }
+        },
+        "required": [
+          "key"
+        ]
+      },
+      "OtlpResource": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "attributes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/OtlpContextAttribute"
+            }
+          },
+          "droppedAttributesCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "required": []
+      },
+      "OtlpScope": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attributes": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/OtlpContextAttribute"
+            }
+          },
+          "droppedAttributesCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "required": []
+      },
+      "OtlpLogRecord": {
+        "type": "object",
+        "properties": {
+          "timeUnixNano": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9]+$"
+          },
+          "observedTimeUnixNano": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9]+$"
+          },
+          "severityNumber": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 24
+          },
+          "severityText": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "body": {
+            "$ref": "#/components/schemas/OtlpAnyValue"
+          },
+          "attributes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OtlpAttribute"
+            }
+          },
+          "droppedAttributesCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "flags": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "traceId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-fA-F]{32}$"
+          },
+          "spanId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^[0-9a-fA-F]{16}$"
+          },
+          "eventName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "attributes"
+        ],
+        "description": "Event fields must be in attributes using the exact native field names. eventName, timestamps, resource and scope do not supply missing event fields. Required nullable native fields omitted by the SDK are restored to null. Duplicate attribute keys and unsupported attribute values fail the entire request."
+      },
+      "OtlpScopeLogs": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/OtlpScope"
+          },
+          "schemaUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "logRecords": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/OtlpLogRecord"
+            }
+          }
+        },
+        "required": []
+      },
+      "OtlpResourceLogs": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "$ref": "#/components/schemas/OtlpResource"
+          },
+          "schemaUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scopeLogs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/OtlpScopeLogs"
+            }
+          }
+        },
+        "required": []
+      },
+      "OtlpExportRequest": {
+        "type": "object",
+        "properties": {
+          "resourceLogs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/OtlpResourceLogs"
+            }
+          }
+        },
+        "required": [],
+        "description": "OTLP/HTTP JSON logs only. An empty request is valid. Default maximum 100 log records across all resources/scopes, configurable with COLLECTOR_MAX_OTLP_RECORDS. Every log must normalize to AnalyticsEvent; JSON Schema alone cannot express this cross-format validation."
+      },
+      "StoredOtlpContext": {
+        "type": "object",
+        "properties": {
+          "resource_logs": {
+            "type": "object",
+            "properties": {
+              "resource": {
+                "$ref": "#/components/schemas/OtlpResource"
+              },
+              "schemaUrl": {
+                "type": ["string", "null"]
+              }
+            },
+            "required": [],
+            "description": "Original resource group excluding scopeLogs."
+          },
+          "scope_logs": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "$ref": "#/components/schemas/OtlpScope"
+              },
+              "schemaUrl": {
+                "type": ["string", "null"]
+              }
+            },
+            "required": [],
+            "description": "Original scope group excluding logRecords."
+          },
+          "log_record": {
+            "$ref": "#/components/schemas/OtlpLogRecord"
+          }
+        },
+        "required": [
+          "resource_logs",
+          "scope_logs",
+          "log_record"
+        ],
+        "additionalProperties": false,
+        "description": "Present only when the first accepted delivery of event_id used OTLP. Later duplicates do not replace original data or add transport context."
+      }
+    }
+  },
+  "externalDocs": {
+    "description": "Collector setup, configuration, backup and operational instructions",
+    "url": "https://github.com/chunkifydev/chunkify-player/tree/main/services/analytics-collector"
+  }
+}

@@ -41,13 +41,16 @@ async function sample(server) {
     "cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.stat /proc/1/status; du -sb /data; df -Pk /data; find /data -name '*.wal' -printf 'wal_bytes %s\\n'"]);
   const disk = raw.split("\n").find((line) => /^\S+\s+\d+\s+\d+\s+\d+\s+\d+%\s/.test(line))?.trim().split(/\s+/);
   assert.ok(disk, "container disk measurement must be available");
+  const memory = process.memoryUsage();
   const point = { container_memory_bytes: Number(raw.split("\n")[0]),
     cpu_usage_usec: Number(raw.match(/^usage_usec (\d+)/m)?.[1]),
     process_rss_bytes: Number(raw.match(/^VmRSS:\s+(\d+) kB$/m)?.[1]) * 1024,
     data_bytes: Number(raw.match(/^(\d+)\s+\/data$/m)?.[1]),
     wal_bytes: [...raw.matchAll(/^wal_bytes (\d+)/gm)].reduce((sum, match) => sum + Number(match[1]), 0),
     volume_free_bytes: Number(disk[3]) * 1024, host_free_bytes: await hostFreeBytes(),
-    generator_rss_bytes: process.memoryUsage().rss };
+    generator_rss_bytes: memory.rss, generator_heap_used_bytes: memory.heapUsed,
+    generator_heap_total_bytes: memory.heapTotal, generator_external_bytes: memory.external,
+    generator_array_buffer_bytes: memory.arrayBuffers };
   for (const [key, value] of Object.entries(point)) {
     assert.ok(Number.isFinite(value) && value >= 0, `Resource sample unavailable: ${key}. The benchmark requires Linux cgroup v2.`);
   }

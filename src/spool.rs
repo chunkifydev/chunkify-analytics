@@ -52,6 +52,8 @@ pub struct StoredRequest {
     pub context: Option<serde_json::Value>,
     pub received: i64,
     pub prepared_bytes: usize,
+    #[serde(default)]
+    pub prepared_version: u32,
 }
 
 struct Pending {
@@ -151,8 +153,15 @@ impl Database {
             {
                 break;
             }
-            let stored: StoredRequest =
+            let mut stored: StoredRequest =
                 serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+            if stored.prepared_version != Writer::PREPARED_VERSION {
+                stored.prepared_bytes = Writer::prepared_bytes(&stored).map_err(|e| e.1)?;
+                stored.prepared_version = Writer::PREPARED_VERSION;
+            }
+            if stored.prepared_bytes > batch.max_bytes {
+                return Err("Queued request exceeds the current prepared write limit; increase COLLECTOR_BATCH_MAX_BYTES to recover it".into());
+            }
             if !result.is_empty() && bytes + stored.prepared_bytes > batch.max_bytes {
                 break;
             }
@@ -285,6 +294,7 @@ impl Spool {
                 .map_err(|_| ApiError::internal())?,
             received,
             prepared_bytes: 0,
+            prepared_version: Writer::PREPARED_VERSION,
         };
         stored.prepared_bytes = Writer::prepared_bytes(&stored)?;
         if stored.prepared_bytes > self.batch.max_bytes {
@@ -438,6 +448,66 @@ fn consume(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn replay_recalculates_legacy_prepared_sizes_before_forming_a_batch() {
+        let directory =
+            std::env::temp_dir().join(format!("collector-spool-upgrade-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let database = Database::open(&directory.join("queue.sqlite"), 1048576).unwrap();
+        let payload = serde_json::json!({"events": [{"event": {
+            "event_id": "event", "view_id": "view", "video_id": "video", "viewer_id": null,
+            "event_name": "chunkify.video.view_started", "sequence": 1,
+            "occurred_at": "2026-10-19T00:00:00Z"
+        }, "otlp": null}], "context": null, "received": 123, "prepared_bytes": 1});
+        let stored: StoredRequest = serde_json::from_value(payload.clone()).unwrap();
+        let actual = Writer::prepared_bytes(&stored).map_err(|e| e.1).unwrap();
+        let encoded = serde_json::to_vec(&payload).unwrap();
+        assert!(encoded.len() < actual);
+        for _ in 0..3 {
+            database
+                .connection
+                .execute(
+                    "INSERT INTO pending(received_ms, records, payload) VALUES(123, 1, ?)",
+                    [&encoded],
+                )
+                .unwrap();
+        }
+        let batch = BatchConfig {
+            max_events: 100,
+            max_bytes: actual + encoded.len(),
+            delay: Duration::ZERO,
+            queue_bytes: actual + encoded.len(),
+            queue_requests: 8,
+            bulk: true,
+        };
+        let pending = database.next(&batch).unwrap();
+        assert_eq!(
+            pending.len(),
+            1,
+            "legacy estimate must not admit all three requests into one batch"
+        );
+        assert_eq!(pending[0].1.prepared_bytes, actual);
+        assert_eq!(pending[0].1.prepared_version, Writer::PREPARED_VERSION);
+        assert_eq!(pending[0].1.received, 123);
+        let smaller = BatchConfig {
+            max_bytes: actual - 1,
+            ..batch
+        };
+        assert!(
+            database.next(&smaller).is_err(),
+            "an oversized first request must remain queued"
+        );
+        assert_eq!(
+            database
+                .connection
+                .query_row("SELECT count(*) FROM pending", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        drop(database);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[tokio::test]
     async fn failed_sqlite_commit_never_acknowledges() {
         let directory =

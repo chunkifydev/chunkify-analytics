@@ -7,6 +7,7 @@ mod profile;
 mod query;
 mod reader;
 mod spool;
+mod storage;
 mod store;
 mod writer;
 

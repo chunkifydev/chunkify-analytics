@@ -38,6 +38,7 @@ jobs:
       - run: npx playwright install --with-deps --only-shell chromium
       - run: cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
       - run: npm run test:collector
+      - run: cargo test --locked --manifest-path services/analytics-collector/Cargo.toml --bin chunkify-analytics-collector
       - run: cargo clippy --locked --manifest-path services/analytics-collector/Cargo.toml -- -D warnings
 
   container:

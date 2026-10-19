@@ -112,18 +112,9 @@ impl Filters {
         // Compare only strings. Missing/null fields and other JSON primitives
         // are not normalized browser names or device categories.
         for (value, condition) in [
-            (
-                &self.browser_name,
-                "json_type(event_context, '$.browser_name') = 'VARCHAR' AND json_extract_string(event_context, '$.browser_name') = ?",
-            ),
-            (
-                &self.os_name,
-                "json_type(event_context, '$.os_name') = 'VARCHAR' AND json_extract_string(event_context, '$.os_name') = ?",
-            ),
-            (
-                &self.device_type,
-                "json_type(event_context, '$.device_type') = 'VARCHAR' AND json_extract_string(event_context, '$.device_type') = ?",
-            ),
+            (&self.browser_name, "context_browser_name = ?"),
+            (&self.os_name, "context_os_name = ?"),
+            (&self.device_type, "context_device_type = ?"),
         ] {
             if let Some(value) = value {
                 conditions.push(condition);

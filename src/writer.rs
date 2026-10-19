@@ -1,7 +1,7 @@
 use crate::{
     api::ApiError,
     context::{RequestContext, event_context},
-    event::{self, IncomingEvent},
+    event::IncomingEvent,
     profile::Profile,
 };
 use duckdb::{
@@ -85,30 +85,12 @@ impl Row {
         context: Option<&serde_json::Value>,
         received: i64,
     ) -> Result<Self, ApiError> {
-        let event = &record.event;
-        let text = |key: &str| {
-            event[key]
-                .as_str()
-                .map_or(Value::Null, |v| Value::Text(v.into()))
-        };
-        let context =
-            event_context(event, context).map_or(Value::Null, |v| Value::Text(v.to_string()));
         Ok(Self {
-            values: vec![
-                text("event_id"),
-                text("view_id"),
-                text("video_id"),
-                text("viewer_id"),
-                text("event_name"),
-                Value::BigInt(event["sequence"].as_i64().unwrap()),
-                Value::BigInt(event::timestamp(event["occurred_at"].as_str().unwrap())?),
-                event["playing_time_ms"]
-                    .as_f64()
-                    .map_or(Value::Null, Value::Double),
-                Value::BigInt(received),
-                Value::Text(event.to_string()),
-                context,
-            ],
+            values: crate::storage::encode(
+                &record.event,
+                event_context(&record.event, context).as_ref(),
+                received,
+            )?,
             otlp: record.otlp.as_ref().map(|v| v.to_string()),
         })
     }
@@ -145,6 +127,10 @@ pub struct Writer {
 }
 
 impl Writer {
+    // Bump when the prepared row representation changes. Durable requests may
+    // have been admitted by an older binary with a different memory estimate.
+    pub const PREPARED_VERSION: u32 = 4;
+
     pub fn prepared_bytes(request: &crate::spool::StoredRequest) -> Result<usize, ApiError> {
         let mut bytes = size_of::<WriteRequest>() + request.events.len() * size_of::<Row>();
         for event in &request.events {
@@ -195,10 +181,7 @@ impl Writer {
         profile: bool,
     ) -> duckdb::Result<(Self, thread::JoinHandle<duckdb::Result<()>>)> {
         if config.bulk {
-            connection.execute_batch("CREATE TEMP TABLE collector_write_stage (
-                ordinal BIGINT, event_id VARCHAR, view_id VARCHAR, video_id VARCHAR, viewer_id VARCHAR,
-                event_name VARCHAR, sequence BIGINT, occurred_at_ms BIGINT, playing_time_ms DOUBLE,
-                received_at_ms BIGINT, payload VARCHAR, event_context VARCHAR)")?;
+            crate::storage::create_stage(&connection)?;
         }
         let (sender, receiver) = mpsc::sync_channel(config.queue_requests);
         let budget = Arc::new(Semaphore::new(config.queue_bytes));
@@ -394,9 +377,10 @@ fn write_rows(
     let mut counts = vec![0; batch.len()];
     for (index, request) in batch.iter().enumerate() {
         for row in &request.rows {
-            let added = profile.measure("insert_event", || tx.prepare_cached(
-                "INSERT INTO events (event_id, view_id, video_id, viewer_id, event_name, sequence, occurred_at_ms, playing_time_ms, received_at_ms, payload, event_context)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING")?.execute(params_from_iter(&row.values)))?;
+            let added = profile.measure("insert_event", || {
+                tx.prepare_cached(&crate::storage::INSERT_SQL)?
+                    .execute(params_from_iter(&row.values))
+            })?;
             if added > 0 {
                 if let Some(otlp) = &row.otlp {
                     profile.measure("insert_otlp", || {
@@ -441,16 +425,9 @@ fn write_bulk(
         appender.flush()
     })?;
     let inserted: HashSet<String> = profile.measure("insert_event", || -> duckdb::Result<_> {
-        tx.prepare_cached(
-            "INSERT INTO events (event_id, view_id, video_id, viewer_id, event_name, sequence,
-                occurred_at_ms, playing_time_ms, received_at_ms, payload, event_context)
-            SELECT event_id, view_id, video_id, viewer_id, event_name, sequence,
-                occurred_at_ms, playing_time_ms, received_at_ms, payload, event_context
-            FROM collector_write_stage ORDER BY ordinal
-            ON CONFLICT(event_id) DO NOTHING RETURNING event_id",
-        )?
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect()
+        tx.prepare_cached(&crate::storage::BULK_SQL)?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect()
     })?;
     let mut counts = vec![0; batch.len()];
     profile.measure("insert_otlp", || -> duckdb::Result<()> {

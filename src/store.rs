@@ -1,12 +1,12 @@
 use crate::{
     api::ApiError,
-    context::{RequestContext, event_context},
+    context::RequestContext,
     event::IncomingEvent,
     query::{Cursor, Query},
     reader::Reader,
     writer::{BatchConfig, Writer},
 };
-use duckdb::{Connection, params, params_from_iter, types::Value as SqlValue};
+use duckdb::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Value, json};
 use std::{path::Path, thread};
 
@@ -60,85 +60,7 @@ impl Store {
             format!("{checkpoint_threshold_mib} MiB"),
         )?;
         let mut connection = Connection::open_with_flags(path, settings)?;
-        let tx = connection.transaction()?;
-        tx.execute_batch("CREATE TABLE IF NOT EXISTS collector_schema (version INTEGER NOT NULL);
-            INSERT INTO collector_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM collector_schema);")?;
-        let version: i32 =
-            tx.query_row("SELECT version FROM collector_schema", [], |r| r.get(0))?;
-        if !(1..=3).contains(&version) {
-            return Err("Unsupported database schema version".into());
-        }
-        tx.execute_batch(
-            "CREATE SEQUENCE IF NOT EXISTS event_order START 1;
-            CREATE TABLE IF NOT EXISTS events (
-                ingest_id BIGINT PRIMARY KEY DEFAULT nextval('event_order'),
-                event_id VARCHAR UNIQUE NOT NULL,
-                view_id VARCHAR NOT NULL,
-                video_id VARCHAR NOT NULL,
-                viewer_id VARCHAR,
-                event_name VARCHAR NOT NULL,
-                sequence BIGINT NOT NULL,
-                occurred_at_ms BIGINT NOT NULL,
-                playing_time_ms DOUBLE,
-                received_at_ms BIGINT NOT NULL,
-                payload VARCHAR NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS event_otlp (
-                event_id VARCHAR PRIMARY KEY,
-                payload VARCHAR NOT NULL
-            );",
-        )?;
-        if version < 3 {
-            // ADD COLUMN fails during WAL replay in the pinned DuckDB version.
-            // Rebuild atomically using CREATE/RENAME, preserving IDs and sequence.
-            tx.execute_batch(
-                "CREATE TABLE events_v3 (
-                    ingest_id BIGINT PRIMARY KEY DEFAULT nextval('event_order'),
-                    event_id VARCHAR UNIQUE NOT NULL,
-                    view_id VARCHAR NOT NULL,
-                    video_id VARCHAR NOT NULL,
-                    viewer_id VARCHAR,
-                    event_name VARCHAR NOT NULL,
-                    sequence BIGINT NOT NULL,
-                    occurred_at_ms BIGINT NOT NULL,
-                    playing_time_ms DOUBLE,
-                    received_at_ms BIGINT NOT NULL,
-                    payload VARCHAR NOT NULL,
-                    event_context VARCHAR
-                );
-                INSERT INTO events_v3 SELECT *, NULL FROM events;
-                DROP TABLE events;
-                ALTER TABLE events_v3 RENAME TO events;
-                UPDATE collector_schema SET version = 3;",
-            )?;
-            // Backfill only browser context already present in the raw payload.
-            // Bound migration memory; old requests never receive an inferred IP.
-            let mut after = 0_i64;
-            loop {
-                let rows = {
-                    let mut statement = tx.prepare("SELECT ingest_id, payload FROM events WHERE ingest_id > ? ORDER BY ingest_id LIMIT 100")?;
-                    statement
-                        .query_map([after], |row| {
-                            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-                        })?
-                        .collect::<duckdb::Result<Vec<_>>>()?
-                };
-                if rows.is_empty() {
-                    break;
-                }
-                for (id, payload) in rows {
-                    after = id;
-                    let event: Value = serde_json::from_str(&payload)?;
-                    if let Some(context) = event_context(&event, None) {
-                        tx.execute(
-                            "UPDATE events SET event_context = ? WHERE ingest_id = ?",
-                            params![context.to_string(), id],
-                        )?;
-                    }
-                }
-            }
-        }
-        tx.commit()?;
+        crate::storage::initialize(&mut connection)?;
         // Clone the connection to the same database instance, after migration.
         // This remains one process and one writer for the data directory.
         let (reader, reader_worker) = if separate_reads {
@@ -289,36 +211,43 @@ impl Store {
             return Err(ApiError::bad("Invalid cursor position"));
         }
         self.read("events", move |connection| {
-            let through = match &cursor { Some(c) => c.through, None => watermark(connection)? };
+            let through = match &cursor {
+                Some(c) => c.through,
+                None => watermark(connection)?,
+            };
             let after = cursor.map_or(0, |c| c.after);
             let (conditions, mut values) = filters.sql();
-            values.extend([SqlValue::BigInt(after), SqlValue::BigInt(through), SqlValue::BigInt((limit + 1) as i64)]);
-            let mut statement = connection.prepare(&format!("SELECT ingest_id, received_at_ms, events.payload, event_otlp.payload, event_context FROM events
-                LEFT JOIN event_otlp USING (event_id)
-                WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id LIMIT ?"))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)))?;
+            values.extend([
+                SqlValue::BigInt(after),
+                SqlValue::BigInt(through),
+                SqlValue::BigInt((limit + 1) as i64),
+            ]);
+            let mut statement = connection.prepare(&crate::storage::page_sql(&conditions))?;
+            let mut rows = statement.query(params_from_iter(values.iter()))?;
             let mut events = Vec::new();
             let mut last = after;
             let mut next_cursor = None;
-            for row in rows {
-                let (id, received, payload, otlp_payload, context) = row?;
+            while let Some(row) = rows.next()? {
                 if events.len() == limit {
-                    next_cursor = Some(Cursor { version: 1, kind: "events".into(), after: last, through, filters: filters.clone() }.encode()?);
+                    next_cursor = Some(
+                        Cursor {
+                            version: 1,
+                            kind: "events".into(),
+                            after: last,
+                            through,
+                            filters: filters.clone(),
+                        }
+                        .encode()?,
+                    );
                     break;
                 }
+                let (id, record) = crate::storage::decode(row)?;
                 last = id;
-                let event: Value = serde_json::from_str(&payload).map_err(|_| ApiError::internal())?;
-                let mut record = json!({ "received_at": chrono::DateTime::from_timestamp_millis(received), "event": event });
-                if let Some(payload) = otlp_payload {
-                    record["otlp"] = serde_json::from_str(&payload).map_err(|_| ApiError::internal())?;
-                }
-                if let Some(context) = context {
-                    record["event_context"] = serde_json::from_str(&context).map_err(|_| ApiError::internal())?;
-                }
                 events.push(record);
             }
             Ok(json!({ "events": events, "next_cursor": next_cursor }))
-        }).await
+        })
+        .await
     }
 
     pub async fn summary(&self, query: Query, per_video: bool) -> Result<Value, ApiError> {
@@ -343,7 +272,7 @@ impl Store {
             // whole cumulative value, even when its final event occurs after the date range.
             let sql = format!("WITH retained AS (SELECT * FROM events WHERE ingest_id <= ?),
                 started AS (
-                    SELECT view_id, video_id, viewer_id, occurred_at_ms, event_context FROM retained
+                    SELECT view_id, video_id, viewer_id, occurred_at_ms, context_browser_name, context_os_name, context_device_type FROM retained
                     WHERE event_name = 'chunkify.video.view_started'
                     QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY sequence, occurred_at_ms, ingest_id) = 1
                 ), cohort AS (SELECT * FROM started WHERE {conditions}),

@@ -999,7 +999,7 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   const beforePage = await server.get("/v1/events?limit=2");
   const expected = structuredClone(original);
   for (const record of expected.events) {
-    if (record.event.browser_context) record.event_context = record.event.browser_context;
+    if (!record.event_context && record.event.browser_context) record.event_context = record.event.browser_context;
   }
   const summary = await server.get("/v1/summary");
   await server.stop("SIGKILL");
@@ -1021,6 +1021,29 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   assert.deepEqual(upgraded.slice(0, events.length), expected.events);
   assert.equal(upgraded.at(-1).event_context.client_ip, "127.0.0.1");
   assert.equal((await server.get("/v1/summary")).views, 2);
+});
+
+test("upgrading replays pending durable requests with the current prepared-row budget", {
+  skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
+}, async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
+    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_BATCH_MAX_BYTES: "16384",
+    COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" }, process.env.COLLECTOR_PREVIOUS_BINARY);
+  const events = Array.from({ length: 8 }, (_, index) => ({ ...sdkEvents(`legacy-${index}`)[0],
+    browser_context: { schema_version: 1, browser_name: "Firefox", viewport_width_px: 900 + index } }));
+  for (const event of events) await server.send(event);
+  assert.ok((await server.get("/v1/ingestion")).queue.pending_requests > 0);
+  await server.stop("SIGKILL");
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  const state = (await server.get("/v1/ingestion")).queue;
+  assert.equal(state.failed, false);
+  assert.equal(state.pending_requests, 0);
+  const records = (await server.get("/v1/events")).events;
+  assert.deepEqual(records.map(r => r.event), events);
+  for (const record of records) {
+    assert.equal(record.event_context.client_ip, "127.0.0.1");
+    assert.equal(record.event_context.browser_name, "Firefox");
+  }
 });
 
 test("the OTLP adapter preserves all seven SDK events and produces the same reports as native ingestion", async (t) => {
@@ -1297,7 +1320,8 @@ test("durable queue validates prepared sizes before acknowledging with a small w
     COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" });
   const post = event => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
     headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
-  const tooLarge = sdkEvents("v".repeat(9000))[0];
+  const tooLarge = sdkEvents("v".repeat(13500))[0];
+  assert.ok(Buffer.byteLength(JSON.stringify(tooLarge)) < 16384, "input JSON fits the budget");
   assert.equal((await post(tooLarge)).status, 413, "JSON fits but prepared row does not");
   const responses = [];
   for (let i = 0; i < 8; i++) responses.push(await post(sdkEvents("v".repeat(3500))[0]));

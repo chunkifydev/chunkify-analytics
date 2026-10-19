@@ -75,31 +75,51 @@ close the database. A second writer using the same database file fails at startu
 The collector and administration commands hold an exclusive `collector.lock`
 file lock for their lifetime. Stop the collector before running administration
 commands. The OS releases the lock after a crash; leave the lock file in place.
-Startup upgrades schema versions 1 and 2 to version 3 without dropping events
+Startup upgrades schema versions 1–3 to version 4 without dropping events
 or changing keys. Existing events receive no invented IP context. Stop the old
 service and take a backup before starting the new executable. An older executable
-cannot open schema version 3; restore its pre-upgrade backup to roll back.
+cannot open schema version 4; restore its pre-upgrade backup to roll back.
 
 ### Database layout
 
 | Table | Contents |
 | --- | --- |
-| `events` | The full event JSON, a flat `event_context` JSON object stored in a nullable text column, and columns for filtering, deduplication and summaries. `event_id` is unique; `view_id` groups events for a viewing attempt. An internal `ingest_id` orders pagination. |
+| `events` | Typed event/browser columns plus a lossless JSON remainder, versioned context reconstruction, and columns for filtering, deduplication and summaries. `event_id` is unique; `view_id` groups events for a viewing attempt. An internal `ingest_id` orders pagination. |
 | `event_otlp` | Original OTLP log/resource/scope JSON, keyed by `event_id`, for events first accepted through OTLP. |
 | `collector_schema` | The database schema version. |
 
-All data for an accepted event is written in one transaction. `event_context`
-combines supported browser fields with collector-derived IP fields in one flat
-object. The SDK's `browser_context` also remains inside the original event JSON
-to preserve the full submitted payload. Generated ingest and read keys stay in
-`keys.json`, outside the database.
+All data for an accepted event is written in one transaction. Known scalar event
+and browser fields use typed columns. Unknown properties, arrays, objects,
+explicit nulls and numeric values that cannot be represented exactly remain in
+`event_remainder`. The event retrieval API reconstructs the complete event,
+including custom fields and the original timestamp string.
 
-The upgrade rebuilds `events` within one transaction to add the column, preserving
-ingestion IDs, event ordering and the sequence. A direct `ADD COLUMN` triggered a
-WAL recovery error in the pinned DuckDB version during forced-restart testing.
-Allow extra disk space for a copy of the event table during migration. Existing
-browser context is copied from the retained payload; no IP is backfilled. The
-integration suite checks fresh databases and upgrades after forced restarts.
+The collector stores browser context once per event. `context_remainder` holds
+the differences between the returned `event_context` and the browser context,
+including request IP fields. `context_format` versions that reconstruction;
+a full-context fallback preserves historical overrides and absence. Browser,
+OS and device filters use three typed columns derived from the actual returned
+context. Context remains event-specific, so viewport and IP changes are retained.
+Original OTLP objects remain in `event_otlp`. Generated ingest and read keys stay
+in `keys.json`, outside the database.
+
+The upgrade rebuilds `events` within one transaction, preserving ingestion IDs,
+event ordering, receipt timestamps and the sequence. An error rolls back the
+migration. A direct `ADD COLUMN` triggered a WAL recovery error in the pinned
+DuckDB version during forced-restart testing, so migrations use a table rebuild.
+Allow extra disk space for a copy of the event table and its WAL during migration.
+Versions 1–2 backfill only browser context already present in the event; no IP is
+invented. Version 3 preserves its stored context. The integration suite checks
+fresh databases and upgrades after forced restarts.
+
+A smaller representation reduces storage growth. Rebuilding an existing database
+can leave reusable blocks in its file, so the file need not shrink immediately.
+Fresh-file benchmark savings do not promise the same immediate reduction after
+an in-place upgrade. Durable requests from an older collector have their prepared
+row sizes recalculated before replay. Very small writer budgets may need to be
+increased if an already queued request no longer fits the new representation;
+pending records remain in SQLite if replay fails. See [the storage comparison](storage-layout-comparison.md)
+for measurements and workload limitations.
 
 ## Run with Docker
 
@@ -241,8 +261,9 @@ The Chunkify adapter adds `browser_context` to every event by default. Read it a
 `events[].event.browser_context` through `GET /v1/events`. Set
 `collectBrowserContext: false` to send playback events only. See the SDK's
 [field definitions and PostHog comparison](../../packages/analytics/README.md#browser-context-fields).
-Browser context uses the existing JSON payload storage. Browser/OS/device filters
-are not implemented yet. The collector adds request IP context separately below.
+Browser context uses the typed storage described above. Browser/OS/device filters
+use the collector-derived event context. The collector adds request IP context
+separately below.
 
 Generic `createHttpAdapter(endpoint, { headers })` remains supported when you
 manage your own context. HTTP and OTLP adapters do not collect browser context.
@@ -327,7 +348,7 @@ DuckDB buffers, indexes and temporary copies use additional memory. Keep the bod
 size limit and container memory limit appropriate for the deployment.
 
 Bulk insertion uses a connection-local temporary staging table. The persistent
-schema remains version 3. The first occurrence of an event ID keeps its original
+schema is version 4. The first occurrence of an event ID keeps its original
 payload, context and optional OTLP envelope. Duplicates within or across requests
 do not replace it. Every request receives its own result only after the shared
 transaction commits. A failed transaction fails every request in that batch and

@@ -62,6 +62,12 @@ impl RequestContext {
 /// Copy only the supported browser fields. Request fields can only come from
 /// the collector; the original event still preserves all caller-supplied data.
 pub fn event_context(event: &Value, request: Option<&Value>) -> Option<Value> {
+    event_context_v1(event, request)
+}
+
+// Frozen for schema-v4 reconstruction. Introduce a new storage context format
+// before changing these rules, so historical responses remain unchanged.
+pub(crate) fn event_context_v1(event: &Value, request: Option<&Value>) -> Option<Value> {
     let mut context = Map::new();
     if let Some(browser) = event.get("browser_context").and_then(Value::as_object)
         && browser.get("schema_version") == Some(&json!(1))

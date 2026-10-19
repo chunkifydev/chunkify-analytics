@@ -1,0 +1,2843 @@
+{
+  "measured_at": "2026-10-19T14:37:27.150Z",
+  "host": {
+    "platform": "darwin",
+    "architecture": "arm64",
+    "cpu": "Apple M2",
+    "logical_cpus": 8
+  },
+  "events": 50000,
+  "repeats": 1,
+  "batch_size": 1000,
+  "source_sha256": {
+    "tests/collector/storage-comparison.mjs": "1e6bc71d4f1d0e728f0143fc255902e7aca28889a745a6ac55ddfc8dfe53c65e",
+    "tests/collector/docker/workload.mjs": "9e1d380d4566cea857f3af2a54ec20872f91bd1072f1f8978ab0fb3d0299d000",
+    "services/analytics-collector/examples/storage_comparison.rs": "1fb91efa7e6b99965b01d296c2a6878f61bcccdfb365e6b67916460f5a11adbd",
+    "services/analytics-collector/src/context.rs": "75f6c3b2687988c81f2c698864da1b0ddb26e1a506cb46b8cd3824e8e473a050",
+    "services/analytics-collector/src/event.rs": "90661f33914f04e2872049b63179a1eccf30925bb74f089ce85f0db90be34740",
+    "services/analytics-collector/src/store.rs": "8e73293a2c57a27b752770f684c2b8a7ae36304f6eb570acaa1c7b56dc1f1696",
+    "services/analytics-collector/src/writer.rs": "446cc3f46dd787049b8aa5e50c2eccd1c2a02b99fc00e871af2632b38bacadd9",
+    "services/analytics-collector/src/storage.rs": "5ed13c4ffbab1d6e5430098ebf5f0de4a10b212dab577e4e84388c092003b517",
+    "services/analytics-collector/Cargo.lock": "dc78ec560c7c9314c03124087d72e532a45a23733e2640900e8a310a0138f5f5"
+  },
+  "results": [
+    {
+      "format": "native",
+      "variant": "current",
+      "repeat": 1,
+      "bytes_per_event": 1997.78304,
+      "checkpoint_seconds": 3.374712041,
+      "columns": 12,
+      "compression_segments": [
+        {
+          "column": "event_context",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_context",
+          "compression": "Dictionary",
+          "segments": 17
+        },
+        {
+          "column": "event_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_id",
+          "compression": "Uncompressed",
+          "segments": 8
+        },
+        {
+          "column": "event_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "ingest_id",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "ingest_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "payload",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "payload",
+          "compression": "FSST",
+          "segments": 149
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Dictionary",
+          "segments": 2
+        },
+        {
+          "column": "viewer_id",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "viewer_id",
+          "compression": "Uncompressed",
+          "segments": 1
+        }
+      ],
+      "database_bytes": 99889152,
+      "engine": "v1.5.6",
+      "events_per_second": 1898.7265643311166,
+      "insert_batches_ms": [
+        144.52100000000002,
+        135.0155,
+        180.048958,
+        143.93858300000002,
+        139.887417,
+        138.653542,
+        139.267708,
+        660.063167,
+        140.167625,
+        138.62329100000002,
+        136.881125,
+        131.180292,
+        135.426916,
+        142.140334,
+        140.56233300000002,
+        1203.987416,
+        147.183708,
+        139.712709,
+        141.525333,
+        150.191667,
+        151.08525,
+        144.329208,
+        403.633875,
+        4595.055625,
+        236.223375,
+        158.65525,
+        165.051959,
+        167.55025,
+        171.409708,
+        157.058542,
+        159.855042,
+        2434.936791,
+        149.60804199999998,
+        151.3715,
+        144.739084,
+        175.137167,
+        144.687917,
+        144.961208,
+        152.802459,
+        2972.186958,
+        156.998625,
+        143.190417,
+        143.62825,
+        154.53958300000002,
+        153.611958,
+        149.069625,
+        144.698916,
+        3652.80825,
+        149.843291,
+        147.191083
+      ],
+      "insert_seconds": 26.333438916,
+      "otlp_records": 0,
+      "queries": {
+        "event_page": {
+          "max_ms": 80.498333,
+          "median_ms": 71.38575,
+          "result": {
+            "events": 100,
+            "serialized_bytes": 230366
+          },
+          "samples_ms": [
+            69.476917,
+            69.63858400000001,
+            69.98916700000001,
+            71.38575,
+            77.205292,
+            78.482333,
+            80.498333
+          ]
+        },
+        "qoe": {
+          "max_ms": 99.477333,
+          "median_ms": 98.086167,
+          "result": {
+            "rebuffer_duration_ms": 2339094,
+            "views": 6250
+          },
+          "samples_ms": [
+            96.27445900000001,
+            97.282,
+            97.688833,
+            98.086167,
+            98.19295799999999,
+            98.94491599999999,
+            99.477333
+          ]
+        },
+        "summary": {
+          "max_ms": 52.097166,
+          "median_ms": 51.401333,
+          "result": {
+            "playing_time_ms": 40142612.26540436,
+            "unique_viewers": 5681,
+            "views": 6250
+          },
+          "samples_ms": [
+            50.3215,
+            51.073375,
+            51.3875,
+            51.401333,
+            51.593,
+            52.062999999999995,
+            52.097166
+          ]
+        }
+      },
+      "typed_fields": [],
+      "verified_events": 50000,
+      "verify_seconds": 15.542411291
+    },
+    {
+      "format": "native",
+      "variant": "production",
+      "repeat": 1,
+      "bytes_per_event": 697.5488,
+      "checkpoint_seconds": 2.843347042,
+      "columns": 92,
+      "compression_segments": [
+        {
+          "column": "b_browser_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_browser_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_browser_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_browser_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_device_family",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_device_family",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "b_device_type",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_device_type",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_language",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_language",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_language_prefix",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_language_prefix",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_os_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_os_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_os_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_os_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_pixel_ratio",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_pixel_ratio",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_schema_version",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "b_screen_height_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_screen_height_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_screen_width_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_screen_width_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_timezone",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_timezone",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_timezone_offset_minutes",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "b_user_agent",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_user_agent",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_height_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_height_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_width_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_width_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_browser_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_browser_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "context_device_type",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_device_type",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "context_format",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "context_os_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_os_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "context_remainder",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_remainder",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_delivery_hostname",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_delivery_hostname",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_delivery_request_count",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_delivery_throughput_bps",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_delivery_transferred_bytes",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_dropped_video_frames",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_environment",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_environment",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_error_category",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_error_category",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_error_fatal",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_error_fatal",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_error_playhead_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_error_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_first_video_frame_time_ms",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_from_playhead_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_from_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_from_state",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_from_state",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_furthest_progress_ratio",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_furthest_progress_ratio",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_last_seeked_at",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_last_seeked_at",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_maximum_playhead_seconds",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_maximum_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_media_duration_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_media_duration_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_media_height_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_media_width_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_occurred_at",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_occurred_at",
+          "compression": "FSST",
+          "segments": 2
+        },
+        {
+          "column": "e_playback_resumed_at",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_playback_resumed_at",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_player_height_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_player_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_player_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_player_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_player_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_player_width_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_playhead_seconds",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_bitrate_bps",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_bitrate_bps",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_codec",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_codec",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_frame_rate",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_frame_rate",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_height",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_height",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_width",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_width",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_state_duration_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_state_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_reason",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_reason",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_count",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_count",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_duration_ms",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_ratio",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_ratio",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rendition_switch_count",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_schema_version",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_sdk_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_sdk_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_sdk_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_sdk_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_count",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_count",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_duration_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_interaction_duration_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_interaction_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_outcome",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_outcome",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_resume_wait_ms",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_seek_started_at",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_started_at",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_bitrate_bps",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_bitrate_bps",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_codec",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_codec",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_frame_rate",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_frame_rate",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_height",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_height",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_width",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_width",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_outcome",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_outcome",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_time_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_time_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_state_after_seek",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_state_after_seek",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_state_before_seek",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_state_before_seek",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_to_playhead_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_to_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_to_state",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_to_state",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_total_video_frames",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "event_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_id",
+          "compression": "FSST",
+          "segments": 4
+        },
+        {
+          "column": "event_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "event_remainder",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_remainder",
+          "compression": "FSST",
+          "segments": 29
+        },
+        {
+          "column": "ingest_id",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "ingest_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Dictionary",
+          "segments": 2
+        },
+        {
+          "column": "viewer_id",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "viewer_id",
+          "compression": "Uncompressed",
+          "segments": 1
+        }
+      ],
+      "database_bytes": 34877440,
+      "engine": "v1.5.6",
+      "events_per_second": 2339.9493236005014,
+      "insert_batches_ms": [
+        213.46020800000002,
+        220.77883400000002,
+        224.938083,
+        221.89904199999998,
+        223.664333,
+        225.462667,
+        222.095083,
+        263.122959,
+        221.344333,
+        227.73874999999998,
+        777.9568340000001,
+        228.19408299999998,
+        243.151917,
+        228.878917,
+        228.788041,
+        228.660583,
+        236.448041,
+        231.593667,
+        226.341041,
+        227.598667,
+        226.646375,
+        1262.9459590000001,
+        237.75954199999998,
+        237.044167,
+        230.217,
+        244.16850000000002,
+        233.22662499999998,
+        225.64024999999998,
+        229.273292,
+        226.839417,
+        238.842625,
+        233.54845799999998,
+        1821.0518749999999,
+        240.762417,
+        231.569584,
+        234.28145899999998,
+        234.16737500000002,
+        227.980667,
+        234.69595800000002,
+        232.436916,
+        245.055291,
+        246.720833,
+        242.767584,
+        2924.4495,
+        418.006167,
+        269.933916,
+        246.275709,
+        241.981708,
+        256.740625,
+        259.173875
+      ],
+      "insert_seconds": 21.367984125,
+      "otlp_records": 0,
+      "queries": {
+        "event_page": {
+          "max_ms": 103.409292,
+          "median_ms": 97.932667,
+          "result": {
+            "events": 100,
+            "serialized_bytes": 230366
+          },
+          "samples_ms": [
+            96.8115,
+            97.77108399999999,
+            97.90050000000001,
+            97.932667,
+            98.38395799999999,
+            98.72766700000001,
+            103.409292
+          ]
+        },
+        "qoe": {
+          "max_ms": 28.704833,
+          "median_ms": 28.180542,
+          "result": {
+            "rebuffer_duration_ms": 2339094,
+            "views": 6250
+          },
+          "samples_ms": [
+            27.108292,
+            27.710333,
+            28.104333,
+            28.180542,
+            28.419667,
+            28.593166999999998,
+            28.704833
+          ]
+        },
+        "summary": {
+          "max_ms": 55.442834000000005,
+          "median_ms": 54.440374999999996,
+          "result": {
+            "playing_time_ms": 40142612.26540436,
+            "unique_viewers": 5681,
+            "views": 6250
+          },
+          "samples_ms": [
+            53.391124999999995,
+            53.585666999999994,
+            53.815459000000004,
+            54.440374999999996,
+            55.084624999999996,
+            55.406875,
+            55.442834000000005
+          ]
+        }
+      },
+      "typed_fields": [],
+      "verified_events": 50000,
+      "verify_seconds": 20.085358625
+    },
+    {
+      "format": "mixed",
+      "variant": "current",
+      "repeat": 1,
+      "bytes_per_event": 2259.92704,
+      "checkpoint_seconds": 3.866125833,
+      "columns": 12,
+      "compression_segments": [
+        {
+          "column": "event_context",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_context",
+          "compression": "Dictionary",
+          "segments": 17
+        },
+        {
+          "column": "event_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_id",
+          "compression": "FSST",
+          "segments": 4
+        },
+        {
+          "column": "event_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "ingest_id",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "ingest_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "payload",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "payload",
+          "compression": "FSST",
+          "segments": 139
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Dictionary",
+          "segments": 2
+        },
+        {
+          "column": "viewer_id",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "viewer_id",
+          "compression": "Uncompressed",
+          "segments": 1
+        }
+      ],
+      "database_bytes": 112996352,
+      "engine": "v1.5.6",
+      "events_per_second": 1741.3521401522817,
+      "insert_batches_ms": [
+        164.76475,
+        355.04449999999997,
+        149.624625,
+        149.04675,
+        145.747541,
+        624.9148749999999,
+        152.48837500000002,
+        153.49991599999998,
+        155.770292,
+        154.4435,
+        147.383333,
+        1082.367917,
+        154.239125,
+        150.232583,
+        151.207291,
+        146.30491700000002,
+        150.835209,
+        1527.347416,
+        152.29441599999998,
+        150.653125,
+        146.316542,
+        150.13516700000002,
+        147.917083,
+        2008.97975,
+        158.776959,
+        149.869792,
+        153.050625,
+        151.014709,
+        152.929416,
+        2710.2982500000003,
+        156.53441700000002,
+        151.92249999999999,
+        149.287583,
+        151.91666700000002,
+        150.42070900000002,
+        3389.872542,
+        160.390958,
+        154.53145800000001,
+        155.7285,
+        155.230541,
+        153.450541,
+        3543.704375,
+        163.266333,
+        160.658084,
+        153.729167,
+        151.942792,
+        155.977459,
+        3808.831916,
+        160.60258299999998,
+        158.134417
+      ],
+      "insert_seconds": 28.713319292,
+      "otlp_records": 7143,
+      "queries": {
+        "event_page": {
+          "max_ms": 97.56483300000001,
+          "median_ms": 95.03025,
+          "result": {
+            "events": 100,
+            "serialized_bytes": 270445
+          },
+          "samples_ms": [
+            92.2115,
+            92.950666,
+            94.913042,
+            95.03025,
+            95.52595799999999,
+            95.962,
+            97.56483300000001
+          ]
+        },
+        "qoe": {
+          "max_ms": 89.956125,
+          "median_ms": 87.245875,
+          "result": {
+            "rebuffer_duration_ms": 2339094,
+            "views": 6250
+          },
+          "samples_ms": [
+            85.376125,
+            87.00141599999999,
+            87.0035,
+            87.245875,
+            87.5185,
+            88.326792,
+            89.956125
+          ]
+        },
+        "summary": {
+          "max_ms": 48.808291,
+          "median_ms": 48.464166000000006,
+          "result": {
+            "playing_time_ms": 40142612.26540436,
+            "unique_viewers": 5681,
+            "views": 6250
+          },
+          "samples_ms": [
+            47.646916999999995,
+            48.04875,
+            48.29025,
+            48.464166000000006,
+            48.50625,
+            48.790791,
+            48.808291
+          ]
+        }
+      },
+      "typed_fields": [],
+      "verified_events": 50000,
+      "verify_seconds": 18.660318833
+    },
+    {
+      "format": "mixed",
+      "variant": "production",
+      "repeat": 1,
+      "bytes_per_event": 1033.09312,
+      "checkpoint_seconds": 2.913539459,
+      "columns": 92,
+      "compression_segments": [
+        {
+          "column": "b_browser_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_browser_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_browser_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_browser_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_device_family",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_device_family",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "b_device_type",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_device_type",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_language",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_language",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_language_prefix",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_language_prefix",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_os_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_os_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_os_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_os_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_pixel_ratio",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_pixel_ratio",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_schema_version",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "b_screen_height_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_screen_height_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_screen_width_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_screen_width_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_timezone",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_timezone",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_timezone_offset_minutes",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "b_user_agent",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_user_agent",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_height_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_height_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_width_px",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "b_viewport_width_px",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_browser_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_browser_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "context_device_type",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_device_type",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "context_format",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "context_os_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_os_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "context_remainder",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "context_remainder",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_connector_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_delivery_hostname",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_delivery_hostname",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_delivery_request_count",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_delivery_throughput_bps",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_delivery_transferred_bytes",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_dropped_video_frames",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_environment",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_environment",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_error_category",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_error_category",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_error_fatal",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_error_fatal",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_error_playhead_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_error_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_first_video_frame_time_ms",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_from_playhead_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_from_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_from_state",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_from_state",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_furthest_progress_ratio",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_furthest_progress_ratio",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_last_seeked_at",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_last_seeked_at",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_maximum_playhead_seconds",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_maximum_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_media_duration_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_media_duration_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_media_height_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_media_width_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_occurred_at",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_occurred_at",
+          "compression": "FSST",
+          "segments": 2
+        },
+        {
+          "column": "e_playback_resumed_at",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_playback_resumed_at",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_player_height_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_player_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_player_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_player_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_player_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_player_width_px",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_playhead_seconds",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_bitrate_bps",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_bitrate_bps",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_codec",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_codec",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_frame_rate",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_frame_rate",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_height",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_height",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_width",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_rendition_width",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_state_duration_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_previous_state_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_reason",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_reason",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_count",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_count",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_duration_ms",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_ratio",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_rebuffer_ratio",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_rendition_switch_count",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_schema_version",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_sdk_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_sdk_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_sdk_version",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_sdk_version",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_count",
+          "compression": "ALP",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_count",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_duration_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_interaction_duration_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_interaction_duration_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_outcome",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_outcome",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_resume_wait_ms",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "e_seek_started_at",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "e_seek_started_at",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_bitrate_bps",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_bitrate_bps",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_codec",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_codec",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_frame_rate",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_frame_rate",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_height",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_height",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_width",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_selected_rendition_width",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_outcome",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_outcome",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_time_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "e_startup_time_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_state_after_seek",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_state_after_seek",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_state_before_seek",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_state_before_seek",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_to_playhead_seconds",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "e_to_playhead_seconds",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_to_state",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "e_to_state",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "e_total_video_frames",
+          "compression": "Constant",
+          "segments": 2
+        },
+        {
+          "column": "event_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_id",
+          "compression": "FSST",
+          "segments": 4
+        },
+        {
+          "column": "event_name",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_name",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "event_remainder",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "event_remainder",
+          "compression": "FSST",
+          "segments": 28
+        },
+        {
+          "column": "ingest_id",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "ingest_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "occurred_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "RLE",
+          "segments": 1
+        },
+        {
+          "column": "playing_time_ms",
+          "compression": "Uncompressed",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "received_at_ms",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "BitPacking",
+          "segments": 1
+        },
+        {
+          "column": "sequence",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "video_id",
+          "compression": "Dictionary",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Constant",
+          "segments": 1
+        },
+        {
+          "column": "view_id",
+          "compression": "Dictionary",
+          "segments": 2
+        },
+        {
+          "column": "viewer_id",
+          "compression": "FSST",
+          "segments": 1
+        },
+        {
+          "column": "viewer_id",
+          "compression": "Uncompressed",
+          "segments": 1
+        }
+      ],
+      "database_bytes": 51654656,
+      "engine": "v1.5.6",
+      "events_per_second": 1907.7402233762534,
+      "insert_batches_ms": [
+        220.20891600000002,
+        236.31750000000002,
+        238.541791,
+        235.10737500000002,
+        236.131625,
+        233.718625,
+        235.18729199999999,
+        759.167834,
+        242.697375,
+        236.515375,
+        237.15366600000002,
+        235.513125,
+        248.87645799999999,
+        244.916333,
+        244.54666699999999,
+        1217.33925,
+        255.34179099999997,
+        245.23575,
+        249.430916,
+        253.32845799999998,
+        262.076875,
+        247.34920799999998,
+        251.742209,
+        1730.568625,
+        261.635542,
+        264.244542,
+        278.357667,
+        253.30016700000002,
+        252.873375,
+        248.877916,
+        292.253917,
+        2407.883583,
+        256.375958,
+        246.26141700000002,
+        239.713958,
+        241.182708,
+        238.692834,
+        240.88554200000002,
+        240.69062499999998,
+        2508.4977080000003,
+        253.097958,
+        245.96775000000002,
+        267.055042,
+        435.583041,
+        247.605542,
+        244.405084,
+        243.262375,
+        3022.912542,
+        253.15329199999996,
+        251.65829200000002
+      ],
+      "insert_seconds": 26.209019125,
+      "otlp_records": 7143,
+      "queries": {
+        "event_page": {
+          "max_ms": 133.589292,
+          "median_ms": 118.560833,
+          "result": {
+            "events": 100,
+            "serialized_bytes": 270445
+          },
+          "samples_ms": [
+            115.451792,
+            116.501667,
+            117.065375,
+            118.560833,
+            119.677459,
+            120.717041,
+            133.589292
+          ]
+        },
+        "qoe": {
+          "max_ms": 26.915374999999997,
+          "median_ms": 25.573458,
+          "result": {
+            "rebuffer_duration_ms": 2339094,
+            "views": 6250
+          },
+          "samples_ms": [
+            24.916500000000003,
+            25.073667,
+            25.276,
+            25.573458,
+            25.614167000000002,
+            26.711583,
+            26.915374999999997
+          ]
+        },
+        "summary": {
+          "max_ms": 53.064166,
+          "median_ms": 50.772166,
+          "result": {
+            "playing_time_ms": 40142612.26540436,
+            "unique_viewers": 5681,
+            "views": 6250
+          },
+          "samples_ms": [
+            50.139165999999996,
+            50.302417000000005,
+            50.609625,
+            50.772166,
+            51.645542000000006,
+            52.017459,
+            53.064166
+          ]
+        }
+      },
+      "typed_fields": [],
+      "verified_events": 50000,
+      "verify_seconds": 21.37010275
+    }
+  ],
+  "limitations": [
+    "Local isolated storage benchmark, not HTTP ingestion capacity or production sizing.",
+    "Shared host; fixed two DuckDB threads and 512 MiB buffer memory limit, not a process memory limit.",
+    "SDK event templates replayed with synthetic context, identifiers and varying measurements; not production traffic.",
+    "Same records, order, batches, primary/unique indexes and original OTLP retention in all variants.",
+    "Experimental typed schemas are discovered from fixture scalar types; production uses the actual versioned storage module. Fresh database comparison, not migration disk reclamation.",
+    "Timing includes file parsing and preparation; reads are sequential warm queries, not concurrent or cold-cache measurements.",
+    "Every event, derived context, receipt time and OTLP object is compared after reopening; JSON numeric values compare by value.",
+    "No retention churn, crash recovery, long-running views or archival behavior is tested."
+  ],
+  "workload": {
+    "event_names": [
+      "chunkify.video.view_started",
+      "chunkify.video.playback_state_changed",
+      "chunkify.video.view_snapshot",
+      "chunkify.video.rendition_changed",
+      "chunkify.video.playback_error",
+      "chunkify.video.seek_completed",
+      "chunkify.video.view_ended"
+    ],
+    "events_per_view": 8,
+    "recorded_playing_time_ms": 1102.8753739999997,
+    "large_property_bytes": 16384,
+    "videos": 10,
+    "viewers": 1000,
+    "browser_context": null,
+    "browser_context_nulls_omitted": false,
+    "templates": [
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.view_started",
+        "event_id": "52309f8e-b5a4-4c97-ba63-e8a7147016b9",
+        "sequence": 1,
+        "occurred_at": "2026-10-19T14:37:28.353Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "media_duration_seconds": 120,
+        "startup_time_ms": null,
+        "first_video_frame_time_ms": null,
+        "playing_time_ms": 0,
+        "rebuffer_count": 0,
+        "rebuffer_duration_ms": 0,
+        "rebuffer_ratio": null,
+        "seek_count": 0,
+        "seek_duration_ms": 0,
+        "maximum_playhead_seconds": 0,
+        "furthest_progress_ratio": 0,
+        "media_width_px": null,
+        "media_height_px": null,
+        "player_width_px": null,
+        "player_height_px": null,
+        "dropped_video_frames": null,
+        "total_video_frames": null,
+        "selected_rendition_width": null,
+        "selected_rendition_height": null,
+        "selected_rendition_codec": null,
+        "selected_rendition_bitrate_bps": null,
+        "rendition_switch_count": null,
+        "delivery_request_count": null,
+        "delivery_transferred_bytes": null,
+        "delivery_throughput_bps": null,
+        "rendition_playing_time": []
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.playback_state_changed",
+        "event_id": "4c5ea68c-a038-4966-b5ba-a6876dda72ce",
+        "sequence": 2,
+        "occurred_at": "2026-10-19T14:37:28.353Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "playhead_seconds": 0,
+        "from_state": "startup",
+        "to_state": "playing",
+        "previous_state_duration_ms": 0.7047090000000082
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.view_snapshot",
+        "event_id": "a8da25e8-0765-4f6a-9b47-2a4ca242647f",
+        "sequence": 3,
+        "occurred_at": "2026-10-19T14:37:29.354Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "media_duration_seconds": 120,
+        "startup_time_ms": 0.6660840000000121,
+        "first_video_frame_time_ms": null,
+        "playing_time_ms": 1000.9868749999999,
+        "rebuffer_count": 0,
+        "rebuffer_duration_ms": 0,
+        "rebuffer_ratio": 0,
+        "seek_count": 0,
+        "seek_duration_ms": 0,
+        "maximum_playhead_seconds": 0,
+        "furthest_progress_ratio": 0,
+        "media_width_px": null,
+        "media_height_px": null,
+        "player_width_px": null,
+        "player_height_px": null,
+        "dropped_video_frames": null,
+        "total_video_frames": null,
+        "selected_rendition_width": null,
+        "selected_rendition_height": null,
+        "selected_rendition_codec": null,
+        "selected_rendition_bitrate_bps": null,
+        "rendition_switch_count": null,
+        "delivery_request_count": null,
+        "delivery_transferred_bytes": null,
+        "delivery_throughput_bps": null,
+        "rendition_playing_time": [
+          {
+            "width": 640,
+            "height": 360,
+            "codec": "avc1",
+            "bitrate_bps": 500000,
+            "frame_rate": 30,
+            "playing_time_ms": 1000.9868749999999
+          }
+        ]
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.rendition_changed",
+        "event_id": "fb6f3dd2-5258-43dd-8d1d-11b6a8c96902",
+        "sequence": 4,
+        "occurred_at": "2026-10-19T14:37:29.404Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "playhead_seconds": 0,
+        "player_width_px": null,
+        "player_height_px": null,
+        "previous_rendition_width": 640,
+        "previous_rendition_height": 360,
+        "previous_rendition_codec": "avc1",
+        "previous_rendition_bitrate_bps": 500000,
+        "previous_rendition_frame_rate": 30,
+        "selected_rendition_width": 1280,
+        "selected_rendition_height": 720,
+        "selected_rendition_codec": "avc1",
+        "selected_rendition_bitrate_bps": 1000000,
+        "selected_rendition_frame_rate": 30
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.playback_error",
+        "event_id": "6e103724-2cd1-487d-933b-56d38a97b47a",
+        "sequence": 5,
+        "occurred_at": "2026-10-19T14:37:29.456Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": "network",
+        "error_code": 2,
+        "error_fatal": true,
+        "error_playhead_seconds": 30,
+        "media_duration_seconds": 120,
+        "startup_time_ms": 0.6660840000000121,
+        "first_video_frame_time_ms": null,
+        "playing_time_ms": 1102.8753739999997,
+        "rebuffer_count": 0,
+        "rebuffer_duration_ms": 0,
+        "rebuffer_ratio": 0,
+        "seek_count": 1,
+        "seek_duration_ms": 0.03304200000002311,
+        "maximum_playhead_seconds": 30,
+        "furthest_progress_ratio": 0.25,
+        "media_width_px": null,
+        "media_height_px": null,
+        "player_width_px": null,
+        "player_height_px": null,
+        "dropped_video_frames": null,
+        "total_video_frames": null,
+        "selected_rendition_width": null,
+        "selected_rendition_height": null,
+        "selected_rendition_codec": null,
+        "selected_rendition_bitrate_bps": null,
+        "rendition_switch_count": null,
+        "delivery_request_count": null,
+        "delivery_transferred_bytes": null,
+        "delivery_throughput_bps": null,
+        "rendition_playing_time": [
+          {
+            "width": 640,
+            "height": 360,
+            "codec": "avc1",
+            "bitrate_bps": 500000,
+            "frame_rate": 30,
+            "playing_time_ms": 1051.481583
+          },
+          {
+            "width": 1280,
+            "height": 720,
+            "codec": "avc1",
+            "bitrate_bps": 1000000,
+            "frame_rate": 30,
+            "playing_time_ms": 51.39379099999974
+          }
+        ]
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.seek_completed",
+        "event_id": "64b3441d-f184-4cd4-aeb4-790ed78c3247",
+        "sequence": 6,
+        "occurred_at": "2026-10-19T14:37:29.456Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "seek_started_at": "2026-10-19T14:37:28.208Z",
+        "last_seeked_at": "2026-10-19T14:37:28.208Z",
+        "playback_resumed_at": "2026-10-19T14:37:28.208Z",
+        "state_before_seek": "playing",
+        "state_after_seek": "error",
+        "from_playhead_seconds": 0,
+        "to_playhead_seconds": 30,
+        "seek_interaction_duration_ms": 0.03304200000002311,
+        "seek_resume_wait_ms": null,
+        "seek_outcome": "interrupted"
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.playback_state_changed",
+        "event_id": "9fab0fde-cefa-44b7-9628-b64a386bced4",
+        "sequence": 7,
+        "occurred_at": "2026-10-19T14:37:29.456Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": null,
+        "startup_outcome": null,
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "playhead_seconds": 30,
+        "from_state": "error",
+        "to_state": "stopped",
+        "previous_state_duration_ms": 0.23212499999999636
+      },
+      {
+        "schema_version": 1,
+        "event_name": "chunkify.video.view_ended",
+        "event_id": "cd94fd97-c5bb-4d2d-b292-a2877f5b1b6c",
+        "sequence": 8,
+        "occurred_at": "2026-10-19T14:37:29.456Z",
+        "view_id": "78eaa4d0-2353-4695-adb2-5b029cae4679",
+        "video_id": "video-0",
+        "sdk_name": "@chunkify/analytics",
+        "sdk_version": "0.3.0",
+        "connector_name": "benchmark-fixture",
+        "connector_version": "1",
+        "player_name": null,
+        "player_version": null,
+        "delivery_hostname": null,
+        "environment": null,
+        "viewer_id": "viewer-0",
+        "reason": "destroyed",
+        "startup_outcome": "started",
+        "error_category": null,
+        "error_code": null,
+        "error_fatal": null,
+        "error_playhead_seconds": null,
+        "media_duration_seconds": 120,
+        "startup_time_ms": 0.6660840000000121,
+        "first_video_frame_time_ms": null,
+        "playing_time_ms": 1102.8753739999997,
+        "rebuffer_count": 0,
+        "rebuffer_duration_ms": 0,
+        "rebuffer_ratio": 0,
+        "seek_count": 1,
+        "seek_duration_ms": 0.03304200000002311,
+        "maximum_playhead_seconds": 30,
+        "furthest_progress_ratio": 0.25,
+        "media_width_px": null,
+        "media_height_px": null,
+        "player_width_px": null,
+        "player_height_px": null,
+        "dropped_video_frames": null,
+        "total_video_frames": null,
+        "selected_rendition_width": null,
+        "selected_rendition_height": null,
+        "selected_rendition_codec": null,
+        "selected_rendition_bitrate_bps": null,
+        "rendition_switch_count": null,
+        "delivery_request_count": null,
+        "delivery_transferred_bytes": null,
+        "delivery_throughput_bps": null,
+        "rendition_playing_time": [
+          {
+            "width": 640,
+            "height": 360,
+            "codec": "avc1",
+            "bitrate_bps": 500000,
+            "frame_rate": 30,
+            "playing_time_ms": 1051.481583
+          },
+          {
+            "width": 1280,
+            "height": 720,
+            "codec": "avc1",
+            "bitrate_bps": 1000000,
+            "frame_rate": 30,
+            "playing_time_ms": 51.39379099999974
+          }
+        ]
+      }
+    ]
+  },
+  "fixture_sha256": "2c2b1dc6bf0d5655b0889946256375152a3a53f4867b28038ffac617db413eba",
+  "fixture_bytes": 110772472
+}

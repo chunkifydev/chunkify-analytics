@@ -945,3 +945,10 @@ It does not establish five-minute capacity; the report records the next steps.
 The subsequent [generator memory investigation](generator-memory.md) reproduced
 and removed that RSS failure in isolated sender tests, then checked the launcher
 against Docker. A sustained collector capacity run is still required.
+
+The [retry with the bounded generator](stability-retry.md) reached 2,989.71
+successful requests/s for 109 seconds before crossing the collector's 1,800 MiB
+container-memory guard. All 377,112 acknowledged events survived restart, and
+aggregate latency targets passed. It still failed the planned five-minute run;
+the report distinguishes cgroup memory from process RSS and identifies the next
+memory measurements and resource comparison.

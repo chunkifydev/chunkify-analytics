@@ -759,6 +759,17 @@ The collector CI job runs these checks and Rust/MCP tests. The container CI job
 runs Docker lifecycle and benchmark-runner checks. `COLLECTOR_BINARY` can point
 the Node integration tests at another built collector executable.
 
+CI reports builds and integration tests as separate steps. Native builds cache
+Cargo dependencies for the selected toolchain. Docker builds persist both image
+layers and the registry/target cache mounts, following [Docker's cache-mount
+guidance](https://docs.docker.com/build/ci/github-actions/cache/#cache-mounts).
+The Docker Cargo cache key includes the runner platform, Dockerfile, manifest and
+lockfile. The build removes only this package's release artifacts before compiling,
+so source changes and reverts rebuild the app while reusing its dependencies.
+CI changes a build argument to run Cargo on every attempt without clearing its
+cache mounts, so an image-layer hit cannot hide an empty mount. A cold cache still requires compiling bundled DuckDB. CI builds a
+local test image and does not publish it.
+
 To exercise an upgrade, also set `COLLECTOR_PREVIOUS_BINARY` to a previously built
 collector executable when running `npm run test:collector`. The upgrade test writes
 through that service, stops it abruptly, starts the current service with the same

@@ -746,7 +746,8 @@ outstanding requests between phases and report the drain duration.
 Resource sampling requires Linux cgroup v2, including inside Docker Desktop.
 Samples include process RSS, cgroup memory including filesystem cache,
 container CPU, data-directory and WAL sizes, free host/volume disk, and generator
-RSS. The generator also reports CPU and event-loop delay. Sampling incurs Docker
+RSS, V8 heap usage/capacity, external memory and array-buffer memory. The generator
+also reports CPU and event-loop delay. Sampling incurs Docker
 exec overhead and can miss peaks. Enable `COLLECTOR_LOAD_PROFILE=1` to include
 `collector_profile` in each result. The profile records count, total milliseconds,
 and maximum milliseconds for queue wait and execution by database operation, plus
@@ -915,6 +916,13 @@ Before starting, free host disk must cover the data budget plus the 4 GiB floor.
 Runtime disk, 1,800 MiB container-memory and 1,024 MiB generator-memory guards
 remain active. The container still has a hard 2 GiB memory limit without swap.
 
+The public `load.mjs` command launches its worker with a 512 MiB old-generation
+budget and a 64 MiB semi-space budget. On the tested Node 24 runtime this gives
+a 704 MiB V8 heap limit, leaving room below the RSS guard for other allocations.
+The worker refuses an effective heap limit above 768 MiB before starting Docker.
+Reports record the effective heap limit and Node flags. Use the public command;
+remove conflicting heap settings from `NODE_OPTIONS` if the startup check fails.
+
 The verifier stores encoded replay descriptions with compact UUID strings and
 releases each description after checking that event. It accumulates only the
 per-view fields needed for independent summaries. Every acknowledged event,
@@ -934,3 +942,6 @@ The [five-minute stability attempt](stability.md) stopped after 101 seconds when
 the generator exceeded its memory guard. All acknowledged events survived
 restart, but request omissions and dashboard latency also failed the targets.
 It does not establish five-minute capacity; the report records the next steps.
+The subsequent [generator memory investigation](generator-memory.md) reproduced
+and removed that RSS failure in isolated sender tests, then checked the launcher
+against Docker. A sustained collector capacity run is still required.

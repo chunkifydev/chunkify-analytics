@@ -12,13 +12,20 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 duckdb = { version = "=1.10506.0", features = ["bundled"] }
 flate2 = "1"
+futures = "0.3"
 ipnet = "2"
 ring = "0.17.14"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-io"] }
 rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+rmcp = { version = "3.5.1", default-features = false, features = ["client", "transport-child-process"] }
 
 [profile.dev]
 debug = 0

@@ -1,5 +1,6 @@
 *
 !Cargo.toml
 !Cargo.lock
+!openapi.json
 !src/
 !src/**

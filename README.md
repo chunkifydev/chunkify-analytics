@@ -32,8 +32,11 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
    Browser, OS and device-type filters are available on all read endpoints.
 
 6. Isolated projects, named ingest/read keys, project origin policies and ingestion
-   limits, with CLI administration. Implemented. Hosted account membership and MCP
-   remain separate follow-ups.
+   limits, with CLI administration. Implemented. Hosted account membership remains
+   a separate follow-up.
+7. A local, read-only MCP companion for AI-assisted dashboard development. See
+   [MCP setup and verification](mcp.md). MCP is required for the first release;
+   the manual AI-client dashboard walkthrough remains a release check.
 
 This is a development version.
 

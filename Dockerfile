@@ -3,6 +3,7 @@ FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db127
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY openapi.json ./
 ARG TARGETARCH
 ARG BUILD_JOBS=2
 RUN --mount=type=cache,id=collector-registry,target=/usr/local/cargo/registry \

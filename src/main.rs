@@ -2,6 +2,7 @@ mod api;
 mod config;
 mod context;
 mod event;
+mod mcp;
 mod otlp;
 mod profile;
 mod projects;
@@ -14,10 +15,13 @@ mod writer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = config::Config::load()?;
     let mut args = std::env::args().skip(1);
     let command = args.next();
     let parameters: Vec<_> = args.collect();
+    if command.as_deref() == Some("mcp") && parameters.is_empty() {
+        return mcp::run().await;
+    }
+    let config = config::Config::load()?;
     match (command.as_deref(), parameters.as_slice()) {
         (Some("init"), []) => config.initialize(),
         (Some("serve"), []) => {
@@ -82,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _lock = config.lock()?;
             config.rotate_key(kind)
         }
-        _ => Err("Usage: chunkify-analytics-collector init | serve | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
+        _ => Err("Usage: chunkify-analytics-collector init | serve | mcp | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
     }
 }
 

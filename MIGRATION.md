@@ -31,4 +31,21 @@ The governing specification remains issue #381 in `chunkifydev/chunkify`.
 
 ## Verification
 
-Verification results will be recorded here before the initial private push.
+Verified on macOS on 2026-10-19 against the published SDK 0.4.0:
+
+- The 89 original tracked collector/test/workflow files had identical Git blobs
+  immediately after path extraction, before standalone build adaptations.
+- A fresh checkout installs from `package-lock.json` using `npm ci`; no vendored
+  SDK archive or sibling checkout is needed.
+- The standalone Cargo build, formatting check and Clippy across all targets pass.
+- HTTP/API/browser integration tests pass: 69 passed, two optional previous-binary
+  upgrade tests skipped because `COLLECTOR_PREVIOUS_BINARY` was not supplied.
+- Rust tests pass: nine unit tests and four MCP integration tests.
+- Standards and Spec migration reviews report zero findings.
+
+Native validation reused the existing Cargo dependency cache; the Rust code was
+built from the extracted repository. A fresh Docker build is compiling bundled
+DuckDB. Container lifecycle verification is pending; CI includes the Docker build
+and lifecycle/benchmark-runner checks. No new capacity benchmark was run.
+The manual AI dashboard walkthrough and first-release acceptance checks remain
+separate from repository migration.

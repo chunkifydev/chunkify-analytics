@@ -776,6 +776,33 @@ through that service, stops it abruptly, starts the current service with the sam
 data directory, and checks the old records, keys, new OTLP writes, and another restart.
 Without this setting, the upgrade test is skipped.
 
+### Focused writer-batch comparison
+
+To compare the existing 100-event and 1,000-event batch caps before a full load
+run, build the collector and run:
+
+```sh
+cargo build --locked
+COLLECTOR_BATCH_PROBE_REPORT=/tmp/writer-batching.json node tests/http/writer-batching.mjs
+```
+
+The probe copies the same disposable preloaded database for each run, reverses
+the comparison order, and checks every measured event, OTLP envelope and browser
+context after graceful restart. It uses the SDK's enriched view-start payload,
+100 events per OTLP request, ten concurrent requests, a 10 ms batching delay and
+a 16 MiB batch-byte budget in both cases. These settings apply only to its child
+processes. Default runs preload 10,000 events and add 10,000 per case.
+`COLLECTOR_BATCH_PROBE_PRELOAD` supports 1,000..200,000 and
+`COLLECTOR_BATCH_PROBE_EVENTS` supports 1,000..20,000, in multiples of 1,000.
+`COLLECTOR_BINARY` selects a prebuilt executable.
+
+This is a local diagnostic comparison. It does not establish requests/s capacity,
+exercise the durable queue or concurrent dashboard reads, or set release defaults.
+Set `COLLECTOR_BATCH_PROBE_BUILD_PROFILE` to record the supplied binary's build
+profile in the report. A usable report must have `status: "completed"`.
+The first [measured comparison](writer-batching.md) records the results and the
+limits of this diagnostic.
+
 ### Container checks and capacity measurements
 
 With Docker running, build and exercise the image from the repository root:

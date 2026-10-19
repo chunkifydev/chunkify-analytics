@@ -1,3 +1,4 @@
+import { sdkDist } from "../sdk-path.mjs";
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
@@ -44,7 +45,7 @@ export async function captureWorkload({ browserContext = false } = {}) {
       if (request.url === "/") response.writeHead(200, { "Content-Type": "text/html" }).end("<!doctype html><video></video>");
       else if (/^\/[a-z-]+\.js$/.test(request.url ?? "")) {
         try {
-          const source = await readFile(resolve("packages/analytics/dist", request.url.slice(1)));
+          const source = await readFile(resolve(sdkDist, request.url.slice(1)));
           response.writeHead(200, { "Content-Type": "text/javascript" }).end(source);
         } catch { response.writeHead(404).end(); }
       } else response.writeHead(404).end();

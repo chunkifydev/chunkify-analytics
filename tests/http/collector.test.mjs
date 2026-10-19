@@ -1,3 +1,4 @@
+import { sdkDist } from "./sdk-path.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -13,7 +14,7 @@ import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("services/analytics-collector/target/debug/chunkify-analytics-collector");
+const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics-collector");
 
 // Capture the public adapter's actual HTTP output for tests of gateway batching.
 async function otlpRequests(events, options) {
@@ -605,7 +606,7 @@ test("the browser Chunkify adapter persists context through authenticated ingest
       response.writeHead(200, { "Content-Type": "text/html" }).end("<!doctype html><video></video>");
     } else if (/^\/[a-z-]+\.js$/.test(request.url ?? "")) {
       try {
-        const source = await readFile(resolve("packages/analytics/dist", request.url.slice(1)));
+        const source = await readFile(resolve(sdkDist, request.url.slice(1)));
         response.writeHead(200, { "Content-Type": "text/javascript" }).end(source);
       } catch { response.writeHead(404).end(); }
     } else { response.writeHead(404).end(); }

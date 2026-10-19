@@ -12,7 +12,7 @@ import { attachAnalytics } from "@chunkify/analytics";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { component, assertRequest, assertResponse } from "./openapi-support.mjs";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("services/analytics-collector/target/debug/chunkify-analytics-collector");
+const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics-collector");
 
 async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-openapi-test-"));

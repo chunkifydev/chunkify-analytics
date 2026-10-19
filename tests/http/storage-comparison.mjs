@@ -15,10 +15,10 @@ const count = Number(process.env.STORAGE_EVENTS ?? 200000);
 const repeats = Number(process.env.STORAGE_REPEATS ?? 2);
 assert.ok(Number.isSafeInteger(count) && count >= 100 && count <= 500000);
 assert.ok(Number.isSafeInteger(repeats) && repeats >= 1 && repeats <= 3);
-const binary = resolve(process.env.STORAGE_BINARY ?? "services/analytics-collector/target/debug/examples/storage_comparison");
+const binary = resolve(process.env.STORAGE_BINARY ?? "target/debug/examples/storage_comparison");
 const selectedVariants = (process.env.STORAGE_VARIANTS ?? "current,typed,typed_context").split(",");
 assert.ok(selectedVariants.every((v) => ["current", "typed", "typed_context", "production"].includes(v)));
-const output = resolve(process.env.STORAGE_REPORT ?? "services/analytics-collector/storage-comparison-2026-10-19.json");
+const output = resolve(process.env.STORAGE_REPORT ?? "storage-comparison-2026-10-19.json");
 const directory = await mkdtemp(join(tmpdir(), "chunkify-storage-comparison-"));
 const disk = await statfs(directory);
 assert.ok(disk.bavail * disk.bsize > 4 * 1024 ** 3, "Need at least 4 GiB free temporary disk");
@@ -36,10 +36,10 @@ function execute(args) {
   });
 }
 
-const sourcePaths = ["tests/collector/storage-comparison.mjs", "tests/collector/docker/workload.mjs",
-  "services/analytics-collector/examples/storage_comparison.rs", "services/analytics-collector/src/context.rs",
-  "services/analytics-collector/src/event.rs", "services/analytics-collector/src/store.rs",
-  "services/analytics-collector/src/writer.rs", "services/analytics-collector/src/storage.rs", "services/analytics-collector/Cargo.lock"];
+const sourcePaths = ["tests/http/storage-comparison.mjs", "tests/http/docker/workload.mjs",
+  "examples/storage_comparison.rs", "src/context.rs",
+  "src/event.rs", "src/store.rs",
+  "src/writer.rs", "src/storage.rs", "Cargo.lock"];
 const report = { measured_at: new Date().toISOString(), host: { platform: platform(), architecture: arch(),
   cpu: cpus()[0]?.model, logical_cpus: cpus().length }, events: count, repeats,
   batch_size: 1000, source_sha256: {}, results: [], limitations: [

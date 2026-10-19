@@ -2,19 +2,8 @@ name: Analytics collector
 
 on:
   push:
-    paths:
-      - "services/analytics-collector/**"
-      - "packages/analytics/**"
-      - "tests/collector/**"
-      - "package*.json"
-      - ".github/workflows/collector.yml"
   pull_request:
-    paths:
-      - "services/analytics-collector/**"
-      - "packages/analytics/**"
-      - "tests/collector/**"
-      - "package*.json"
-      - ".github/workflows/collector.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -36,10 +25,10 @@ jobs:
       - run: npm ci
       - run: npm run check:collector:openapi
       - run: npx playwright install --with-deps --only-shell chromium
-      - run: cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
+      - run: cargo fmt --check
       - run: npm run test:collector
-      - run: cargo test --locked --manifest-path services/analytics-collector/Cargo.toml
-      - run: cargo clippy --locked --manifest-path services/analytics-collector/Cargo.toml --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   container:
     runs-on: ubuntu-latest

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
-export const contractPath = new URL("../../services/analytics-collector/openapi.json", import.meta.url);
+export const contractPath = new URL("../../openapi.json", import.meta.url);
 export const contract = JSON.parse(await readFile(contractPath, "utf8"));
 const schemaId = "https://chunkify.example/collector-contract";
 const ajv = new Ajv2020({ strict: false, allErrors: true });

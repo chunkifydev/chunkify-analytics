@@ -1,6 +1,9 @@
-# Chunkify analytics collector
+# Chunkify analytics
 
 A Rust service that stores Chunkify playback events in an embedded DuckDB file.
+The executable is `chunkify-analytics-collector`; it also provides the local MCP companion.
+The JavaScript SDK remains in [chunkify-player](https://github.com/chunkifydev/chunkify-player/tree/main/packages/analytics).
+See [repository extraction notes](MIGRATION.md) for history and the test SDK dependency.
 The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/issues/381).
 
 ## Implementation stages
@@ -48,7 +51,7 @@ It also documents the experimental durable queue's acknowledgement and read
 visibility behavior and project isolation. Project administration is CLI-only.
 
 `npm run check:collector:openapi` validates the document, schemas and examples.
-`npm run test:collector` builds the SDK and collector, then checks the contract
+`npm run test:collector` builds the collector, then checks the contract
 against real HTTP responses alongside the integration suite. CI runs both checks.
 
 ## Build and run
@@ -215,7 +218,7 @@ for measurements and workload limitations.
 Docker Engine 25 or later with BuildKit is required. From the repository root:
 
 ```sh
-docker build -t chunkify-analytics-collector:local services/analytics-collector
+docker build -t chunkify-analytics-collector:local .
 docker volume create chunkify-analytics-data
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
@@ -349,7 +352,7 @@ the first payload or count it twice.
 The Chunkify adapter adds `browser_context` to every event by default. Read it at
 `events[].event.browser_context` through `GET /v1/events`. Set
 `collectBrowserContext: false` to send playback events only. See the SDK's
-[field definitions and PostHog comparison](../../packages/analytics/README.md#browser-context-fields).
+[field definitions and PostHog comparison](https://github.com/chunkifydev/chunkify-player/blob/main/packages/analytics/README.md#browser-context-fields).
 Browser context uses the typed storage described above. Browser/OS/device filters
 use the collector-derived event context. The collector adds request IP context
 separately below.
@@ -732,7 +735,9 @@ on the restored copy before starting it.
 
 ## Development
 
-The collector is a Cargo project under `services/`, separate from the npm packages.
+The collector is a Cargo project at the repository root. Node.js is needed only
+for integration tests and benchmarks. `npm ci` installs the published `@chunkify/analytics@0.4.0` SDK and the test
+tools pinned in `package-lock.json`.
 Its integration tests use the real JavaScript analytics package and
 Chunkify/HTTP/OTLP adapters, then query a running service before and after a restart.
 Tests use temporary data directories and require no external services.
@@ -745,13 +750,14 @@ From the repository root, with Cargo available on PATH:
 npm ci
 npx playwright install --with-deps --only-shell chromium
 npm run test:collector
-cargo fmt --manifest-path services/analytics-collector/Cargo.toml --check
-cargo clippy --locked --manifest-path services/analytics-collector/Cargo.toml -- -D warnings
+cargo fmt --check
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
-The dedicated collector CI job runs these checks. Existing npm and browser checks
-continue in the main CI job. `COLLECTOR_BINARY` can point the Node integration
-tests at another built collector executable.
+The collector CI job runs these checks and Rust/MCP tests. The container CI job
+runs Docker lifecycle and benchmark-runner checks. `COLLECTOR_BINARY` can point
+the Node integration tests at another built collector executable.
 
 To exercise an upgrade, also set `COLLECTOR_PREVIOUS_BINARY` to a previously built
 collector executable when running `npm run test:collector`. The upgrade test writes
@@ -780,15 +786,15 @@ Run capacity measurements separately; throughput is not a CI pass/fail gate:
 COLLECTOR_LOAD_REPORT=/tmp/collector-capacity.json npm run benchmark:collector
 ```
 
-The command builds the SDK and image, then runs the matrix below. To reuse an
-already built image, run `node tests/collector/docker/load.mjs` directly. Set
+The command builds the image, then runs the matrix below. To reuse an
+already built image, run `node tests/http/docker/load.mjs` directly. Set
 `COLLECTOR_IMAGE` to select a different local image. The JSON report records its
 immutable image ID separately from the current checkout's source revision.
 
 List the plan without contacting Docker:
 
 ```sh
-node tests/collector/docker/load.mjs --list
+node tests/http/docker/load.mjs --list
 ```
 
 | Cases | Workload |
@@ -834,7 +840,7 @@ For a longer measurement around a candidate rate, using the existing image:
 COLLECTOR_LOAD_CASES=native-200,otlp-200 \
 COLLECTOR_LOAD_SECONDS=120 \
 COLLECTOR_LOAD_REPORT=/tmp/collector-longer.json \
-node tests/collector/docker/load.mjs
+node tests/http/docker/load.mjs
 ```
 
 The collector's benchmark settings raise the rate cap to 10,000 requests/s,
@@ -866,7 +872,7 @@ response was not received.
 
 A generator pause longer than five seconds invalidates the case and stops the
 run, for example if the machine sleeps. Keep the host awake during measurement;
-on macOS, `caffeinate -i node tests/collector/docker/load.mjs` holds a temporary
+on macOS, `caffeinate -i node tests/http/docker/load.mjs` holds a temporary
 idle-sleep assertion for the command's lifetime.
 
 Request latency measures HTTP delivery after serialization and compression.

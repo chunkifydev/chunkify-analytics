@@ -10,7 +10,7 @@ import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("services/analytics-collector/target/debug/chunkify-analytics-collector");
+const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics-collector");
 const command = promisify(execFile);
 const chrome = { schema_version: 1, browser_name: "Chrome", os_name: "Linux", device_type: "desktop" };
 const firefox = { schema_version: 1, browser_name: "Firefox", os_name: "Windows", device_type: "desktop" };

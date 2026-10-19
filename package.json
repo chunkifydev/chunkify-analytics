@@ -1,0 +1,26 @@
+{
+  "name": "chunkify-analytics",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "Self-hosted Chunkify analytics collector and its integration tests",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11 <12"
+  },
+  "scripts": {
+    "test": "npm run test:collector && cargo test --locked",
+    "test:collector": "cargo build --locked && node --test tests/http/*.test.mjs",
+    "check:collector:openapi": "node --test tests/http/openapi-schema.test.mjs",
+    "build:collector:docker": "docker build -t chunkify-analytics-collector:test .",
+    "test:collector:docker": "npm run build:collector:docker && node --test tests/http/docker/*.test.mjs",
+    "benchmark:collector": "npm run build:collector:docker && node tests/http/docker/load.mjs"
+  },
+  "devDependencies": {
+    "@chunkify/analytics": "0.4.0",
+    "@apidevtools/swagger-parser": "13.1.0",
+    "@playwright/test": "1.63.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  }
+}

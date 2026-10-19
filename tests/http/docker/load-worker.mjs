@@ -98,15 +98,15 @@ if (process.argv.includes("--list")) {
     runnerHash.update(file).update(await readFile(new URL(file, import.meta.url)));
   }
   const collector_files_sha256 = {};
-  for (const file of ["Cargo.toml", "Cargo.lock", "Dockerfile",
-    ...(await readdir("services/analytics-collector/src")).filter((file) => file.endsWith(".rs")).sort().map((file) => `src/${file}`)]) {
-    collector_files_sha256[file] = createHash("sha256").update(await readFile(`services/analytics-collector/${file}`)).digest("hex");
+  for (const file of ["Cargo.toml", "Cargo.lock", "Dockerfile", "openapi.json",
+    ...(await readdir("src", { recursive: true })).filter((file) => file.endsWith(".rs")).sort().map((file) => `src/${file}`)]) {
+    collector_files_sha256[file] = createHash("sha256").update(await readFile(file)).digest("hex");
   }
   const report = {
     report_version: 6, measured_at: new Date().toISOString(), generator_runtime,
     source: { git_head: await git("rev-parse", "HEAD"),
-      collector_source_commit: await git("log", "-1", "--format=%H", "--", "services/analytics-collector/src"),
-      collector_source_modified: Boolean(await git("status", "--porcelain", "--", "services/analytics-collector/src", "services/analytics-collector/Cargo.lock")),
+      collector_source_commit: await git("log", "-1", "--format=%H", "--", "src"),
+      collector_source_modified: Boolean(await git("status", "--porcelain", "--", "src", "Cargo.lock")),
       runner_sha256: runnerHash.digest("hex"), collector_files_sha256 },
     host: { os: platform(), architecture: arch(), cpu: cpus()[0]?.model, logical_cpus: cpus().length,
       node: process.version, load_average_at_start: loadavg(), free_disk_bytes_at_start: await hostFreeBytes() },

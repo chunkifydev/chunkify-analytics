@@ -17,6 +17,7 @@ pub struct Config {
     pub profile: bool,
     pub checkpoint_threshold_mib: u32,
     pub batch: crate::writer::BatchConfig,
+    pub spool: Option<crate::spool::SpoolConfig>,
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
@@ -105,6 +106,7 @@ impl Config {
         Ok(Self {
             checkpoint_threshold_mib,
             batch: crate::writer::BatchConfig::load()?,
+            spool: crate::spool::SpoolConfig::load()?,
             profile: env::var("COLLECTOR_PROFILE")
                 .unwrap_or_else(|_| "false".into())
                 .parse()

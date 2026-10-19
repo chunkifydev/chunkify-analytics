@@ -81,18 +81,18 @@ impl Row {
         }
     }
     fn prepare(
-        record: IncomingEvent,
+        record: &IncomingEvent,
         context: Option<&serde_json::Value>,
         received: i64,
     ) -> Result<Self, ApiError> {
-        let event = record.event;
+        let event = &record.event;
         let text = |key: &str| {
             event[key]
                 .as_str()
                 .map_or(Value::Null, |v| Value::Text(v.into()))
         };
         let context =
-            event_context(&event, context).map_or(Value::Null, |v| Value::Text(v.to_string()));
+            event_context(event, context).map_or(Value::Null, |v| Value::Text(v.to_string()));
         Ok(Self {
             values: vec![
                 text("event_id"),
@@ -109,7 +109,7 @@ impl Row {
                 Value::Text(event.to_string()),
                 context,
             ],
-            otlp: record.otlp.map(|v| v.to_string()),
+            otlp: record.otlp.as_ref().map(|v| v.to_string()),
         })
     }
 
@@ -145,6 +145,50 @@ pub struct Writer {
 }
 
 impl Writer {
+    pub fn prepared_bytes(request: &crate::spool::StoredRequest) -> Result<usize, ApiError> {
+        let mut bytes = size_of::<WriteRequest>() + request.events.len() * size_of::<Row>();
+        for event in &request.events {
+            bytes += Row::prepare(event, request.context.as_ref(), request.received)?.heap_bytes();
+        }
+        Ok(bytes)
+    }
+    // Called only by the durable-queue thread. Preserve receipt time and request
+    // context across recovery; SQLite retains the batch until this commit succeeds.
+    pub fn replay(&self, requests: Vec<crate::spool::StoredRequest>) -> Result<usize, ApiError> {
+        let started = Instant::now();
+        let mut rows = Vec::with_capacity(requests.iter().map(|r| r.events.len()).sum());
+        for request in requests {
+            for event in request.events {
+                rows.push(Row::prepare(
+                    &event,
+                    request.context.as_ref(),
+                    request.received,
+                )?);
+            }
+        }
+        let bytes = size_of::<WriteRequest>()
+            + rows.capacity() * size_of::<Row>()
+            + rows.iter().map(Row::heap_bytes).sum::<usize>();
+        let permit = self
+            .budget
+            .clone()
+            .try_acquire_many_owned(bytes.try_into().map_err(|_| ApiError::internal())?)
+            .map_err(|_| ApiError::unavailable())?;
+        let (reply, receiver) = oneshot::channel();
+        self.sender
+            .send(Job::Write(WriteRequest {
+                rows,
+                bytes,
+                queued: Instant::now(),
+                preparation: started.elapsed(),
+                reply,
+                _permit: permit,
+            }))
+            .map_err(|_| ApiError::unavailable())?;
+        receiver
+            .blocking_recv()
+            .map_err(|_| ApiError::unavailable())?
+    }
     pub fn start(
         mut connection: Connection,
         config: BatchConfig,
@@ -266,7 +310,7 @@ impl Writer {
             .map_err(|_| ApiError::internal())?;
         let rows: Vec<_> = events
             .into_iter()
-            .map(|record| Row::prepare(record, context.as_ref(), received))
+            .map(|record| Row::prepare(&record, context.as_ref(), received))
             .collect::<Result<_, _>>()?;
         let bytes = size_of::<WriteRequest>()
             + rows.capacity() * size_of::<Row>()
@@ -318,6 +362,10 @@ fn flush(
             Ok(counts) => Ok(counts[index]),
             Err(_) => Err(ApiError::internal()),
         };
+        // Release prepared buffers before waking the queue consumer, which may
+        // immediately reserve the same byte budget for its next batch.
+        drop(request.rows);
+        drop(request._permit);
         let _ = request.reply.send(response);
     }
 }

@@ -22,6 +22,7 @@ const STATES: [&str; 9] = [
     "stopped",
 ];
 
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct IncomingEvent {
     pub event: Value,
     pub otlp: Option<Value>,

@@ -125,6 +125,7 @@ pub fn router(store: Store, keys: Keys, config: &Config) -> Router {
     };
     Router::new()
         .route("/healthz", get(health))
+        .route("/v1/ingestion", get(ingestion_status))
         .route("/v1/summary", get(summary))
         .route("/v1/videos", get(videos))
         .route(
@@ -274,7 +275,16 @@ async fn ingest(
         .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let event = read_json(request, app.max_body_bytes, false).await?;
     event::validate(&event)?;
-    let inserted = app.store.insert(event, context).await?;
+    let inserted = match app.store.insert(event, context).await? {
+        crate::store::Receipt::Queued => {
+            return Ok((
+                StatusCode::ACCEPTED,
+                Json(json!({"accepted": true, "queued": true})),
+            )
+                .into_response());
+        }
+        crate::store::Receipt::Committed(count) => count > 0,
+    };
     Ok((
         if inserted {
             StatusCode::CREATED
@@ -371,6 +381,7 @@ async fn events(
     Ok(Json(app.store.events(query).await?))
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
+    app.store.ensure_healthy()?;
     app.store
         .call("health", |db| {
             db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;
@@ -378,6 +389,10 @@ async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
         })
         .await?;
     Ok(Json(json!({ "status": "ok" })))
+}
+
+async fn ingestion_status(State(app): State<App>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(app.store.ingestion().await?))
 }
 
 async fn summary(

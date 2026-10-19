@@ -29,6 +29,7 @@ for (const [name, fallback, min, max] of [
     write_settings[`COLLECTOR_${name}`] = String(integer(`COLLECTOR_LOAD_${name}`, fallback, min, max));
   }
 }
+if (process.env.COLLECTOR_LOAD_DURABLE_QUEUE === "1") write_settings.COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE = "true";
 const insertMode = process.env.COLLECTOR_LOAD_INSERT_MODE;
 if (insertMode !== undefined) {
   if (!["row", "bulk"].includes(insertMode)) throw new Error("COLLECTOR_LOAD_INSERT_MODE must be row or bulk");
@@ -56,7 +57,15 @@ const cases = [
 const selected = process.env.COLLECTOR_LOAD_CASES?.split(",");
 for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure COLLECTOR_LOAD_* environment variables.`);
 for (const name of selected ?? []) if (!cases.some((item) => item.name === name)) throw new Error(`Unknown benchmark case: ${name}`);
-const plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, profile, queries, write_settings, ...item }));
+let plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, profile, queries, write_settings, ...item }));
+const compareQueue = integer("COLLECTOR_LOAD_COMPARE_QUEUE", 0, 0, 1) === 1;
+if (compareQueue) {
+  if (plan.length !== 1) throw new Error("Queue comparison requires exactly one selected workload");
+  plan = [
+    { ...plan[0], name: `${plan[0].name}-direct`, write_settings: { ...write_settings, COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "false" } },
+    { ...plan[0], name: `${plan[0].name}-queued`, write_settings: { ...write_settings, COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true" } },
+  ];
+}
 if (process.argv.includes("--list")) {
   console.log(JSON.stringify({ cases: plan, thresholds, safety }, null, 2));
 } else {
@@ -110,11 +119,14 @@ if (process.argv.includes("--list")) {
   const workload = await captureWorkload({ browserContext });
   report.workload = workload.description;
   await save();
+  const fixture = compareQueue ? {} : undefined;
+  try {
   for (const config of plan) {
     console.error(`Measuring ${config.name} for ${config.seconds}s${config.preload ? ` after preloading ${config.preload} events` : ""}...`);
     try {
-      const result = await measure(config, workload, { signal: controller.signal });
+      const result = await measure(config, workload, { signal: controller.signal, fixture });
       report.results.push(result);
+      if (compareQueue) global.gc?.();
       await save();
       console.error(`${result.requests.successful_per_second} successful requests/s; ${result.records.newly_acknowledged_per_second} new events/s; successful p95 ${result.successful_request_latency.p95_ms}ms; failures ${JSON.stringify(result.requests.failures)}; probe thresholds ${result.meets_probe_thresholds ? "met" : "not met"}; full-delivery thresholds ${result.meets_full_delivery_thresholds ? "met" : "not met"}`);
       if (!result.completed) {
@@ -130,6 +142,7 @@ if (process.argv.includes("--list")) {
       break;
     }
   }
+  } finally { if (fixture?.volume) await docker(["volume", "rm", fixture.volume]); }
   if (report.status === "running") report.status = "completed";
   report.finished_at = new Date().toISOString();
   await save();

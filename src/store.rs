@@ -9,11 +9,29 @@ use duckdb::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde_json::{Value, json};
 use std::{path::Path, thread};
 
-type DatabaseWorker = thread::JoinHandle<duckdb::Result<()>>;
+pub struct DatabaseWorker {
+    database: thread::JoinHandle<duckdb::Result<()>>,
+    spool: Option<crate::spool::Workers>,
+}
+impl DatabaseWorker {
+    pub fn join(self) -> thread::Result<Result<(), String>> {
+        let spool = self.spool.map(|worker| worker.join()).transpose();
+        let database = self.database.join();
+        Ok(spool?
+            .unwrap_or(Ok(()))
+            .and(database?.map_err(|e| e.to_string())))
+    }
+}
+
+pub enum Receipt {
+    Committed(usize),
+    Queued,
+}
 
 #[derive(Clone)]
 pub struct Store {
     writer: Writer,
+    spool: Option<crate::spool::Spool>,
 }
 
 impl Store {
@@ -22,7 +40,12 @@ impl Store {
         batch: BatchConfig,
         profile: bool,
         checkpoint_threshold_mib: u32,
+        spool_config: Option<crate::spool::SpoolConfig>,
     ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
+        let spool_path = path.with_file_name("ingestion.sqlite");
+        if spool_config.is_none() {
+            crate::spool::Spool::require_empty(&spool_path)?;
+        }
         let settings = duckdb::Config::default().with(
             "checkpoint_threshold",
             format!("{checkpoint_threshold_mib} MiB"),
@@ -107,8 +130,51 @@ impl Store {
             }
         }
         tx.commit()?;
-        let (writer, worker) = Writer::start(connection, batch, profile)?;
-        Ok((Self { writer }, worker))
+        let (writer, worker) = Writer::start(connection, batch.clone(), profile)?;
+        let (spool, spool_worker) = if let Some(config) = spool_config {
+            let (spool, worker) =
+                crate::spool::Spool::start(&spool_path, config, batch, writer.clone())?;
+            (Some(spool), Some(worker))
+        } else {
+            (None, None)
+        };
+        Ok((
+            Self { writer, spool },
+            DatabaseWorker {
+                database: worker,
+                spool: spool_worker,
+            },
+        ))
+    }
+
+    pub fn ensure_healthy(&self) -> Result<(), ApiError> {
+        if let Some(spool) = &self.spool {
+            spool.ensure_healthy()?;
+        }
+        Ok(())
+    }
+    pub async fn ingestion(&self) -> Result<Value, ApiError> {
+        match &self.spool {
+            Some(spool) => Ok(json!({ "mode": "durable_queue", "queue": spool.stats().await? })),
+            None => Ok(json!({ "mode": "direct" })),
+        }
+    }
+
+    pub async fn drain(&self) -> Result<(), ApiError> {
+        if let Some(spool) = &self.spool {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+            loop {
+                let stats = spool.stats().await?;
+                if stats.failed || tokio::time::Instant::now() >= deadline {
+                    return Err(ApiError::unavailable());
+                }
+                if stats.pending_requests == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }
+        Ok(())
     }
 
     pub async fn call<T: Send + 'static>(
@@ -123,11 +189,9 @@ impl Store {
         &self,
         event: Value,
         request_context: Option<RequestContext>,
-    ) -> Result<bool, ApiError> {
-        Ok(self
-            .insert_batch(vec![IncomingEvent { event, otlp: None }], request_context)
-            .await?
-            > 0)
+    ) -> Result<Receipt, ApiError> {
+        self.insert_batch(vec![IncomingEvent { event, otlp: None }], request_context)
+            .await
     }
 
     pub async fn purge_expired(&self, retention_seconds: u64) -> Result<usize, ApiError> {
@@ -158,8 +222,16 @@ impl Store {
         &self,
         events: Vec<IncomingEvent>,
         request_context: Option<RequestContext>,
-    ) -> Result<usize, ApiError> {
-        self.writer.insert(events, request_context).await
+    ) -> Result<Receipt, ApiError> {
+        if let Some(spool) = &self.spool {
+            spool.insert(events, request_context).await?;
+            Ok(Receipt::Queued)
+        } else {
+            self.writer
+                .insert(events, request_context)
+                .await
+                .map(Receipt::Committed)
+        }
     }
 
     pub async fn events(&self, query: Query) -> Result<Value, ApiError> {

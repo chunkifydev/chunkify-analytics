@@ -1136,3 +1136,125 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
   assert.equal(accepted.headers.get("access-control-allow-origin"), "https://player.example");
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
 });
+
+test("durable queue acknowledges before DuckDB, recovers after SIGKILL, and deduplicates replay", async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
+    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  const event = sdkEvents()[0];
+  event.browser_context = { schema_version: 1, browser_name: "Queue test", language: "fr" };
+  const send = () => fetch(`${server.url}/v1/events`, { method: "POST",
+    headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key }, body: JSON.stringify(event) });
+  const before = Date.now();
+  for (let i = 0; i < 2; i++) {
+    const response = await send();
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { accepted: true, queued: true });
+  }
+  const status = await server.get("/v1/ingestion");
+  assert.ok(status.queue.pending_requests >= 1, "acknowledged events remain queued while DuckDB waits for its batch");
+  assert.ok(Date.now() - before < 1000, "acknowledgement does not wait for the DuckDB batching deadline");
+  await server.stop("SIGKILL");
+  const disabled = await server.command(["serve"], { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "false" });
+  assert.notEqual(disabled.code, 0);
+  assert.match(disabled.stderr, /Pending durable events exist/);
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
+  const page = await server.get("/v1/events");
+  assert.equal(page.events.length, 1);
+  assert.deepEqual(page.events[0].event, event);
+  assert.equal(page.events[0].event_context.client_ip, "127.0.0.1");
+  assert.equal(page.events[0].event_context.browser_name, "Queue test");
+  assert.ok(Date.parse(page.events[0].received_at) >= before);
+  assert.ok(Date.parse(page.events[0].received_at) < before + 1000, "replay preserves original receipt time");
+  const unauthorized = await fetch(`${server.url}/v1/ingestion`);
+  assert.equal(unauthorized.status, 401);
+});
+
+test("durable queue rejects overload, drains, and accepts subsequent events", async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_SPOOL_MAX_BYTES: "4096",
+    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  const responses = await Promise.all(Array.from({ length: 12 }, () => {
+    const event = sdkEvents()[0];
+    return fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
+      headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
+  }));
+  const statuses = responses.map(r => r.status);
+  await Promise.all(responses.map(r => r.text()));
+  assert.ok(statuses.includes(202));
+  assert.ok(statuses.includes(503), "full disk queue returns retryable overload");
+  assert.ok(statuses.every(s => [202, 503].includes(s)));
+  const deadline = Date.now() + 5000;
+  while ((await server.get("/v1/ingestion")).queue.pending_requests && Date.now() < deadline) await delay(20);
+  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
+  const rows = (await server.get("/v1/events")).events;
+  assert.equal(rows.length, statuses.filter(s => s === 202).length);
+  await server.send(sdkEvents()[0]);
+  await server.stop();
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  assert.equal((await server.get("/v1/events")).events.length, rows.length + 1);
+});
+
+test("durable queue preserves OTLP context and deletes a viewer after pending recovery", async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
+    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  const events = sdkEvents("queued-video", "queued-viewer");
+  await server.sendOtlp(events[0], { resourceAttributes: { "service.name": "queue-test" } });
+  await server.stop("SIGKILL");
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  const rows = (await server.get("/v1/events")).events;
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].event, events[0]);
+  assert.ok(rows[0].otlp);
+  await server.sendOtlp(events[1]);
+  await server.stop("SIGKILL");
+  const deleted = await server.command(["delete-viewer", "queued-viewer"], { COLLECTOR_BATCH_DELAY_MS: "10" });
+  assert.equal(deleted.code, 0, deleted.stderr);
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+});
+
+test("durable queue validates prepared sizes before acknowledging with a small writer budget", async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
+    COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" });
+  const post = event => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
+    headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
+  const tooLarge = sdkEvents("v".repeat(9000))[0];
+  assert.equal((await post(tooLarge)).status, 413, "JSON fits but prepared row does not");
+  const responses = [];
+  for (let i = 0; i < 8; i++) responses.push(await post(sdkEvents("v".repeat(3500))[0]));
+  assert.ok(responses.every(r => r.status === 202));
+  await Promise.all(responses.map(r => r.text()));
+  await server.stop();
+  await server.start();
+  const state = (await server.get("/v1/ingestion")).queue;
+  assert.equal(state.failed, false);
+  assert.equal(state.pending_requests, 0);
+  assert.equal((await server.get("/v1/events")).events.length, 8);
+});
+
+test("durable queue replays the committed-but-not-dequeued crash window without changing first delivery", async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
+    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  const event = sdkEvents()[0];
+  event.browser_context = { schema_version: 1, browser_name: "First delivery" };
+  await server.send(event);
+  assert.ok((await server.get("/v1/ingestion")).queue.pending_requests > 0);
+  const snapshot = join(server.directory, "pending-snapshot.sqlite");
+  // SQLite's online backup includes the WAL. After graceful draining, restoring
+  // this queue snapshot recreates a crash after DuckDB commit but before dequeue.
+  const backup = spawn("python3", ["-c", "import sqlite3,sys; a=sqlite3.connect(sys.argv[1]); b=sqlite3.connect(sys.argv[2]); a.backup(b); assert b.execute('select count(*) from pending').fetchone()[0] > 0; b.close(); a.close()",
+    join(server.directory, "ingestion.sqlite"), snapshot], { stdio: "pipe" });
+  assert.equal((await once(backup, "close"))[0], 0);
+  await server.stop();
+  await cp(snapshot, join(server.directory, "ingestion.sqlite"));
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  const page = await server.get("/v1/events");
+  assert.equal(page.events.length, 1);
+  assert.deepEqual(page.events[0].event, event);
+  const original = page.events[0];
+  await server.send({ ...event, video_id: "different", browser_context: { schema_version: 1, browser_name: "Retry" } });
+  await server.stop();
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  assert.deepEqual((await server.get("/v1/events")).events, [original]);
+  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
+});

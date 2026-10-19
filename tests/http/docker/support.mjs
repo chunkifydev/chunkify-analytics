@@ -17,7 +17,7 @@ async function containerLogs(name) {
 }
 
 // Docker CLI and public HTTP interfaces only. Never open the database directly.
-export async function containerCollector({ settings = {}, resources = [] } = {}) {
+export async function containerCollector({ settings = {}, resources = [], seed } = {}) {
   const volume = `chunkify-collector-test-${randomUUID()}`;
   let name;
   const server = {
@@ -49,6 +49,13 @@ export async function containerCollector({ settings = {}, resources = [] } = {})
       name = undefined;
       return state;
     },
+    async snapshot() {
+      if (name) throw new Error("Stop collector before snapshot");
+      const snapshot = `chunkify-collector-test-${randomUUID()}`;
+      await docker(["volume", "create", snapshot]);
+      try { await copyVolume(volume, snapshot); return snapshot; }
+      catch (error) { await docker(["volume", "rm", snapshot]); throw error; }
+    },
     async get(path) {
       const response = await fetch(`${server.url}${path}`, {
         headers: { Authorization: `Bearer ${server.keys.read_token}` }, signal: AbortSignal.timeout(10000),
@@ -56,14 +63,15 @@ export async function containerCollector({ settings = {}, resources = [] } = {})
       if (!response.ok) throw new Error(`Read API returned ${response.status}: ${await response.text()}`);
       return response.json();
     },
-    async close() {
+    async close({ preserveVolume = false } = {}) {
       if (name) await docker(["rm", "-f", name]);
-      await docker(["volume", "rm", volume]);
+      if (!preserveVolume) await docker(["volume", "rm", volume]);
     },
   };
   await docker(["volume", "create", volume]);
   try {
-    await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data`, image, "init"]);
+    if (seed) await copyVolume(seed, volume);
+    else await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data`, image, "init"]);
     // Local administrator access to the documented key file, never printed.
     server.keys = JSON.parse(await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data,readonly`,
       "--entrypoint", "cat", image, "/data/keys.json"]));
@@ -73,4 +81,10 @@ export async function containerCollector({ settings = {}, resources = [] } = {})
     await server.close();
     throw error;
   }
+}
+
+async function copyVolume(source, destination) {
+  await docker(["run", "--rm", "--user=0:0", "--network=none", "--mount", `type=volume,src=${source},dst=/source,readonly`,
+    "--mount", `type=volume,src=${destination},dst=/data`, "--entrypoint", "sh", image,
+    "-c", "cp -a /source/. /data/ && chown 10001:10001 /data"]);
 }

@@ -816,3 +816,54 @@ hardware, retained dataset, and workload. Thirty-day capacity needs a larger,
 representative retained dataset and deployment-specific measurements. These
 earlier capacity reports predate browser/IP enrichment and the flat context column.
 Use the later performance and batching reports for measurements of those changes.
+
+## Experimental durable queue
+
+The [prototype comparison](durable-queue.md) records the implementation, recovery
+tests and measured results.
+
+This opt-in prototype evaluates whether durable receipt can remain responsive
+while DuckDB commits pause. Enable it with
+`COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE=true`. Direct ingestion remains the default.
+
+In queue mode, native ingestion returns HTTP 202 with
+`{"accepted":true,"queued":true}` after a SQLite WAL transaction commits with
+`synchronous=FULL`. The response does not classify duplicates. OTLP retains its
+HTTP 200 export-success response after durable queue acceptance. Reads see events
+only after background replay into DuckDB. They can temporarily lag acknowledgements.
+
+The queue uses embedded SQLite in `ingestion.sqlite`, alongside DuckDB in the same
+data directory and server process. Keep its WAL and other SQLite files with the
+data directory when backing up. A single producer groups disk commits for up to
+one millisecond; a separate consumer feeds bounded batches into the existing
+DuckDB writer. The queue lock is released while DuckDB processes a batch. Entries
+are deleted only after DuckDB commits. Replay after a crash may deliver an event
+again; DuckDB's event ID uniqueness preserves the first payload and context.
+
+`COLLECTOR_SPOOL_MAX_BYTES` bounds pending serialized payloads, default 64 MiB,
+range 4 KiB through 256 MiB. This is a logical payload limit; SQLite pages, WAL,
+and prepared rows consume additional disk and memory. SQLite database allocation
+is limited to approximately twice this budget plus 8 MiB, and WAL automatic
+checkpointing remains enabled. Queue pages are reused after draining. A full queue
+returns HTTP 503. The existing request and prepared-write limits still apply.
+A storage-worker failure stops admission, makes health fail, and retains pending
+records for recovery. There is no automatic retry of a failed storage worker in
+this prototype; restart after resolving the underlying problem.
+
+`GET /v1/ingestion` requires the read token. It reports the ingestion mode and,
+when enabled, pending request/event/byte counts, age of the oldest request, and
+worker failure. Startup drains recovered events before serving requests or
+running retention/viewer deletion. Graceful shutdown drains the queue. Disabling
+the mode while pending events exist fails startup rather than skipping them.
+Retain the same or larger prepared-write limits when recovering a queue.
+
+The prototype changes acknowledgement visibility and adds a storage component.
+It is not a production recommendation or a throughput guarantee. The comparison
+must check processing backlog and drain time as well as HTTP latency.
+
+For a matched benchmark, select one workload and set
+`COLLECTOR_LOAD_COMPARE_QUEUE=1`. The runner preloads once, stops the collector,
+and copies that checkpointed volume into a temporary fixture. Both runs use the
+same starting data. The second run enables the queue. All fixtures are disposable;
+if verification of queued acknowledgements fails, its data volume is retained
+and its name is printed for investigation.

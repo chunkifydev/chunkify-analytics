@@ -11,6 +11,9 @@ pub struct Query {
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
     pub event_name: Option<String>,
+    pub browser_name: Option<String>,
+    pub os_name: Option<String>,
+    pub device_type: Option<String>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
 }
@@ -22,6 +25,9 @@ pub struct Filters {
     video_id: Option<String>,
     viewer_id: Option<String>,
     event_name: Option<String>,
+    browser_name: Option<String>,
+    os_name: Option<String>,
+    device_type: Option<String>,
 }
 
 impl Query {
@@ -38,12 +44,35 @@ impl Query {
         {
             return Err(ApiError::bad("Unsupported event_name filter"));
         }
+        for (name, value) in [
+            ("browser_name", &self.browser_name),
+            ("os_name", &self.os_name),
+        ] {
+            if value
+                .as_ref()
+                .is_some_and(|value| !(1..=64).contains(&value.chars().count()))
+            {
+                return Err(ApiError::bad(format!(
+                    "{name} must contain between 1 and 64 characters"
+                )));
+            }
+        }
+        if self
+            .device_type
+            .as_deref()
+            .is_some_and(|value| !["desktop", "mobile", "tablet", "unknown"].contains(&value))
+        {
+            return Err(ApiError::bad("Unsupported device_type filter"));
+        }
         Ok(Filters {
             from_ms,
             to_ms,
             video_id: self.video_id.clone(),
             viewer_id: self.viewer_id.clone(),
             event_name: self.event_name.clone(),
+            browser_name: self.browser_name.clone(),
+            os_name: self.os_name.clone(),
+            device_type: self.device_type.clone(),
         })
     }
 
@@ -79,6 +108,27 @@ impl Filters {
         if let Some(value) = &self.event_name {
             conditions.push("event_name = ?");
             values.push(SqlValue::Text(value.clone()));
+        }
+        // Compare only strings. Missing/null fields and other JSON primitives
+        // are not normalized browser names or device categories.
+        for (value, condition) in [
+            (
+                &self.browser_name,
+                "json_type(event_context, '$.browser_name') = 'VARCHAR' AND json_extract_string(event_context, '$.browser_name') = ?",
+            ),
+            (
+                &self.os_name,
+                "json_type(event_context, '$.os_name') = 'VARCHAR' AND json_extract_string(event_context, '$.os_name') = ?",
+            ),
+            (
+                &self.device_type,
+                "json_type(event_context, '$.device_type') = 'VARCHAR' AND json_extract_string(event_context, '$.device_type') = ?",
+            ),
+        ] {
+            if let Some(value) = value {
+                conditions.push(condition);
+                values.push(SqlValue::Text(value.clone()));
+            }
         }
         (conditions.join(" AND "), values)
     }

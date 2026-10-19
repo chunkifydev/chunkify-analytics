@@ -29,9 +29,9 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 5. Browser/device context through `createChunkifyAdapter`. Implemented in the SDK
    and preserved in raw-event storage. Request IP collection, its opt-out, and
    explicit trusted-proxy configuration are implemented in the collector.
-   Context filters remain specified in issue #381.
+   Browser, OS and device-type filters are available on all read endpoints.
 
-This is a development version. Context filters and the OpenAPI contract are pending.
+This is a development version. The OpenAPI contract is pending.
 MCP is a separate potential follow-up.
 
 ## Build and run
@@ -450,9 +450,16 @@ remove the event's context with its row.
 
 ### Filters and pagination
 
-All read endpoints accept `from`, `to`, `video_id`, and `viewer_id`. Timestamps use
+All read endpoints accept `from`, `to`, `video_id`, `viewer_id`, `browser_name`,
+`os_name`, and `device_type`. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
+
+Browser and OS names use exact, case-sensitive matching and accept 1–64 Unicode
+characters. Device type accepts `desktop`, `mobile`, `tablet`, or `unknown`.
+Multiple filters combine with AND. Missing, null, and nonstring context values
+do not match an explicit filter. `device_type=unknown` matches only a stored
+`unknown` value; it does not include events with no device information.
 
 `/v1/events` and `/v1/videos` accept `limit` from 1 to 1000, defaulting to 100.
 Follow `next_cursor` until it is null. Keep the same filters when following a
@@ -477,10 +484,11 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
 
 - A view is a distinct `view_id` with a retained `view_started` event. It represents
   a playback attempt, including attempts that fail before playback.
-- Summary filters select views by the occurrence time and identity of their start
-  event. Each selected view contributes its entire retained cumulative playing
+- Summary filters select views by the occurrence time, identity and context of
+  their first retained start event. Browser/device changes on later events do not
+  move the view into another filtered group. Each selected view contributes its entire retained cumulative playing
   time, including a final event that arrives after the selected date range. Raw
-  queries instead filter each event's own `occurred_at`.
+  queries instead filter each event's own `occurred_at` and context.
 - Playing time uses the final `view_ended` value when present, otherwise the latest
   retained `view_snapshot`, otherwise zero. Records are ranked by SDK sequence,
   then occurrence time and ingestion order. Snapshots are never added together.

@@ -339,11 +339,11 @@ impl Store {
             let (conditions, filter_values) = filters.sql();
             let mut values = vec![SqlValue::BigInt(through)];
             values.extend(filter_values);
-            // Date and identity filters select starts. Each selected view contributes its
+            // Date, identity and context filters select starts. Each selected view contributes its
             // whole cumulative value, even when its final event occurs after the date range.
             let sql = format!("WITH retained AS (SELECT * FROM events WHERE ingest_id <= ?),
                 started AS (
-                    SELECT view_id, video_id, viewer_id, occurred_at_ms FROM retained
+                    SELECT view_id, video_id, viewer_id, occurred_at_ms, event_context FROM retained
                     WHERE event_name = 'chunkify.video.view_started'
                     QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY sequence, occurred_at_ms, ingest_id) = 1
                 ), cohort AS (SELECT * FROM started WHERE {conditions}),

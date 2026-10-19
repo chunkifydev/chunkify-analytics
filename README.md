@@ -903,3 +903,29 @@ To compare one selected workload with the same preloaded data, set
 only the separate-reader option changes. Set `COLLECTOR_LOAD_DURABLE_QUEUE=1`
 to enable durable ingestion in both. Do not combine this with
 `COLLECTOR_LOAD_COMPARE_QUEUE`, which tests a different change.
+
+## Longer stability runs
+
+The benchmark defaults to a 200,000-event ceiling and a 512 MiB data-directory
+ceiling. Explicit overrides allow `COLLECTOR_LOAD_MAX_EVENTS=1000000` and
+`COLLECTOR_LOAD_MAX_DATA_MIB=3072` for a five-minute, 3,000-request/s run with a
+50,000-event preload. Event limits cannot exceed one million, and the data limit
+cannot exceed 4 GiB. Preload and reused fixtures count toward the event limit.
+Before starting, free host disk must cover the data budget plus the 4 GiB floor.
+Runtime disk, 1,800 MiB container-memory and 1,024 MiB generator-memory guards
+remain active. The container still has a hard 2 GiB memory limit without swap.
+
+The verifier stores encoded replay descriptions with compact UUID strings and
+releases each description after checking that event. It accumulates only the
+per-view fields needed for independent summaries. Every acknowledged event,
+complete payload, original OTLP envelope, browser/IP context and pagination
+check remains mandatory. Resource guards also run during restart verification;
+unverified queued acknowledgements retain their test volume for investigation.
+
+Reports include one-minute request and query latency windows, progress snapshots
+about every 30 seconds, and verification resource samples. Windows group requests
+by submission time and successful queries by start time. Scheduled/omitted
+requests use their intended submission time. Overall latency and full-delivery
+thresholds remain unchanged. `COLLECTOR_LOAD_SECONDS=300` sets five minutes;
+enable both `COLLECTOR_LOAD_DURABLE_QUEUE=1` and `COLLECTOR_LOAD_READ_WORKER=1` to
+exercise the two optional features together.

@@ -60,7 +60,7 @@ export async function captureWorkload({ browserContext = false } = {}) {
   // A repeatable 16 KiB mapper property tests larger payloads. It is synthetic,
   // moderately compressible text, not a claim about future browser metadata.
   const padding = Array.from({ length: 256 }, (_, i) => createHash("sha256").update(String(i)).digest("hex")).join("");
-  const variants = {};
+const variants = {};
   let context;
   try {
     const url = `http://127.0.0.1:${receiver.address().port}`;
@@ -123,11 +123,11 @@ export async function captureWorkload({ browserContext = false } = {}) {
         const position = index % events.length;
         const viewIndex = Math.floor(index++ / events.length);
         if (position === 0) {
-          view = randomUUID();
+          view = compactUuid();
           offset = Date.now() - Date.parse(events[0].occurred_at);
         }
         const template = variants[large ? "large" : "small"][position];
-        const fields = { event_id: randomUUID(), view_id: view, video_id: `video-${viewIndex % 10}`,
+        const fields = { event_id: compactUuid(), view_id: view, video_id: `video-${viewIndex % 10}`,
           viewer_id: `viewer-${viewIndex % 1000}`,
           occurred_at: new Date(Date.parse(template.event.occurred_at) + offset).toISOString() };
         const replay = { position, large, fields };
@@ -135,6 +135,12 @@ export async function captureWorkload({ browserContext = false } = {}) {
       };
     },
   };
+}
+
+// Copy crypto's UUID into a compact string before it is retained in large Maps
+// and Sets. This preserves the UUID bytes without retaining its component strings.
+function compactUuid() {
+  return Buffer.from(randomUUID(), "ascii").toString("ascii");
 }
 
 export function otlpBody(records) {

@@ -96,7 +96,7 @@ if (process.argv.includes("--list")) {
     collector_files_sha256[file] = createHash("sha256").update(await readFile(`services/analytics-collector/${file}`)).digest("hex");
   }
   const report = {
-    report_version: 3, measured_at: new Date().toISOString(),
+    report_version: 4, measured_at: new Date().toISOString(),
     source: { git_head: await git("rev-parse", "HEAD"),
       collector_source_commit: await git("log", "-1", "--format=%H", "--", "services/analytics-collector/src"),
       collector_source_modified: Boolean(await git("status", "--porcelain", "--", "services/analytics-collector/src", "services/analytics-collector/Cargo.lock")),
@@ -113,7 +113,7 @@ if (process.argv.includes("--list")) {
       "Short probes identify candidate rates, not sustained or 30-day capacity.",
       "Shared host workloads may affect results; no other containers are stopped.",
       "SDK events and adapter wire output are recorded once, then replayed with new identities.",
-      "Verification retains compact replay descriptions; complete expected payloads are reconstructed and compared after restart.",
+      "Verification retains encoded replay descriptions, releases them page by page and accumulates per-view summaries; every complete payload is reconstructed and checked after restart.",
       "OTLP batching and gzip model a gateway; SDK adapters still send one event per request.",
       "Request latency starts after serialization/compression; preparation and schedule lag are reported separately.",
       "Resource sampling includes Docker exec overhead and may miss peaks. Container memory includes filesystem cache.",
@@ -134,7 +134,9 @@ if (process.argv.includes("--list")) {
   for (const config of plan) {
     console.error(`Measuring ${config.name} for ${config.seconds}s${config.preload ? ` after preloading ${config.preload} events` : ""}...`);
     try {
-      const result = await measure(config, workload, { signal: controller.signal, fixture });
+      const result = await measure(config, workload, { signal: controller.signal, fixture,
+        async onProgress(update) { (report.progress ??= []).push({ case: config.name, ...update }); await save(); },
+      });
       report.results.push(result);
       if (fixture) global.gc?.();
       await save();

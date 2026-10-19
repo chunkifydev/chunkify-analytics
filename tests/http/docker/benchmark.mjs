@@ -12,9 +12,14 @@ const compress = promisify(gzip);
 const mib = 1024 * 1024;
 export const thresholds = { ingestion_p95_ms: 250, query_p95_ms: 500,
   successful_request_fraction: 0.99, scheduled_request_fraction: 0.99, schedule_lag_p95_ms: 20 };
-export const safety = { max_data_mib: 512, min_free_disk_mib: 4096,
+function limit(name, fallback, min, max) {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be ${min}..${max}`);
+  return value;
+}
+export const safety = { max_data_mib: limit("COLLECTOR_LOAD_MAX_DATA_MIB", 512, 512, 4096), min_free_disk_mib: 4096,
   max_container_memory_mib: 1800, max_generator_rss_mib: 1024,
-  max_unique_events: 200000, request_timeout_ms: 10000, max_schedule_lag_ms: 50,
+  max_unique_events: limit("COLLECTOR_LOAD_MAX_EVENTS", 200000, 1, 1000000), request_timeout_ms: 10000, max_schedule_lag_ms: 50,
   max_generator_pause_ms: 5000 };
 export const resources = ["--cpus=2", "--memory=2g", "--memory-swap=2g"];
 
@@ -57,19 +62,39 @@ function checkSafety(point) {
   return null;
 }
 
-function expectedSummary(records) {
+// Keep one start and one cumulative measurement per view while verifying pages.
+// Do not retain another complete event ledger alongside the submitted ledger.
+function summaryAccumulator() {
   const views = new Map();
   const measured = new Map();
-  for (const { event } of records.values()) {
-    if (event.event_name === "chunkify.video.view_started") views.set(event.view_id, event);
-    if (!["chunkify.video.view_snapshot", "chunkify.video.view_ended"].includes(event.event_name)) continue;
-    const previous = measured.get(event.view_id);
-    if (!previous || (previous.event_name !== "chunkify.video.view_ended" && event.event_name === "chunkify.video.view_ended") ||
-      (previous.event_name === event.event_name && event.sequence > previous.sequence)) measured.set(event.view_id, event);
-  }
-  return { views: views.size,
-    unique_viewers: new Set([...views.values()].map((event) => event.viewer_id).filter((id) => id !== null)).size,
-    total_playing_time_ms: [...views.keys()].reduce((sum, id) => sum + (measured.get(id)?.playing_time_ms ?? 0), 0) };
+  return {
+    add({ event_name, view_id, video_id, viewer_id, sequence, playing_time_ms }) {
+      if (event_name === "chunkify.video.view_started") views.set(view_id, { video_id, viewer_id });
+      if (!["chunkify.video.view_snapshot", "chunkify.video.view_ended"].includes(event_name)) return;
+      const previous = measured.get(view_id);
+      if (!previous || (previous.event_name !== "chunkify.video.view_ended" && event_name === "chunkify.video.view_ended") ||
+        (previous.event_name === event_name && sequence > previous.sequence)) measured.set(view_id, { event_name, sequence, playing_time_ms });
+    },
+    videos() { return new Set([...views.values()].map((event) => event.video_id)); },
+    summary(videoId) {
+      let count = 0;
+      let time = 0;
+      const viewers = new Set();
+      for (const [id, event] of views) if (videoId === undefined || event.video_id === videoId) {
+        count++;
+        if (event.viewer_id !== null) viewers.add(event.viewer_id);
+        time += measured.get(id)?.playing_time_ms ?? 0;
+      }
+      return { views: count, unique_viewers: viewers.size, total_playing_time_ms: time };
+    },
+  };
+}
+
+// Encode the replay fields once, omitting the event ID already used as Map key.
+// Strings avoid retaining several small objects for each of a million events.
+export function encodeSubmission(record, format) {
+  const { event_id, ...fields } = record.replay.fields;
+  return JSON.stringify([record.replay.position, record.replay.large, fields, format]);
 }
 
 function assertSummary(actual, expected) {
@@ -78,17 +103,21 @@ function assertSummary(actual, expected) {
   assert.ok(Math.abs(actual.total_playing_time_ms - expected.total_playing_time_ms) < 0.01, "cumulative playtime must match retained view measurements");
 }
 
-async function verify(server, sent, acknowledged, preloadIds, workload) {
-  const retained = new Map();
+export async function verify(server, sent, acknowledged, preloadIds, workload, onProgress = async () => {}) {
+  const totals = summaryAccumulator();
+  let retained = 0;
+  let unacknowledged = 0;
+  let lastProgress = 0;
   let cursor;
   do {
     const page = await server.get(`/v1/events?limit=1000${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
     for (const record of page.events) {
       const id = record.event.event_id;
-      assert.ok(!retained.has(id), "pagination must not repeat events");
-      const submitted = sent.get(id);
-      assert.ok(submitted, "stored event must have been submitted");
-      const expected = workload.replay(submitted.replay);
+      const encoded = sent.get(id);
+      assert.notEqual(encoded, null, "pagination must not repeat events");
+      assert.ok(encoded, "stored event must have been submitted");
+      const [position, large, fields, format] = JSON.parse(encoded);
+      const expected = workload.replay({ position, large, fields: { ...fields, event_id: id } });
       assert.deepEqual(record.event, expected.event, "full canonical payload must survive restart");
       if (expected.event.browser_context) {
         for (const [key, value] of Object.entries(expected.event.browser_context)) {
@@ -96,36 +125,45 @@ async function verify(server, sent, acknowledged, preloadIds, workload) {
         }
         assert.ok(record.event_context.client_ip, "request IP must remain alongside browser context");
       }
-      if (submitted.format === "otlp") assert.deepEqual(record.otlp, originalOtlp(expected), "original OTLP context must survive restart");
+      if (format === "otlp") assert.deepEqual(record.otlp, originalOtlp(expected), "original OTLP context must survive restart");
       else assert.equal(record.otlp, undefined);
       assert.ok(Number.isFinite(Date.parse(record.received_at)));
-      // Full payloads were checked above. Only these fields are needed for the
-      // independent summary calculations after pagination finishes.
-      const { event_name, view_id, video_id, viewer_id, sequence, playing_time_ms } = expected.event;
-      retained.set(id, { event: { event_name, view_id, video_id, viewer_id, sequence, playing_time_ms } });
+      totals.add(expected.event);
+      // Mark the ID as verified and release its encoded replay data immediately.
+      sent.set(id, null);
+      retained++;
+      if (!acknowledged.has(id)) unacknowledged++;
     }
     cursor = page.next_cursor;
+    if (retained - lastProgress >= 10000 || !cursor) {
+      await onProgress(retained);
+      lastProgress = retained;
+    }
   } while (cursor);
-  for (const id of acknowledged) assert.ok(retained.has(id), "every acknowledged event must survive restart");
+  for (const id of acknowledged) assert.equal(sent.get(id), null, "every acknowledged event must survive restart");
   const summary = await server.get("/v1/summary");
-  assertSummary(summary, expectedSummary(retained));
+  assertSummary(summary, totals.summary());
   const videos = await server.get("/v1/videos?limit=1000");
-  const videoIds = new Set([...retained.values()].filter(({ event }) => event.event_name === "chunkify.video.view_started").map(({ event }) => event.video_id));
+  const videoIds = totals.videos();
   assert.equal(videos.videos.length, videoIds.size);
   for (const video of videos.videos) {
-    const selected = new Map([...retained].filter(([, { event }]) => event.video_id === video.video_id));
-    assertSummary(video, expectedSummary(selected));
-    assertSummary(await server.get(`/v1/summary?video_id=${encodeURIComponent(video.video_id)}`), expectedSummary(selected));
+    assertSummary(video, totals.summary(video.video_id));
+    assertSummary(await server.get(`/v1/summary?video_id=${encodeURIComponent(video.video_id)}`), totals.summary(video.video_id));
   }
-  return { summary, persisted_new: retained.size - preloadIds.size,
-    persisted_without_ack: [...retained.keys()].filter((id) => !acknowledged.has(id)).length,
+  return { summary, persisted_new: retained - preloadIds.size,
+    persisted_without_ack: unacknowledged,
     verification: { payloads: true, otlp_context: true, summary: true, per_video: true, acknowledged_events: acknowledged.size } };
 }
 
-export async function measure(input, workload, { signal, fixture } = {}) {
+export async function measure(input, workload, { signal, fixture, onProgress = async () => {} } = {}) {
   const config = { batch_size: 1, gzip: false, duplicate_every: 0, large_every: 0,
     preload: 0, concurrency: 128, shutdown: "stop", rate_limit: 10000, queries: true, profile: false, ...input };
-  if (await hostFreeBytes() < safety.min_free_disk_mib * mib) throw new Error("Benchmark requires at least 4 GiB free host disk");
+  if (config.preload > safety.max_unique_events) throw new Error("Preload exceeds the unique-event safety limit");
+  if (fixture?.volume) {
+    assert.equal(fixture.count, config.preload, "fixture must match preload count");
+    assert.ok(fixture.sent.length <= safety.max_unique_events, "fixture exceeds the unique-event safety limit");
+  }
+  if (await hostFreeBytes() < (safety.min_free_disk_mib + safety.max_data_mib) * mib) throw new Error("Benchmark requires its data budget plus the free-disk floor before starting");
   const settings = { COLLECTOR_INGEST_PER_SECOND: String(config.rate_limit), COLLECTOR_MAX_BODY_BYTES: "1048576",
     COLLECTOR_MAX_OTLP_RECORDS: "100", COLLECTOR_RETENTION_SECONDS: "2592000", COLLECTOR_RETENTION_INTERVAL_SECONDS: "5",
     COLLECTOR_PROFILE: String(config.profile), ...config.write_settings };
@@ -145,6 +183,15 @@ export async function measure(input, workload, { signal, fixture } = {}) {
   let running = false;
   const loopDelay = monitorEventLoopDelay({ resolution: 10 });
   const samples = [];
+  const verificationSamples = [];
+  const windows = [];
+  let trafficStart = null;
+  function windowAt(time) {
+    const index = Math.max(0, Math.floor((time - trafficStart) / 60000));
+    return windows[index] ??= { start_seconds: index * 60, scheduled: 0, sent: 0, successful: 0, failed: 0,
+      skipped_late: 0, skipped_concurrency: 0, latency: [],
+      queries: Object.fromEntries(["summary", "videos", "events"].map((name) => [name, []])) };
+  }
   const queryResults = Object.fromEntries(["summary", "videos", "events"].map((name) => [name, { latency: [], failures: {} }]));
   const latencies = [];
   const successLatencies = [];
@@ -171,9 +218,11 @@ export async function measure(input, workload, { signal, fixture } = {}) {
       records.submitted += batch.length;
     }
     for (const record of batch) if (!sent.has(record.event.event_id)) {
-      sent.set(record.event.event_id, { replay: record.replay, format });
+      sent.set(record.event.event_id, encodeSubmission(record, format));
     }
     const start = performance.now();
+    const window = measured ? windowAt(start) : null;
+    if (window) window.sent++;
     try {
       const response = await fetch(`${server.url}${format === "native" ? "/v1/events" : "/v1/logs"}`, {
         method: "POST", body, signal: AbortSignal.timeout(safety.request_timeout_ms),
@@ -188,10 +237,14 @@ export async function measure(input, workload, { signal, fixture } = {}) {
       if (measured) {
         requests.successful++;
         records.acknowledged += batch.length;
-        successLatencies.push(performance.now() - start);
+        const latency = performance.now() - start;
+        successLatencies.push(latency);
+        window.successful++;
+        window.latency.push(latency);
       }
     } catch (error) {
       if (!measured) throw error;
+      window.failed++;
       const reason = error.message.match(/^HTTP (\d+)$/)?.[1] ?? (error.name === "TimeoutError" ? "timeout" : "transport");
       requests.failures[reason] = (requests.failures[reason] ?? 0) + 1;
       if (/^4\d\d$/.test(reason) || reason === "503") records.rejected += batch.length;
@@ -201,7 +254,6 @@ export async function measure(input, workload, { signal, fixture } = {}) {
 
   try {
     const queueSamples = [];
-    let trafficStart = null;
     const queueEnabled = settings.COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE === "true";
     const queueSample = async () => {
       if (!queueEnabled) return null;
@@ -264,7 +316,9 @@ export async function measure(input, workload, { signal, fixture } = {}) {
       try {
         const page = await server.get(path);
         if (name === "events") eventCursor = page.next_cursor;
-        queryResults[name].latency.push(performance.now() - beforeQuery);
+        const latency = performance.now() - beforeQuery;
+        queryResults[name].latency.push(latency);
+        windowAt(beforeQuery).queries[name].push(latency);
       } catch (error) {
         const reason = error.message.match(/returned (\d+)/)?.[1] ?? error.name;
         const failures = queryResults[name].failures;
@@ -272,6 +326,7 @@ export async function measure(input, workload, { signal, fixture } = {}) {
       }
     };
     monitoring = (async () => {
+      let lastProgress = 0;
       while (running) {
         if (config.queries) await Promise.all([
           query("summary", "/v1/summary"), query("videos", "/v1/videos?limit=10"),
@@ -279,7 +334,12 @@ export async function measure(input, workload, { signal, fixture } = {}) {
         ]);
         const point = { at_seconds: +((performance.now() - start) / 1000).toFixed(3), ...await sample(server) };
         samples.push(point);
-        await queueSample();
+        const queue = await queueSample();
+        if (point.at_seconds - lastProgress >= 30) {
+          await onProgress({ phase: "traffic", at_seconds: point.at_seconds, requests: structuredClone(requests), sample: point, queue });
+          console.error(`Traffic ${point.at_seconds}s: ${requests.successful} successful; ${requests.skipped_late + requests.skipped_concurrency} omitted; pending ${queue?.pending_events ?? 0}; container ${(point.container_memory_bytes / mib).toFixed(0)} MiB; generator ${(point.generator_rss_bytes / mib).toFixed(0)} MiB`);
+          lastProgress = point.at_seconds;
+        }
         abortReason ??= checkSafety(point);
         if (abortReason) break;
         await delay(1000);
@@ -312,8 +372,10 @@ export async function measure(input, workload, { signal, fixture } = {}) {
         }
         lastProgress = now;
         const lag = now - due;
-        if (lag > safety.max_schedule_lag_ms) { requests.skipped_late++; continue; }
-        if (inflight.size >= config.concurrency) { requests.skipped_concurrency++; continue; }
+        const window = windowAt(due);
+        window.scheduled++;
+        if (lag > safety.max_schedule_lag_ms) { requests.skipped_late++; window.skipped_late++; continue; }
+        if (inflight.size >= config.concurrency) { requests.skipped_concurrency++; window.skipped_concurrency++; continue; }
         if (sent.size + config.batch_size > safety.max_unique_events) { abortReason = "unique event safety limit"; break; }
         scheduleLag.push(lag);
         const requestIndex = requests.sent + inflight.size;
@@ -362,7 +424,15 @@ export async function measure(input, workload, { signal, fixture } = {}) {
     const restartStart = performance.now();
     await server.start();
     const restartMs = performance.now() - restartStart;
-    const checked = await verify(server, sent, acknowledged, preloadIds, workload);
+    console.error(`Verifying ${acknowledged.size} acknowledged events after restart...`);
+    const checked = await verify(server, sent, acknowledged, preloadIds, workload, async (count) => {
+      const point = { verified_events: count, ...await sample(server) };
+      verificationSamples.push(point);
+      await onProgress({ phase: "verification", verified_events: count, sample: point });
+      const reason = checkSafety(point);
+      if (reason) throw new Error(`Verification safety stop: ${reason}`);
+      if (count % 100000 === 0) console.error(`Verified ${count} events...`);
+    });
     verified = true;
     await server.stop();
     const dataBytes = Number((await docker(["run", "--rm", "--mount", `type=volume,src=${server.volume},dst=/data,readonly`,
@@ -381,6 +451,9 @@ export async function measure(input, workload, { signal, fixture } = {}) {
     const peak = (field) => Math.max(before[field], ...samples.map((point) => point[field]));
     return { ...config, collector_settings: settings, completed: !abortReason, abort_reason: abortReason,
       elapsed_seconds: +elapsed.toFixed(3), offered_seconds: offeredSeconds, phases: phaseResults,
+      time_windows: windows.filter(Boolean).map(({ latency, queries, ...counts }) => ({ ...counts,
+        successful_request_latency: distribution(latency), queries: Object.fromEntries(Object.entries(queries).map(([key, values]) => [key, distribution(values)])) })),
+      verification_resources: verificationSamples,
       preload: { reused_fixture: reusedFixture, events: preloadIds.size, seconds: +preloadSeconds.toFixed(3), data_bytes: before.data_bytes },
       requests: { ...requests, sent_per_second: +(requests.sent / elapsed).toFixed(2),
         successful_per_second: +(requests.successful / elapsed).toFixed(2) },

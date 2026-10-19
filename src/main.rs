@@ -3,8 +3,10 @@ mod config;
 mod context;
 mod event;
 mod otlp;
+mod profile;
 mod query;
 mod store;
+mod writer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some("serve"), []) => {
             let _lock = config.lock()?;
             let keys = config.keys()?;
-            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"))?;
+            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib)?;
             let removed = store.purge_expired(config.retention_seconds).await
                 .map_err(|_| "Startup retention sweep failed")?;
             if removed > 0 { println!("Retention removed {removed} events"); }
@@ -41,10 +43,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Retention: disabled");
                 None
             };
+            let shutdown = shutdown();
             println!("Listening on http://{}", listener.local_addr()?);
             let result = axum::serve(listener, api::router(store.clone(), keys, &config)
                 .into_make_service_with_connect_info::<std::net::SocketAddr>())
-                .with_graceful_shutdown(shutdown())
+                .with_graceful_shutdown(shutdown)
                 .await;
             if let Some(maintenance) = maintenance {
                 maintenance.abort();
@@ -58,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some("delete-viewer"), [viewer_id]) => {
             let _lock = config.lock()?;
             config.keys()?;
-            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"))?;
+            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib)?;
             let result = store.delete_viewer(viewer_id.clone()).await;
             drop(store);
             worker.join().map_err(|_| "Database worker panicked")??;
@@ -74,14 +77,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn shutdown() {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("install SIGTERM handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = terminate.recv() => {} }
+#[cfg(unix)]
+fn shutdown() -> impl std::future::Future<Output = ()> {
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("install SIGTERM handler");
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("install SIGINT handler");
+    async move {
+        tokio::select! { _ = interrupt.recv() => {}, _ = terminate.recv() => {} }
     }
-    #[cfg(not(unix))]
+}
+
+#[cfg(not(unix))]
+async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }

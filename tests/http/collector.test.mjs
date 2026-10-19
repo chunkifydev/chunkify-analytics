@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { cp, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer, request as httpRequest } from "node:http";
 import { gzipSync } from "node:zlib";
@@ -74,7 +74,8 @@ async function collector(t, settings = {}, initialBinary = binary) {
     },
     async start(executable = binary, overrides = {}) {
       child = spawn(executable, ["serve"], { env: { ...env, ...overrides }, stdio: "pipe" });
-      exited = once(child, "exit");
+      // Drain stdout/stderr as well as waiting for the process to exit.
+      exited = once(child, "close");
       let output = "";
       errors = "";
       server.logs = () => `${output}${errors}`;
@@ -91,7 +92,8 @@ async function collector(t, settings = {}, initialBinary = binary) {
       });
     },
     async stop(signal = "SIGTERM") {
-      if (!child || child.exitCode !== null || child.signalCode !== null) return;
+      if (!child) return;
+      if (child.exitCode !== null || child.signalCode !== null) { await exited; return; }
       child.kill(signal);
       const [code, receivedSignal] = await exited;
       if (signal === "SIGTERM") assert.equal(code, 0, `${receivedSignal}: ${errors}`);
@@ -173,6 +175,235 @@ test("real SDK events survive a collector restart and duplicate delivery", async
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), events);
   assert.equal((await fetch(`${server.url}/v1/events`)).status, 401);
+});
+
+test("optional profiling reports database work on shutdown without event data or credentials", async (t) => {
+  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INSERT_MODE: "row" });
+  const events = sdkEvents("private-video", "private-viewer");
+  await server.send(events[0]);
+  await server.send(events[0]);
+  await server.sendOtlp(events[1]);
+  await server.get("/v1/events");
+  await server.get("/v1/summary");
+  await server.get("/v1/videos");
+  await server.stop();
+  const line = server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"'));
+  assert.ok(line, "profiling must emit a structured shutdown report");
+  const profile = JSON.parse(line);
+  assert.equal(profile.version, 2);
+  assert.equal(profile.ingest.transactions, 3);
+  assert.equal(profile.ingest.requests, 3);
+  assert.equal(profile.ingest.received_records, 3);
+  assert.equal(profile.ingest.inserted_records, 2);
+  assert.equal(profile.ingest.max_records, 1);
+  assert.ok(profile.ingest.total_bytes >= profile.ingest.max_bytes);
+  assert.equal(profile.jobs.ingest.execution.count, 3);
+  assert.equal(profile.jobs.ingest.queue_wait.count, 3);
+  for (const name of ["events", "summary", "videos"]) assert.equal(profile.jobs[name].execution.count, 1);
+  for (const name of ["begin", "prepare_request", "insert_event", "commit"]) {
+    assert.equal(profile.ingest_stages[name].count, 3);
+    assert.ok(profile.ingest_stages[name].total_ms >= profile.ingest_stages[name].max_ms);
+  }
+  assert.equal(profile.ingest_stages.insert_otlp.count, 1);
+  for (const secret of [server.keys.ingest_key, server.keys.read_token, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
+    assert.ok(!line.includes(secret), "profile must contain only aggregate measurements");
+  }
+  await server.start(binary, { COLLECTOR_PROFILE: "false" });
+  assert.equal((await server.get("/v1/events")).events.length, 2);
+  await server.stop();
+  assert.ok(!server.logs().includes('"collector_profile"'));
+});
+
+test("checkpoint configuration is applied and acknowledged native and OTLP events survive a crash", async (t) => {
+  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_CHECKPOINT_THRESHOLD_MIB: "64" });
+  const events = sdkEvents("checkpoint");
+  await server.send(events[0]);
+  await server.sendOtlp(events.at(-1));
+  const records = (await server.get("/v1/events")).events;
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events, records);
+  await server.stop();
+  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  assert.equal(profile.database?.checkpoint_threshold, "64.0 MiB");
+  assert.ok(profile.database.threads > 0);
+  assert.ok(profile.database.version.startsWith("v"));
+  for (const value of ["0", "1025", "no", "1; DROP TABLE events"]) {
+    const result = await server.command(["serve"], { COLLECTOR_CHECKPOINT_THRESHOLD_MIB: value });
+    assert.notEqual(result.code, 0);
+    assert.ok(result.stderr.includes("COLLECTOR_CHECKPOINT_THRESHOLD_MIB"), result.stderr);
+  }
+});
+
+test("concurrent native and OTLP requests share bounded transactions and preserve their data", async (t) => {
+  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_RETENTION_SECONDS: "0",
+    COLLECTOR_BATCH_MAX_EVENTS: "8", COLLECTOR_BATCH_DELAY_MS: "100", COLLECTOR_INSERT_MODE: "row" });
+  const events = Array.from({ length: 12 }, (_, index) => sdkEvents(`batch-${index}`)[0]);
+  const envelopes = await otlpRequests(events);
+  await Promise.all(events.map(async (event, index) => {
+    if (index % 2 === 0) await server.send(event);
+    else assert.equal((await postOtlp(server, JSON.stringify(envelopes[index]))).status, 200);
+  }));
+  const records = (await server.get("/v1/events")).events;
+  assert.deepEqual(new Set(records.map((r) => r.event.event_id)), new Set(events.map((e) => e.event_id)));
+  for (const record of records) {
+    const index = events.findIndex((event) => event.event_id === record.event.event_id);
+    assert.deepEqual(record.event, events[index]);
+    assert.equal(Boolean(record.otlp), index % 2 === 1);
+    assert.equal(record.event_context.client_ip, "127.0.0.1");
+  }
+  await server.stop();
+  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  assert.ok(profile.ingest.transactions < 12, "concurrent requests must share transactions");
+  assert.equal(profile.ingest.requests, 12);
+  assert.equal(profile.ingest.inserted_records, 12);
+  assert.ok(profile.ingest.max_records > 1 && profile.ingest.max_records <= 8);
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events, records);
+});
+
+test("a lone event flushes by the collection deadline and keeps its earlier receipt time", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "250", COLLECTOR_RETENTION_SECONDS: "0" });
+  const before = Date.now();
+  await server.send(sdkEvents()[0]);
+  const responded = Date.now();
+  const [record] = (await server.get("/v1/events")).events;
+  assert.ok(Date.parse(record.received_at) >= before);
+  assert.ok(responded - Date.parse(record.received_at) >= 200, "receipt time must precede the collection wait");
+  assert.ok(responded - before < 3000, "an incomplete batch must flush without another request");
+});
+
+test("oversized write requests are rejected atomically and a full byte budget recovers", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384",
+    COLLECTOR_BATCH_DELAY_MS: "250", COLLECTOR_BATCH_MAX_EVENTS: "2", COLLECTOR_INGEST_PER_SECOND: "1000" });
+  const events = Array.from({ length: 3 }, (_, i) => sdkEvents(`limits-${i}`)[0]);
+  const envelopes = await otlpRequests(events);
+  const batch = { resourceLogs: [{ scopeLogs: [{ logRecords: envelopes.map((e) => e.resourceLogs[0].scopeLogs[0].logRecords[0]) }] }] };
+  assert.equal((await postOtlp(server, JSON.stringify(batch))).status, 413);
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  const post = (event) => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } });
+  assert.equal((await post({ ...events[0], extra: "x".repeat(20000) })).status, 413);
+  const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => post({ ...sdkEvents(`budget-${i}`)[0], extra: "x".repeat(4000) })));
+  assert.ok(responses.some((r) => r.status === 503), "outstanding bytes must be bounded");
+  assert.ok(responses.some((r) => r.status === 201));
+  assert.ok(responses.every((r) => [201, 503].includes(r.status)));
+  const accepted = responses.filter((r) => r.status === 201).length;
+  assert.equal((await server.get("/v1/events")).events.length, accepted);
+  assert.equal((await post(events[0])).status, 201, "completed and rejected requests must release their budget");
+});
+
+test("bulk writes keep the first event and envelope and return per-request duplicate results", async (t) => {
+  const server = await collector(t, { COLLECTOR_INSERT_MODE: "bulk", COLLECTOR_PROFILE: "true", COLLECTOR_BATCH_DELAY_MS: "100" });
+  const playback = sdkEvents("bulk");
+  const events = [playback[0], playback.at(-1)];
+  const envelopes = await otlpRequests([events[0], { ...events[0], replaced: true }, events[1]]);
+  const body = { resourceLogs: [{ scopeLogs: [{ logRecords: envelopes.map((e) => e.resourceLogs[0].scopeLogs[0].logRecords[0]) }] }] };
+  assert.equal((await postOtlp(server, JSON.stringify(body))).status, 200);
+  const responses = await Promise.all(Array.from({ length: 6 }, () => fetch(`${server.url}/v1/events`, {
+    method: "POST", body: JSON.stringify({ ...events[0], replaced: true }),
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+  })));
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { accepted: false, duplicate: true });
+  }
+  const records = (await server.get("/v1/events")).events;
+  assert.deepEqual(records.map((r) => r.event), events);
+  assert.deepEqual(records[0].otlp.log_record, envelopes[0].resourceLogs[0].scopeLogs[0].logRecords[0]);
+  await server.stop();
+  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  assert.ok(profile.ingest_stages.append_events?.count > 0, "bulk writes must use the measured bulk path");
+  assert.equal(profile.ingest.inserted_records, 2);
+  assert.equal(profile.ingest.requests, 7);
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events, records);
+  await server.send(sdkEvents("after-bulk")[0]);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.equal((await server.get("/v1/events")).events.length, 3);
+});
+
+test("a failed batch commit never acknowledges or retains any of its requests", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async (t) => {
+  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_BATCH_DELAY_MS: "200" });
+  // A clean checkpoint removes the WAL. Prevent its recreation to exercise a
+  // real commit failure through the deployment filesystem, without DB access.
+  await server.stop();
+  await server.start();
+  assert.ok(!(await readdir(server.directory)).some((name) => name.endsWith(".wal")));
+  const events = Array.from({ length: 8 }, (_, i) => sdkEvents(`failed-${i}`)[0]);
+  const envelopes = await otlpRequests(events);
+  await chmod(server.directory, 0o500);
+  try {
+    const responses = await Promise.all(events.map((event, i) => i % 2
+      ? postOtlp(server, JSON.stringify(envelopes[i]))
+      : fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } })));
+    assert.ok(responses.every((r) => r.status === 500), `failed writes returned ${responses.map((r) => r.status)}`);
+  } finally { await chmod(server.directory, 0o700); }
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  await server.send(events[0]);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+});
+
+test("zero collection delay commits each request separately, including empty OTLP requests", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "0", COLLECTOR_PROFILE: "true" });
+  await Promise.all(Array.from({ length: 12 }, (_, i) => i % 2
+    ? server.send(sdkEvents(`zero-${i}`)[0])
+    : postOtlp(server, JSON.stringify({ resourceLogs: [] })).then((r) => assert.equal(r.status, 200))));
+  await server.stop();
+  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  assert.equal(profile.ingest.requests, 12);
+  assert.equal(profile.ingest.transactions, 12);
+  assert.equal(profile.ingest.max_requests, 1);
+  assert.equal(profile.ingest.inserted_records, 6);
+});
+
+test("reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  let acknowledged = false;
+  const writing = server.send(sdkEvents("read-barrier")[0]).then(() => { acknowledged = true; });
+  await delay(100);
+  assert.equal(acknowledged, false, "write should still be waiting for the collection deadline");
+  const before = Date.now();
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+  await writing;
+  assert.ok(Date.now() - before < 800, "a queued read should flush the batch before its one-second deadline");
+  const events = Array.from({ length: 6 }, (_, i) => sdkEvents(`shutdown-${i}`)[0]);
+  const envelopes = await otlpRequests(events);
+  const pending = Promise.all(events.map((event, i) => i % 2
+    ? postOtlp(server, JSON.stringify(envelopes[i])).then((r) => assert.equal(r.status, 200))
+    : server.send(event)));
+  await delay(100);
+  await Promise.all([server.stop(), pending]);
+  await server.start();
+  assert.equal((await server.get("/v1/events")).events.length, 7);
+});
+
+test("a concurrent native duplicate has exactly one acknowledged owner", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "100" });
+  const event = sdkEvents()[0];
+  const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => fetch(`${server.url}/v1/events`, {
+    method: "POST", body: JSON.stringify({ ...event, delivery: i }),
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+  })));
+  assert.equal(responses.filter((r) => r.status === 201).length, 1);
+  assert.equal(responses.filter((r) => r.status === 200).length, 11);
+  const owner = responses.findIndex((r) => r.status === 201);
+  assert.deepEqual((await server.get("/v1/events")).events.map((r) => r.event), [{ ...event, delivery: owner }]);
+});
+
+test("invalid batch settings fail startup with the setting name", async (t) => {
+  const server = await collector(t);
+  await server.stop();
+  for (const [name, value] of Object.entries({ COLLECTOR_BATCH_MAX_EVENTS: "0", COLLECTOR_BATCH_DELAY_MS: "not-a-number",
+    COLLECTOR_QUEUE_MAX_BYTES: "100", COLLECTOR_QUEUE_MAX_REQUESTS: "0", COLLECTOR_INSERT_MODE: "unknown" })) {
+    const result = await server.command(["serve"], { [name]: value });
+    assert.notEqual(result.code, 0);
+    assert.ok(result.stderr.includes(name), result.stderr);
+  }
 });
 
 test("connection IP is stored separately and cannot be replaced by event fields or untrusted headers", async (t) => {

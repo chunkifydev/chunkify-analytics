@@ -1,25 +1,33 @@
 use crate::{
     api::ApiError,
     context::{RequestContext, event_context},
-    event::{self, IncomingEvent},
+    event::IncomingEvent,
     query::{Cursor, Query},
+    writer::{BatchConfig, Writer},
 };
 use duckdb::{Connection, params, params_from_iter, types::Value as SqlValue};
 use serde_json::{Value, json};
 use std::{path::Path, thread};
-use tokio::sync::{mpsc, oneshot};
 
-type Job = Box<dyn FnOnce(&mut Connection) + Send>;
 type DatabaseWorker = thread::JoinHandle<duckdb::Result<()>>;
 
 #[derive(Clone)]
 pub struct Store {
-    sender: mpsc::Sender<Job>,
+    writer: Writer,
 }
 
 impl Store {
-    pub fn open(path: &Path) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
-        let mut connection = Connection::open(path)?;
+    pub fn open(
+        path: &Path,
+        batch: BatchConfig,
+        profile: bool,
+        checkpoint_threshold_mib: u32,
+    ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
+        let settings = duckdb::Config::default().with(
+            "checkpoint_threshold",
+            format!("{checkpoint_threshold_mib} MiB"),
+        )?;
+        let mut connection = Connection::open_with_flags(path, settings)?;
         let tx = connection.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS collector_schema (version INTEGER NOT NULL);
             INSERT INTO collector_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM collector_schema);")?;
@@ -99,28 +107,16 @@ impl Store {
             }
         }
         tx.commit()?;
-        let (sender, mut receiver) = mpsc::channel::<Job>(64);
-        let worker = thread::spawn(move || {
-            while let Some(job) = receiver.blocking_recv() {
-                job(&mut connection);
-            }
-            connection.execute_batch("CHECKPOINT")
-        });
-        Ok((Self { sender }, worker))
+        let (writer, worker) = Writer::start(connection, batch, profile)?;
+        Ok((Self { writer }, worker))
     }
 
-    // One bounded queue owns the connection. Database work never blocks Tokio's HTTP threads.
     pub async fn call<T: Send + 'static>(
         &self,
+        name: &'static str,
         operation: impl FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .try_send(Box::new(move |connection| {
-                let _ = sender.send(operation(connection));
-            }))
-            .map_err(|_| ApiError::unavailable())?;
-        receiver.await.map_err(|_| ApiError::unavailable())?
+        self.writer.call(name, operation).await
     }
 
     pub async fn insert(
@@ -138,7 +134,7 @@ impl Store {
         if retention_seconds == 0 {
             return Ok(0);
         }
-        self.call(move |connection| {
+        self.call("retention", move |connection| {
             let cutoff = chrono::Utc::now().timestamp_millis() - (retention_seconds * 1000) as i64;
             let tx = connection.transaction()?;
             tx.execute("DELETE FROM event_otlp WHERE event_id IN (SELECT event_id FROM events WHERE received_at_ms < ?)", [cutoff])?;
@@ -149,7 +145,7 @@ impl Store {
     }
 
     pub async fn delete_viewer(&self, viewer_id: String) -> Result<usize, ApiError> {
-        self.call(move |connection| {
+        self.call("delete_viewer", move |connection| {
             let tx = connection.transaction()?;
             tx.execute("DELETE FROM event_otlp WHERE event_id IN (SELECT event_id FROM events WHERE viewer_id = ?)", [&viewer_id])?;
             let removed = tx.execute("DELETE FROM events WHERE viewer_id = ?", [&viewer_id])?;
@@ -163,34 +159,7 @@ impl Store {
         events: Vec<IncomingEvent>,
         request_context: Option<RequestContext>,
     ) -> Result<usize, ApiError> {
-        let request_context = request_context
-            .map(serde_json::to_value)
-            .transpose()
-            .map_err(|_| ApiError::internal())?;
-        self.call(move |connection| {
-            let tx = connection.transaction()?;
-            let mut inserted = 0;
-            let received_at = chrono::Utc::now().timestamp_millis();
-            for record in events {
-                let event = record.event;
-                let context = event_context(&event, request_context.as_ref()).map(|value| value.to_string());
-                let added = tx.execute(
-                "INSERT INTO events (event_id, view_id, video_id, viewer_id, event_name, sequence, occurred_at_ms, playing_time_ms, received_at_ms, payload, event_context)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(event_id) DO NOTHING",
-                params![event["event_id"].as_str(), event["view_id"].as_str(), event["video_id"].as_str(), event["viewer_id"].as_str(),
-                    event["event_name"].as_str(), event["sequence"].as_i64(), event::timestamp(event["occurred_at"].as_str().unwrap())?,
-                    event["playing_time_ms"].as_f64(), received_at, event.to_string(), context],
-            )?;
-                if added > 0 {
-                    if let Some(otlp) = record.otlp {
-                        tx.execute("INSERT INTO event_otlp VALUES (?, ?)", params![event["event_id"].as_str(), otlp.to_string()])?;
-                    }
-                    inserted += added;
-                }
-            }
-            tx.commit()?;
-            Ok(inserted)
-        }).await
+        self.writer.insert(events, request_context).await
     }
 
     pub async fn events(&self, query: Query) -> Result<Value, ApiError> {
@@ -207,7 +176,7 @@ impl Store {
         {
             return Err(ApiError::bad("Invalid cursor position"));
         }
-        self.call(move |connection| {
+        self.call("events", move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection)? };
             let after = cursor.map_or(0, |c| c.after);
             let (conditions, mut values) = filters.sql();
@@ -253,7 +222,7 @@ impl Store {
             .as_deref()
             .map(|value| Cursor::<String>::decode(value, "videos", &filters))
             .transpose()?;
-        self.call(move |connection| {
+        self.call(if per_video { "videos" } else { "summary" }, move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection)? };
             let (conditions, filter_values) = filters.sql();
             let mut values = vec![SqlValue::BigInt(through)];

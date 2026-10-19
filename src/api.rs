@@ -295,9 +295,9 @@ async fn ingest_otlp(
         .store_ip
         .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let request = read_json(request, app.max_body_bytes, true).await?;
-    app.store
-        .insert_batch(otlp::decode(&request, app.max_otlp_records)?, context)
-        .await?;
+    let events = otlp::decode(&request, app.max_otlp_records)?;
+    drop(request);
+    app.store.insert_batch(events, context).await?;
     Ok(Json(json!({})))
 }
 
@@ -372,7 +372,7 @@ async fn events(
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
     app.store
-        .call(|db| {
+        .call("health", |db| {
             db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;
             Ok(())
         })

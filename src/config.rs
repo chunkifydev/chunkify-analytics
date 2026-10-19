@@ -14,6 +14,9 @@ pub struct Config {
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
     pub store_ip: bool,
+    pub profile: bool,
+    pub checkpoint_threshold_mib: u32,
+    pub batch: crate::writer::BatchConfig,
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
@@ -92,7 +95,20 @@ impl Config {
         if !(1..=86400).contains(&retention_interval_seconds) {
             return Err("COLLECTOR_RETENTION_INTERVAL_SECONDS must be between 1 and 86400".into());
         }
+        let checkpoint_threshold_mib = env::var("COLLECTOR_CHECKPOINT_THRESHOLD_MIB")
+            .unwrap_or_else(|_| "16".into())
+            .parse::<u32>()
+            .map_err(|_| "COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024")?;
+        if !(1..=1024).contains(&checkpoint_threshold_mib) {
+            return Err("COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024".into());
+        }
         Ok(Self {
+            checkpoint_threshold_mib,
+            batch: crate::writer::BatchConfig::load()?,
+            profile: env::var("COLLECTOR_PROFILE")
+                .unwrap_or_else(|_| "false".into())
+                .parse()
+                .map_err(|_| "COLLECTOR_PROFILE must be true or false")?,
             trusted_proxies: crate::context::trusted_proxies(
                 &env::var("COLLECTOR_TRUSTED_PROXIES").unwrap_or_default(),
             )?,

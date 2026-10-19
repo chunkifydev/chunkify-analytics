@@ -10,7 +10,22 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 2. OTLP/HTTP JSON ingestion, including batched logs and gzip. Implemented.
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.
-   Implemented. See the [capacity report](capacity.md).
+   Implemented. See the [initial capacity report](capacity.md) and the subsequent
+   [write batching measurements](batching.md) and
+   [checkpoint investigation](checkpointing.md). The
+   [local retest](local-retest-2026-10-19.md) records results after reducing host
+   memory pressure. The [bounded buffering comparison](buffering.md) tests a
+   larger request queue at 750 and 1,000 requests/s. The
+   [verification ledger report](verification-ledger.md) records the benchmark
+   memory reduction and three-minute probes, including a preloaded database.
+   The [higher concurrency probe](concurrency.md) records a failed 1,000 requests/s
+   run during concurrent host activity. The [comparison after the call](postcall.md)
+   records two full-delivery passes at 1,000 requests/s for three minutes with a
+   1,024-request generator cap and server queue. The [higher-rate probes](throughput.md)
+   test 2,000 and 3,000 requests/s with a larger queue and checkpoint threshold.
+   The [read-impact comparison](read-impact.md) finds that ingestion latency still
+   fails its target with concurrent analytics reads disabled. Deployment defaults
+   are unchanged.
 5. Browser/device context through `createChunkifyAdapter`. Implemented in the SDK
    and preserved in raw-event storage. Request IP collection, its opt-out, and
    explicit trusted-proxy configuration are implemented in the collector.
@@ -247,15 +262,65 @@ Serve public traffic through your HTTPS ingress. Internal HTTP is supported.
 | `COLLECTOR_ALLOWED_ORIGINS` | Empty | Comma-separated exact website origins, without paths or trailing slashes. Empty denies requests with an Origin header. Server requests without Origin still require the ingest key. |
 | `COLLECTOR_MAX_BODY_BYTES` | `65536` | Maximum request body size in bytes. OTLP gzip requests must fit this limit both before and after decompression. Must be positive. |
 | `COLLECTOR_MAX_OTLP_RECORDS` | `100` | Maximum log records per OTLP request, across all resource and scope groups, including duplicates. Must be positive. |
+| `COLLECTOR_BATCH_MAX_EVENTS` | `100` | Maximum records per write transaction, including duplicates. Range 1..10000. A whole request must fit. |
+| `COLLECTOR_BATCH_MAX_BYTES` | `1048576` | Maximum prepared request-buffer bytes per transaction. Range 1..67108864. See write batching below. |
+| `COLLECTOR_BATCH_DELAY_MS` | `10` | Maximum time the worker spends collecting a batch. Range 0..1000 ms. `0` gives each request its own transaction. |
+| `COLLECTOR_QUEUE_MAX_BYTES` | `16777216` | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
+| `COLLECTOR_QUEUE_MAX_REQUESTS` | `256` | Database channel capacity, shared by writes, reads and maintenance. Range 1..4096. The byte budget also applies to writes. |
+| `COLLECTOR_INSERT_MODE` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same batching and durability rules. |
+| `COLLECTOR_CHECKPOINT_THRESHOLD_MIB` | `16` | DuckDB's automatic checkpoint threshold, in MiB. Integer from 1..1024. Larger values allow a larger write-ahead log between checkpoints; see below. |
 | `COLLECTOR_INGEST_PER_SECOND` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
 | `COLLECTOR_RETENTION_SECONDS` | `2592000` | Retention by server receipt time, in seconds. Default is 30 days. `0` disables expiration. Must be a non-negative whole number no larger than `9223372036854775`. |
 | `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. Ignored when retention is disabled. |
 | `COLLECTOR_STORE_IP` | `true` | Store collector-derived request IP context. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
 | `COLLECTOR_TRUSTED_PROXIES` | Empty | Comma-separated literal IPv4/IPv6 addresses or CIDRs allowed to supply `X-Forwarded-For`. Empty trusts no proxies. No hostnames, ports, or wildcards. Use IPv4 CIDRs for IPv4-mapped addresses. |
+| `COLLECTOR_PROFILE` | `false` | Emit one aggregate database timing report to stderr when the worker drains on graceful shutdown. Accepts only `true` or `false`. No event values or credentials are included. Intended for local performance diagnosis. |
 
 Both ingestion endpoints share the rate limit. A batch consumes one request.
 The service rejects excess ingestion requests with HTTP 429 and `Retry-After: 1`.
-The database queue holds at most 64 waiting operations; a full queue returns 503.
+The database channel holds at most 256 waiting operations by default; a full channel
+returns 503. The worker also holds its active batch and may hold one deferred
+operation. All prepared write buffers, including that deferred request, share the
+byte budget.
+
+DuckDB can perform an automatic checkpoint during a transaction commit, delaying
+that transaction and subsequent queued operations. The checkpoint threshold
+defaults to 16 MiB, matching the bundled database default. Changing it preserves
+durable commits; it changes when WAL contents are consolidated into the database
+file. A larger threshold can require more WAL disk space and more recovery work
+after a crash, and does not guarantee shorter pauses. Measure with representative
+traffic before changing it. See DuckDB's
+[checkpoint configuration](https://duckdb.org/docs/stable/configuration/overview).
+
+### Write batching
+
+The worker groups concurrent requests into a bounded transaction. It flushes when
+the collection deadline, event limit, or prepared-buffer byte limit is reached,
+or when the next queued operation is a read or maintenance task. A request that
+does not fit the remaining batch waits for the next transaction. An OTLP request
+is never split. A request larger than either batch limit returns 413 without
+storing any of its records. Raising the OTLP record limit may also require raising
+the batch limits.
+
+The collection timer starts when the worker begins that batch. It excludes time
+already spent in the queue and time executing or committing the transaction, so
+it is not an HTTP latency guarantee. Sparse traffic normally waits up to 10 ms
+before its write starts. Reads interrupt collection in queue order; they still
+wait for the preceding writes to commit. Under overload, a full job queue or
+prepared-buffer byte budget returns 503. Rate limiting still applies first.
+
+The byte budget counts the allocated strings and vectors retained for prepared
+events, flat context and OTLP envelopes. It does not bound total process memory.
+Concurrent HTTP bodies, decoding/preparation before admission, allocator overhead,
+DuckDB buffers, indexes and temporary copies use additional memory. Keep the body
+size limit and container memory limit appropriate for the deployment.
+
+Bulk insertion uses a connection-local temporary staging table. The persistent
+schema remains version 3. The first occurrence of an event ID keeps its original
+payload, context and optional OTLP envelope. Duplicates within or across requests
+do not replace it. Every request receives its own result only after the shared
+transaction commits. A failed transaction fails every request in that batch and
+rolls back its writes. Graceful shutdown drains admitted requests.
 The SDK continues to send once without retrying. Limits are configurable safeguards,
 not a throughput guarantee. Configure connection and request timeouts at
 your ingress before exposing this development service publicly.
@@ -596,8 +661,9 @@ node tests/collector/docker/load.mjs --list
 
 | Cases | Workload |
 | --- | --- |
-| `native-100`, `native-200`, `native-400`, `native-800`, `native-1600` | One native event per request, at the named requests/s |
-| `otlp-100`, `otlp-200`, `otlp-400`, `otlp-800` | One OTLP record per request, at the named requests/s |
+| `native-100`, `native-200`, `native-400`, `native-500`, `native-750`, `native-800`, `native-1000`, `native-1600`, `native-2000`, `native-3000`, `native-4000` | One native event per request, at the named requests/s |
+| `preloaded-native-750`, `preloaded-native-1000`, `preloaded-native-2000`, `preloaded-native-3000` | The corresponding native traffic after inserting 50,000 events through OTLP |
+| `otlp-100`, `otlp-200`, `otlp-400`, `otlp-800`, `otlp-1000` | One OTLP record per request, at the named requests/s |
 | `otlp-batch10`, `otlp-batch25`, `otlp-batch25-gzip` | 100 requests/s with 10 or 25 records, optionally compressed |
 | `otlp-batch10-low`, `otlp-batch25-low` | 250 records/s using 25 requests/s of 10 records or 10 requests/s of 25 records |
 | `mixed` | Alternating native and 10-record OTLP requests, 100 requests/s, every fifth request repeats acknowledged events |
@@ -617,8 +683,14 @@ minutes. Other running containers are counted in the report and left running.
 | --- | --- | --- |
 | `COLLECTOR_LOAD_SECONDS` | `30` | 5..300 seconds per case |
 | `COLLECTOR_LOAD_CASES` | all cases | Comma-separated names from the table |
-| `COLLECTOR_LOAD_PRELOAD_EVENTS` | `50000` | 0..100000, used by `preloaded-mixed` |
-| `COLLECTOR_LOAD_CONCURRENCY` | `128` | 1..512 requests in flight |
+| `COLLECTOR_LOAD_PRELOAD_EVENTS` | `50000` | 0..100000, used by `preloaded-mixed` and `preloaded-native-*`; preload and timed traffic share the 200,000 unique-event guard |
+| `COLLECTOR_LOAD_CONCURRENCY` | `128` | 1..4096 requests in flight; higher concurrency still uses the same memory and disk guards |
+| `COLLECTOR_LOAD_PROFILE` | `0` | `1` enables the collector's aggregate shutdown profile; `0` disables it |
+| `COLLECTOR_LOAD_QUERIES` | `1` | `0` disables concurrent dashboard reads to isolate ingestion; retention and health checks remain enabled |
+| `COLLECTOR_LOAD_BROWSER_CONTEXT` | `0` | `1` captures browser context once through the real Chunkify adapter in Chromium, closes the browser, then replays it in native and OTLP fixtures. The replay omits null browser fields, which the OTLP adapter cannot retain. Requires Playwright Chromium. |
+| `COLLECTOR_LOAD_INSERT_MODE` | server default | Override `COLLECTOR_INSERT_MODE` for a row/bulk comparison |
+| `COLLECTOR_LOAD_CHECKPOINT_THRESHOLD_MIB` | server default | Override the automatic checkpoint threshold; 1..1024 MiB |
+| `COLLECTOR_LOAD_BATCH_MAX_EVENTS`, `COLLECTOR_LOAD_BATCH_MAX_BYTES`, `COLLECTOR_LOAD_BATCH_DELAY_MS`, `COLLECTOR_LOAD_QUEUE_MAX_BYTES`, `COLLECTOR_LOAD_QUEUE_MAX_REQUESTS` | server defaults | Override the corresponding write-batching settings; effective overrides are recorded in the report |
 | `COLLECTOR_LOAD_REPORT` | stdout | Output JSON path, saved after each completed case |
 | `COLLECTOR_IMAGE` | `chunkify-analytics-collector:test` | Existing local image name |
 
@@ -645,6 +717,10 @@ It replays those templates with fresh event/view IDs, video/viewer IDs, and even
 occurrence timestamps. There are ten video IDs and up to 1,000 viewer IDs. OTLP
 batching and compression model a gateway; neither SDK adapter batches events.
 The optional larger property is repeatable synthetic text, not browser metadata.
+The verification ledger retains each event's template selection, original dynamic
+fields and first submitted format. It reconstructs the complete expected event
+and OTLP record during restart verification. This avoids retaining full event
+and OTLP copies for every submission while preserving full-payload comparisons.
 
 Traffic follows a schedule independent of response completion. If the generator
 is full, or more than 50 ms behind schedule, it records skipped requests instead
@@ -671,9 +747,33 @@ Resource sampling requires Linux cgroup v2, including inside Docker Desktop.
 Samples include process RSS, cgroup memory including filesystem cache,
 container CPU, data-directory and WAL sizes, free host/volume disk, and generator
 RSS. The generator also reports CPU and event-loop delay. Sampling incurs Docker
-exec overhead and can miss peaks. Internal database queue wait/depth, transaction
-commit duration, and achieved write batch sizes require future instrumentation;
-HTTP latency cannot isolate those costs.
+exec overhead and can miss peaks. Enable `COLLECTOR_LOAD_PROFILE=1` to include
+`collector_profile` in each result. The profile records count, total milliseconds,
+and maximum milliseconds for queue wait and execution by database operation, plus
+ingestion transaction begin, request preparation, event append/insert, OTLP insert,
+staging cleanup and commit. Divide total time by count for the mean. Version 2
+profiles count queue wait per request and worker execution per shared transaction.
+Ingest counters describe committed transactions and requests, received records
+including duplicates, inserted records, and total/maximum prepared bytes and
+maximum records/requests per batch.
+Current profiles also record DuckDB's version and effective checkpoint threshold,
+thread count and memory limit in `database`. These settings are read once at
+worker startup when profiling is enabled.
+
+Profiles cover the process lifetime, including preload, health checks, startup
+retention, and work drained after traffic ends. Schema initialization and the final
+checkpoint are excluded. Stage timing counts include failed attempts; ingest
+counters count only committed transactions. Event-insert timing includes SQL
+preparation or cache lookup, parameter binding, and execution. `prepare_request`
+measures payload/context/envelope serialization and timestamp parsing before queue
+admission; it is outside worker execution time. Queue wait includes the collection
+delay. Profiles do not include HTTP parsing or
+validation, queue rejection counts, queue depth, or internal timing percentiles.
+Queue waits overlap across requests and must not be added to worker execution time.
+The worker reports before its final checkpoint, so a profile alone does not prove
+clean shutdown. The runner also verifies the exit status and persisted records.
+SIGKILL produces no shutdown profile. Compare runs with profiling enabled on both
+versions, because instrumentation itself has a cost.
 
 The runner stops at a sampled 512 MiB data directory, less than 4 GiB free disk
 on either the host or volume, 1,800 MiB container memory, 1 GiB generator RSS, or
@@ -689,6 +789,10 @@ sent, 99% HTTP success, successful-ingest p95 at most 250 ms, query p95 at most
 or rate-limit case is expected to miss these thresholds. Missing a performance
 threshold is reported, but does not fail CI or invalidate the measured result.
 A short passing probe is only a candidate operating rate, not a sustained limit.
+The separate `meets_full_delivery_thresholds` verdict requires those same latency
+and query checks plus every scheduled request being submitted and succeeding.
+An omitted or failed ingestion request makes that stricter verdict false, even
+when `meets_probe_thresholds` is true.
 
 After each case, the runner replaces the container and reads every event page.
 It checks acknowledged IDs, full canonical payloads, original OTLP context,
@@ -698,7 +802,11 @@ Shutdown and startup times and final checkpointed storage size are reported.
 The small benchmark-accounting and lifecycle tests run in Docker CI without
 asserting a machine-specific throughput target.
 
-The [expanded capacity report](capacity-expanded.md) contains the measured results
+The [write-path performance report](performance.md) covers profiling and the first
+prepared-statement optimization on the current schema, with IP storage enabled.
+The [batching report](batching.md) compares shared transactions and bulk insertion,
+including follow-up measurements with browser context and a preloaded database.
+The [expanded capacity report](capacity-expanded.md) contains the earlier results
 and raw JSON reports, including the rejected interrupted measurement.
 The [initial capacity report](capacity.md) preserves the earlier six-case baseline.
 The expanded matrix has different playback fixtures, scheduling, queries, and
@@ -706,5 +814,5 @@ host activity, so it should not be treated as a direct speed comparison with tha
 baseline. Compare future collector changes using the same runner, settings,
 hardware, retained dataset, and workload. Thirty-day capacity needs a larger,
 representative retained dataset and deployment-specific measurements. These
-reports predate browser/IP enrichment and the flat context column; they do not
-measure the storage or throughput cost of this stage.
+earlier capacity reports predate browser/IP enrichment and the flat context column.
+Use the later performance and batching reports for measurements of those changes.

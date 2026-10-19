@@ -47,6 +47,7 @@ struct DatabaseSettings {
 pub struct Profile {
     r#type: &'static str,
     version: u8,
+    worker: &'static str,
     #[serde(skip)]
     enabled: bool,
     jobs: BTreeMap<&'static str, JobTiming>,
@@ -57,7 +58,11 @@ pub struct Profile {
 }
 
 impl Profile {
-    pub fn new(enabled: bool, connection: &duckdb::Connection) -> duckdb::Result<Self> {
+    pub fn new(
+        enabled: bool,
+        connection: &duckdb::Connection,
+        worker: &'static str,
+    ) -> duckdb::Result<Self> {
         let database = if enabled {
             Some(connection.query_row(
                 "SELECT version(), current_setting('checkpoint_threshold'), current_setting('threads'), current_setting('memory_limit')",
@@ -70,6 +75,7 @@ impl Profile {
         Ok(Self {
             r#type: "collector_profile",
             version: 2,
+            worker,
             enabled,
             jobs: BTreeMap::new(),
             ingest_stages: BTreeMap::new(),

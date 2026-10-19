@@ -203,7 +203,7 @@ impl Writer {
         let (sender, receiver) = mpsc::sync_channel(config.queue_requests);
         let budget = Arc::new(Semaphore::new(config.queue_bytes));
         let worker_config = config.clone();
-        let mut measurements = Profile::new(profile, &connection)?;
+        let mut measurements = Profile::new(profile, &connection, "writer")?;
         let worker = thread::spawn(move || {
             let profile = &mut measurements;
             let mut pending = None;

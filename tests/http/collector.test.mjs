@@ -116,6 +116,14 @@ async function collector(t, settings = {}, initialBinary = binary) {
   return server;
 }
 
+function profiles(server) {
+  return server.logs().split("\n").filter((line) => line.startsWith('{"type":"collector_profile"')).map((line) => JSON.parse(line));
+}
+
+function writerProfile(server) {
+  return profiles(server).find((profile) => profile.worker === "writer");
+}
+
 function sdkEvents(videoId = "video-a", viewerId = "viewer-a") {
   const media = Object.assign(new EventTarget(), { duration: 120, currentTime: 0, src: "", currentSrc: "",
     ownerDocument: { defaultView: null } });
@@ -187,9 +195,9 @@ test("optional profiling reports database work on shutdown without event data or
   await server.get("/v1/summary");
   await server.get("/v1/videos");
   await server.stop();
-  const line = server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"'));
-  assert.ok(line, "profiling must emit a structured shutdown report");
-  const profile = JSON.parse(line);
+  const profile = writerProfile(server);
+  assert.ok(profile, "profiling must emit a structured shutdown report");
+  const readProfile = profiles(server).find((profile) => profile.worker === "reader") ?? profile;
   assert.equal(profile.version, 2);
   assert.equal(profile.ingest.transactions, 3);
   assert.equal(profile.ingest.requests, 3);
@@ -199,14 +207,14 @@ test("optional profiling reports database work on shutdown without event data or
   assert.ok(profile.ingest.total_bytes >= profile.ingest.max_bytes);
   assert.equal(profile.jobs.ingest.execution.count, 3);
   assert.equal(profile.jobs.ingest.queue_wait.count, 3);
-  for (const name of ["events", "summary", "videos"]) assert.equal(profile.jobs[name].execution.count, 1);
+  for (const name of ["events", "summary", "videos"]) assert.equal(readProfile.jobs[name].execution.count, 1);
   for (const name of ["begin", "prepare_request", "insert_event", "commit"]) {
     assert.equal(profile.ingest_stages[name].count, 3);
     assert.ok(profile.ingest_stages[name].total_ms >= profile.ingest_stages[name].max_ms);
   }
   assert.equal(profile.ingest_stages.insert_otlp.count, 1);
   for (const secret of [server.keys.ingest_key, server.keys.read_token, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
-    assert.ok(!line.includes(secret), "profile must contain only aggregate measurements");
+    assert.ok(!JSON.stringify(profiles(server)).includes(secret), "profiles must contain only aggregate measurements");
   }
   await server.start(binary, { COLLECTOR_PROFILE: "false" });
   assert.equal((await server.get("/v1/events")).events.length, 2);
@@ -224,7 +232,7 @@ test("checkpoint configuration is applied and acknowledged native and OTLP event
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events, records);
   await server.stop();
-  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  const profile = writerProfile(server);
   assert.equal(profile.database?.checkpoint_threshold, "64.0 MiB");
   assert.ok(profile.database.threads > 0);
   assert.ok(profile.database.version.startsWith("v"));
@@ -253,7 +261,7 @@ test("concurrent native and OTLP requests share bounded transactions and preserv
     assert.equal(record.event_context.client_ip, "127.0.0.1");
   }
   await server.stop();
-  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  const profile = writerProfile(server);
   assert.ok(profile.ingest.transactions < 12, "concurrent requests must share transactions");
   assert.equal(profile.ingest.requests, 12);
   assert.equal(profile.ingest.inserted_records, 12);
@@ -312,7 +320,7 @@ test("bulk writes keep the first event and envelope and return per-request dupli
   assert.deepEqual(records.map((r) => r.event), events);
   assert.deepEqual(records[0].otlp.log_record, envelopes[0].resourceLogs[0].scopeLogs[0].logRecords[0]);
   await server.stop();
-  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  const profile = writerProfile(server);
   assert.ok(profile.ingest_stages.append_events?.count > 0, "bulk writes must use the measured bulk path");
   assert.equal(profile.ingest.inserted_records, 2);
   assert.equal(profile.ingest.requests, 7);
@@ -354,15 +362,16 @@ test("zero collection delay commits each request separately, including empty OTL
     ? server.send(sdkEvents(`zero-${i}`)[0])
     : postOtlp(server, JSON.stringify({ resourceLogs: [] })).then((r) => assert.equal(r.status, 200))));
   await server.stop();
-  const profile = JSON.parse(server.logs().split("\n").find((line) => line.startsWith('{"type":"collector_profile"')));
+  const profile = writerProfile(server);
   assert.equal(profile.ingest.requests, 12);
   assert.equal(profile.ingest.transactions, 12);
   assert.equal(profile.ingest.max_requests, 1);
   assert.equal(profile.ingest.inserted_records, 6);
 });
 
-test("reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+test("shared-worker reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0",
+    COLLECTOR_EXPERIMENTAL_READ_WORKER: "false" });
   let acknowledged = false;
   const writing = server.send(sdkEvents("read-barrier")[0]).then(() => { acknowledged = true; });
   await delay(100);
@@ -382,6 +391,21 @@ test("reads flush pending writes and graceful shutdown drains an incomplete batc
   assert.equal((await server.get("/v1/events")).events.length, 7);
 });
 
+test("separate reads return committed data without flushing unacknowledged writes", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0",
+    COLLECTOR_EXPERIMENTAL_READ_WORKER: "true" });
+  let acknowledged = false;
+  const writing = server.send(sdkEvents("independent-read")[0]).then(() => { acknowledged = true; });
+  await delay(100);
+  assert.equal(acknowledged, false);
+  const before = Date.now();
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  assert.ok(Date.now() - before < 800, "read must not wait for the writer's collection deadline");
+  assert.equal(acknowledged, false, "reading must not force an early write commit");
+  await writing;
+  assert.equal((await server.get("/v1/events")).events.length, 1, "a read after direct acknowledgement sees the commit");
+});
+
 test("a concurrent native duplicate has exactly one acknowledged owner", async (t) => {
   const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "100" });
   const event = sdkEvents()[0];
@@ -399,7 +423,8 @@ test("invalid batch settings fail startup with the setting name", async (t) => {
   const server = await collector(t);
   await server.stop();
   for (const [name, value] of Object.entries({ COLLECTOR_BATCH_MAX_EVENTS: "0", COLLECTOR_BATCH_DELAY_MS: "not-a-number",
-    COLLECTOR_QUEUE_MAX_BYTES: "100", COLLECTOR_QUEUE_MAX_REQUESTS: "0", COLLECTOR_INSERT_MODE: "unknown" })) {
+    COLLECTOR_QUEUE_MAX_BYTES: "100", COLLECTOR_QUEUE_MAX_REQUESTS: "0", COLLECTOR_INSERT_MODE: "unknown",
+    COLLECTOR_EXPERIMENTAL_READ_WORKER: "invalid" })) {
     const result = await server.command(["serve"], { [name]: value });
     assert.notEqual(result.code, 0);
     assert.ok(result.stderr.includes(name), result.stderr);
@@ -1135,6 +1160,60 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
   assert.equal(accepted.status, 200);
   assert.equal(accepted.headers.get("access-control-allow-origin"), "https://player.example");
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
+});
+
+test("separate reader serves committed SDK events with stable pagination in direct and queued modes", async (t) => {
+  for (const queued of [false, true]) await t.test(queued ? "durable queue" : "direct", async (t) => {
+    const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: "true",
+      COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(queued), COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_PROFILE: "true" });
+    const events = Array.from({ length: 8 }, (_, index) => {
+      const view = sdkEvents(`video-${index % 2}`, `viewer-${index % 3}`);
+      view.at(-1).playing_time_ms = 1000;
+      return view;
+    }).flat();
+    await Promise.all([
+      Promise.all(events.map((event, index) => index % 2 ? server.sendOtlp(event) : server.send(event))),
+      (async () => {
+        for (let i = 0; i < 3; i++) {
+          await Promise.all([server.get("/v1/summary"), server.get("/v1/videos"), server.get("/v1/events")]);
+          await delay(5);
+        }
+      })(),
+    ]);
+    const drain = async () => {
+      if (!queued) return;
+      const deadline = Date.now() + 5000;
+      while ((await server.get("/v1/ingestion")).queue.pending_requests && Date.now() < deadline) await delay(10);
+      assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
+    };
+    await drain();
+    assert.deepEqual(await server.get("/v1/summary"), { views: 8, unique_viewers: 3, total_playing_time_ms: 8000 });
+    assert.equal((await server.get("/v1/summary?video_id=video-0")).views, 4);
+    const first = await server.get("/v1/events?limit=1");
+    const extra = sdkEvents("after-first-page");
+    for (const event of extra) await server.send(event);
+    await drain();
+    const records = [...first.events];
+    let cursor = first.next_cursor;
+    while (cursor) {
+      const page = await server.get(`/v1/events?limit=5&cursor=${encodeURIComponent(cursor)}`);
+      records.push(...page.events);
+      cursor = page.next_cursor;
+    }
+    assert.deepEqual(new Set(records.map(({ event }) => event.event_id)), new Set(events.map((event) => event.event_id)), "later commits must stay outside the pagination watermark");
+    for (const record of records) {
+      assert.deepEqual(record.event, events.find((event) => event.event_id === record.event.event_id));
+      assert.equal(record.event_context.client_ip, "127.0.0.1");
+    }
+    await server.stop();
+    const reader = profiles(server).find((profile) => profile.worker === "reader");
+    assert.ok(reader, "read worker must report its own execution");
+    assert.ok(reader.jobs.summary.execution.count > 0);
+    assert.equal(writerProfile(server).jobs.summary, undefined, "dashboard queries must bypass the writer");
+    await server.start();
+    assert.equal((await server.get("/v1/events")).events.length, events.length + extra.length);
+    assert.equal((await server.get("/v1/summary")).views, 9);
+  });
 });
 
 test("durable queue acknowledges before DuckDB, recovers after SIGKILL, and deduplicates replay", async (t) => {

@@ -351,9 +351,11 @@ export async function measure(input, workload, { signal, fixture } = {}) {
     abortReason ??= checkSafety(after);
     const stopStart = performance.now();
     const stopped = await server.stop(config.shutdown);
-    const profileLine = server.lastLogs.split("\n").find((line) => line.startsWith('{"type":"collector_profile"'));
-    const collectorProfile = profileLine ? JSON.parse(profileLine) : null;
+    const profiles = server.lastLogs.split("\n").filter((line) => line.startsWith('{"type":"collector_profile"')).map((line) => JSON.parse(line));
+    const collectorProfile = profiles.find((profile) => !profile.worker || profile.worker === "writer") ?? null;
+    const readerProfile = profiles.find((profile) => profile.worker === "reader") ?? null;
     if (config.profile && config.shutdown === "stop") assert.ok(collectorProfile, "collector profile must be available after graceful shutdown");
+    if (config.profile && config.shutdown === "stop" && settings.COLLECTOR_EXPERIMENTAL_READ_WORKER === "true") assert.ok(readerProfile, "separate reader profile must be available after graceful shutdown");
     const shutdownMs = performance.now() - stopStart;
     assert.equal(stopped.OOMKilled, false, "benchmark must stay within memory limits");
     assert.equal(stopped.ExitCode, config.shutdown === "kill" ? 137 : 0);
@@ -388,7 +390,7 @@ export async function measure(input, workload, { signal, fixture } = {}) {
         persisted_new: checked.persisted_new, persisted_without_ack: checked.persisted_without_ack },
       durable_queue: queueEnabled ? { samples: queueSamples, after_http_completion: queueAtTrafficEnd, drain_ms: +queueDrainMs.toFixed(2) } : null,
       request_latency: latency, successful_request_latency: successfulLatency, schedule_lag: lag,
-      preparation_latency: distribution(preparation), queries, collector_profile: collectorProfile, max_inflight: maxInflight,
+      preparation_latency: distribution(preparation), queries, collector_profile: collectorProfile, reader_profile: readerProfile, max_inflight: maxInflight,
       payload: { total_wire_bytes: wireBytes, total_decoded_bytes: decodedBytes,
         mean_wire_bytes_per_request: requests.sent ? Math.round(wireBytes / requests.sent) : null },
       resources: { samples, peak_process_rss_mib: +(peak("process_rss_bytes") / mib).toFixed(2),

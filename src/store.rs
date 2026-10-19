@@ -3,6 +3,7 @@ use crate::{
     context::{RequestContext, event_context},
     event::IncomingEvent,
     query::{Cursor, Query},
+    reader::Reader,
     writer::{BatchConfig, Writer},
 };
 use duckdb::{Connection, params, params_from_iter, types::Value as SqlValue};
@@ -12,11 +13,17 @@ use std::{path::Path, thread};
 pub struct DatabaseWorker {
     database: thread::JoinHandle<duckdb::Result<()>>,
     spool: Option<crate::spool::Workers>,
+    reader: Option<thread::JoinHandle<()>>,
+    // Keep the writer alive until readers finish and the spool finishes replay.
+    writer: Writer,
 }
 impl DatabaseWorker {
     pub fn join(self) -> thread::Result<Result<(), String>> {
+        let reader = self.reader.map(|worker| worker.join()).transpose();
         let spool = self.spool.map(|worker| worker.join()).transpose();
+        drop(self.writer);
         let database = self.database.join();
+        reader?;
         Ok(spool?
             .unwrap_or(Ok(()))
             .and(database?.map_err(|e| e.to_string())))
@@ -32,6 +39,7 @@ pub enum Receipt {
 pub struct Store {
     writer: Writer,
     spool: Option<crate::spool::Spool>,
+    reader: Option<Reader>,
 }
 
 impl Store {
@@ -41,6 +49,7 @@ impl Store {
         profile: bool,
         checkpoint_threshold_mib: u32,
         spool_config: Option<crate::spool::SpoolConfig>,
+        separate_reads: bool,
     ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
         let spool_path = path.with_file_name("ingestion.sqlite");
         if spool_config.is_none() {
@@ -130,6 +139,14 @@ impl Store {
             }
         }
         tx.commit()?;
+        // Clone the connection to the same database instance, after migration.
+        // This remains one process and one writer for the data directory.
+        let (reader, reader_worker) = if separate_reads {
+            let (reader, worker) = Reader::start(connection.try_clone()?, profile)?;
+            (Some(reader), Some(worker))
+        } else {
+            (None, None)
+        };
         let (writer, worker) = Writer::start(connection, batch.clone(), profile)?;
         let (spool, spool_worker) = if let Some(config) = spool_config {
             let (spool, worker) =
@@ -139,10 +156,16 @@ impl Store {
             (None, None)
         };
         Ok((
-            Self { writer, spool },
+            Self {
+                writer: writer.clone(),
+                spool,
+                reader,
+            },
             DatabaseWorker {
                 database: worker,
                 spool: spool_worker,
+                reader: reader_worker,
+                writer,
             },
         ))
     }
@@ -192,6 +215,23 @@ impl Store {
     ) -> Result<Receipt, ApiError> {
         self.insert_batch(vec![IncomingEvent { event, otlp: None }], request_context)
             .await
+    }
+
+    async fn read<T: Send + 'static>(
+        &self,
+        name: &'static str,
+        operation: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static,
+    ) -> Result<T, ApiError> {
+        match &self.reader {
+            Some(reader) => reader.call(name, operation).await,
+            None => {
+                self.writer
+                    .call(name, move |connection| {
+                        crate::reader::snapshot(connection, operation)
+                    })
+                    .await
+            }
+        }
     }
 
     pub async fn purge_expired(&self, retention_seconds: u64) -> Result<usize, ApiError> {
@@ -248,7 +288,7 @@ impl Store {
         {
             return Err(ApiError::bad("Invalid cursor position"));
         }
-        self.call("events", move |connection| {
+        self.read("events", move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection)? };
             let after = cursor.map_or(0, |c| c.after);
             let (conditions, mut values) = filters.sql();
@@ -294,7 +334,7 @@ impl Store {
             .as_deref()
             .map(|value| Cursor::<String>::decode(value, "videos", &filters))
             .transpose()?;
-        self.call(if per_video { "videos" } else { "summary" }, move |connection| {
+        self.read(if per_video { "videos" } else { "summary" }, move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection)? };
             let (conditions, filter_values) = filters.sql();
             let mut values = vec![SqlValue::BigInt(through)];
@@ -360,4 +400,61 @@ fn watermark(connection: &Connection) -> Result<i64, ApiError> {
         [],
         |row| row.get(0),
     )?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[tokio::test]
+    async fn dashboard_reads_do_not_wait_for_busy_ingestion_worker() {
+        let directory =
+            std::env::temp_dir().join(format!("collector-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let batch = BatchConfig {
+            max_events: 100,
+            max_bytes: 1048576,
+            delay: Duration::from_millis(10),
+            queue_bytes: 16777216,
+            queue_requests: 256,
+            bulk: true,
+        };
+        let (store, worker) = Store::open(
+            &directory.join("analytics.duckdb"),
+            batch,
+            false,
+            64,
+            None,
+            true,
+        )
+        .unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = mpsc::channel();
+        let busy_store = store.clone();
+        let busy = tokio::spawn(async move {
+            busy_store
+                .call("test_busy_writer", move |_| {
+                    let _ = entered.send(());
+                    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        ready.await.unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_millis(250),
+            store.summary(Query::default(), false),
+        )
+        .await;
+        release.send(()).unwrap();
+        assert!(busy.await.unwrap().is_ok());
+        drop(store);
+        assert!(worker.join().unwrap().is_ok());
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(
+            result.is_ok_and(|value| value.is_ok_and(|summary| summary["views"] == 0)),
+            "dashboard read was blocked behind ingestion work"
+        );
+    }
 }

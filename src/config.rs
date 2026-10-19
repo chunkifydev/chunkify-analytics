@@ -18,6 +18,7 @@ pub struct Config {
     pub checkpoint_threshold_mib: u32,
     pub batch: crate::writer::BatchConfig,
     pub spool: Option<crate::spool::SpoolConfig>,
+    pub separate_reads: bool,
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
@@ -107,6 +108,10 @@ impl Config {
             checkpoint_threshold_mib,
             batch: crate::writer::BatchConfig::load()?,
             spool: crate::spool::SpoolConfig::load()?,
+            separate_reads: env::var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
+                .unwrap_or_else(|_| "false".into())
+                .parse()
+                .map_err(|_| "COLLECTOR_EXPERIMENTAL_READ_WORKER must be true or false")?,
             profile: env::var("COLLECTOR_PROFILE")
                 .unwrap_or_else(|_| "false".into())
                 .parse()

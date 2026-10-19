@@ -867,3 +867,39 @@ and copies that checkpointed volume into a temporary fixture. Both runs use the
 same starting data. The second run enables the queue. All fixtures are disposable;
 if verification of queued acknowledgements fails, its data volume is retained
 and its name is printed for investigation.
+
+## Experimental separate reader
+
+The [matched comparison](read-worker.md) records correctness checks and results.
+
+Set `COLLECTOR_EXPERIMENTAL_READ_WORKER=true` to execute `/v1/events`,
+`/v1/summary`, and `/v1/videos` on one dedicated thread with its own connection
+to the same embedded DuckDB instance. This works with direct ingestion or the
+durable queue. It is off by default while the comparison is evaluated.
+
+The reader allows one executing query and up to 64 waiting queries. Further
+read requests receive HTTP 503. Canceled calls waiting in the queue are skipped;
+an already executing query finishes normally. Queries still share CPU, memory,
+disk and DuckDB checkpoints with ingestion. One slow read can delay other reads.
+
+Each response uses one database transaction so its watermark and results see a
+consistent snapshot. Ingestion and retention may commit during the read. A
+subsequent request sees newer commits, subject to its pagination watermark;
+retention can still remove events between pages. Queue acknowledgements retain
+their documented delay before query visibility. Retention, deletion and health
+checks stay on the writer. Shutdown finishes reads and drains queued writes
+before the writer's final checkpoint.
+
+A separate read does not force a waiting write batch to flush. It returns the
+data committed when its snapshot begins. In direct mode, await the ingestion
+response before reading if the result must include that event.
+
+`COLLECTOR_PROFILE=true` emits separate reports with `worker: "reader"` and
+`worker: "writer"`. Each includes its own queue wait and execution timings.
+The benchmark records these as `reader_profile` and `collector_profile`.
+
+To compare one selected workload with the same preloaded data, set
+`COLLECTOR_LOAD_COMPARE_READS=1`. Both conditions use the same image and settings;
+only the separate-reader option changes. Set `COLLECTOR_LOAD_DURABLE_QUEUE=1`
+to enable durable ingestion in both. Do not combine this with
+`COLLECTOR_LOAD_COMPARE_QUEUE`, which tests a different change.

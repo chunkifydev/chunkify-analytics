@@ -5,6 +5,7 @@ mod event;
 mod otlp;
 mod profile;
 mod query;
+mod reader;
 mod spool;
 mod store;
 mod writer;
@@ -20,7 +21,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some("serve"), []) => {
             let _lock = config.lock()?;
             let keys = config.keys()?;
-            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone())?;
+            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone(), config.separate_reads)?;
             store.drain().await.map_err(|_| "Queue recovery failed")?;
             let removed = store.purge_expired(config.retention_seconds).await
                 .map_err(|_| "Startup retention sweep failed")?;
@@ -63,7 +64,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some("delete-viewer"), [viewer_id]) => {
             let _lock = config.lock()?;
             config.keys()?;
-            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone())?;
+            let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone(), config.separate_reads)?;
             store.drain().await.map_err(|_| "Queue recovery failed")?;
             let result = store.delete_viewer(viewer_id.clone()).await;
             drop(store);

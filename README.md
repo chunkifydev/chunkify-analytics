@@ -929,3 +929,8 @@ requests use their intended submission time. Overall latency and full-delivery
 thresholds remain unchanged. `COLLECTOR_LOAD_SECONDS=300` sets five minutes;
 enable both `COLLECTOR_LOAD_DURABLE_QUEUE=1` and `COLLECTOR_LOAD_READ_WORKER=1` to
 exercise the two optional features together.
+
+The [five-minute stability attempt](stability.md) stopped after 101 seconds when
+the generator exceeded its memory guard. All acknowledged events survived
+restart, but request omissions and dashboard latency also failed the targets.
+It does not establish five-minute capacity; the report records the next steps.

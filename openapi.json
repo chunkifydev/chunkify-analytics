@@ -3,8 +3,8 @@
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
     "title": "Chunkify analytics collector API",
-    "version": "1.0.0",
-    "description": "Self-hosted single-installation analytics collector. This contract describes implemented /v1 endpoints, including explicitly experimental ingestion/reader modes. Multi-tenant accounts, project APIs and MCP are future work and are not exposed here. Public browser ingestion uses a write-only ingest key; private reads use a separate bearer token kept on the dashboard backend. Deploy HTTPS at the ingress; loopback HTTP is for local development. JSON examples contain invented IDs and no credentials.",
+    "version": "1.1.0",
+    "description": "Self-hosted analytics collector with isolated projects in one installation. This contract describes implemented /v1 endpoints, including explicitly experimental ingestion/reader modes. Projects and named credentials are administered through the CLI. Hosted accounts, membership, project administration HTTP APIs and MCP are future work. Ingest keys and private read tokens each resolve to exactly one project; request fields cannot change that scope. Browser ingestion uses a write-only ingest key; keep read tokens on the dashboard backend. Deploy HTTPS at the ingress; loopback HTTP is for local development. JSON examples contain invented IDs and no credentials.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -110,7 +110,7 @@
       "get": {
         "operationId": "getIngestionStatus",
         "summary": "Inspect ingestion mode and pending queue",
-        "description": "Private operational status. Default direct mode has no queue object. Experimental durable_queue mode reports pending entries, including duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only and is not a new response mode.",
+        "description": "Private operational status. Pending counts, bytes and age are limited to the read token’s project; mode and failure state describe the shared queue. Default direct mode has no queue object. Experimental durable_queue mode includes duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only.",
         "tags": [
           "Operations"
         ],
@@ -194,7 +194,7 @@
       "get": {
         "operationId": "listEvents",
         "summary": "Read retained analytics events",
-        "description": "Returns full canonical payloads in ascending server ingestion order, with receipt time and optional context. All filters combine using AND; time filters use event occurred_at, not receipt time. Unknown query parameters are rejected. Private reads have no cross-origin browser access headers.",
+        "description": "Limited to the project resolved from the read token. Returns full canonical payloads in ascending server ingestion order, with receipt time and optional context. All filters combine using AND; time filters use event occurred_at, not receipt time. Unknown query parameters are rejected. Private reads have no cross-origin browser access headers.",
         "tags": [
           "Queries"
         ],
@@ -331,7 +331,7 @@
       "post": {
         "operationId": "ingestEvent",
         "summary": "Ingest one native Chunkify event",
-        "description": "Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with COLLECTOR_MAX_BODY_BYTES. Extra fields are preserved. Direct mode acknowledges after the DuckDB transaction commits. Repeated valid event_id values preserve the first payload and context and count once. In experimental durable queue mode, 202 means the SQLite queue entry is committed durably; DuckDB visibility and deduplication happen asynchronously. Queue mode returns 202 even for duplicates. COLLECTOR_EXPERIMENTAL_READ_WORKER changes read scheduling without changing acknowledgment guarantees.",
+        "description": "All records belong to the project resolved from the ingest key. Deduplication is by (project_id, event_id), including across multiple keys for one project. Client-provided project or key IDs cannot override this scope. Project and installation rate/queue limits apply. Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with COLLECTOR_MAX_BODY_BYTES. Extra fields are preserved. Direct mode acknowledges after the DuckDB transaction commits. Repeated valid event_id values preserve the first payload and context and count once. In experimental durable queue mode, 202 means the SQLite queue entry is committed durably; DuckDB visibility and deduplication happen asynchronously. Queue mode returns 202 even for duplicates. COLLECTOR_EXPERIMENTAL_READ_WORKER changes read scheduling without changing acknowledgment guarantees.",
         "tags": [
           "Ingestion"
         ],
@@ -783,7 +783,7 @@
       "post": {
         "operationId": "exportLogs",
         "summary": "Ingest OTLP/HTTP JSON logs",
-        "description": "Supports JSON logs, including multiple resources/scopes and gzip. Protobuf, gRPC, metrics and traces are outside this API. Log attributes must normalize to one of the seven AnalyticsEvent variants. Omitted nullable SDK attributes are restored to null; required identity and measurements remain mandatory. Original resource/scope/log data are preserved. The entire valid batch is committed atomically. Duplicates across native and OTLP delivery count once and preserve first delivery. Default direct mode returns 200 after DuckDB commit. Experimental durable queue mode returns the same OTLP 200 response after durable queue commit, before asynchronous DuckDB visibility; inspect /v1/ingestion to determine mode. The response never reports partial success.",
+        "description": "All records belong to the project resolved from the ingest key. Deduplication is by (project_id, event_id), including across multiple keys for one project. Client-provided project or key IDs cannot override this scope. Project and installation rate/queue limits apply. Supports JSON logs, including multiple resources/scopes and gzip. Protobuf, gRPC, metrics and traces are outside this API. Log attributes must normalize to one of the seven AnalyticsEvent variants. Omitted nullable SDK attributes are restored to null; required identity and measurements remain mandatory. Original resource/scope/log data are preserved. The entire valid batch is committed atomically. Duplicates across native and OTLP delivery count once and preserve first delivery. Default direct mode returns 200 after DuckDB commit. Experimental durable queue mode returns the same OTLP 200 response after durable queue commit, before asynchronous DuckDB visibility; inspect /v1/ingestion to determine mode. The response never reports partial success.",
         "tags": [
           "Ingestion"
         ],
@@ -1214,7 +1214,7 @@
       "get": {
         "operationId": "getSummary",
         "summary": "Read totals for a view cohort",
-        "description": "Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Unknown query parameters, event_name, cursor and limit are rejected.",
+        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Unknown query parameters, event_name, cursor and limit are rejected.",
         "tags": [
           "Queries"
         ],
@@ -1349,7 +1349,7 @@
       "get": {
         "operationId": "listVideoMetrics",
         "summary": "Read paginated totals by video",
-        "description": "Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Rows are ordered by video_id ascending. unique_viewers is per video and must not be summed to obtain portfolio unique viewers. Unknown query parameters and event_name are rejected.",
+        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Rows are ordered by video_id ascending. unique_viewers is per video and must not be summed to obtain portfolio unique viewers. Unknown query parameters and event_name are rejected.",
         "tags": [
           "Queries"
         ],
@@ -1488,12 +1488,12 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-Chunkify-Ingest-Key",
-        "description": "Public write-only key generated by collector init. Does not authorize reads and does not authenticate a viewer. Never send credentials in query parameters."
+        "description": "Public write-only opaque key associated with exactly one project by collector CLI administration. The collector looks up its hash to resolve project_id and ingest_key_id; the project ID is not encoded in the token. Does not authorize reads or authenticate a viewer. Never send credentials in query parameters."
       },
       "readToken": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Private opaque read token generated by collector init. This is not a JWT. Keep it on your dashboard backend; the exact Authorization prefix is Bearer."
+        "description": "Private opaque read token associated with exactly one project. All reads are limited to that project, regardless of request fields or cursors. This is not a JWT. Keep it on your dashboard backend; the exact Authorization prefix is Bearer."
       }
     },
     "parameters": {
@@ -1597,7 +1597,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Opaque next_cursor from the same endpoint and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention or deletion can remove records between pages. A cursor is not a durable database snapshot or authorization token."
+        "description": "Opaque next_cursor from the same project, endpoint and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention or deletion can remove records between pages. A cursor is not a durable database snapshot or authorization token."
       },
       "origin": {
         "name": "Origin",
@@ -2568,11 +2568,25 @@
           },
           "otlp": {
             "$ref": "#/components/schemas/StoredOtlpContext"
+          },
+          "project_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "description": "Trusted project identifier resolved from the ingest key. Historical events migrate to default."
+          },
+          "ingest_key_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Safe stable identifier of the first accepted ingest key. Null for events received before project metadata was recorded. Never contains the key secret."
           }
         },
         "required": [
           "received_at",
-          "event"
+          "event",
+          "project_id",
+          "ingest_key_id"
         ],
         "additionalProperties": false
       },
@@ -3826,7 +3840,10 @@
                 "$ref": "#/components/schemas/OtlpResource"
               },
               "schemaUrl": {
-                "type": ["string", "null"]
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [],
@@ -3839,7 +3856,10 @@
                 "$ref": "#/components/schemas/OtlpScope"
               },
               "schemaUrl": {
-                "type": ["string", "null"]
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [],

@@ -51,3 +51,13 @@ test("OTLP schemas allow ignored null fields without allowing conflicting typed 
     assert.throws(() => component("OtlpAttributeValue", value), assert.AssertionError);
   }
 });
+
+test("stored event ownership metadata uses typed schemas and supports legacy unknown keys", () => {
+  const properties = contract.components.schemas.StoredEvent.properties;
+  assert.equal(properties.project_id.type, "string");
+  assert.deepEqual(properties.ingest_key_id.type, ["string", "null"]);
+  assertSchema(properties.project_id, "customer-a", "project ID");
+  assertSchema(properties.ingest_key_id, null, "legacy source key");
+  assert.throws(() => assertSchema(properties.project_id, 123, "invalid project ID"), assert.AssertionError);
+  assert.throws(() => assertSchema(properties.ingest_key_id, 123, "invalid source key"), assert.AssertionError);
+});

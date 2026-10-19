@@ -132,6 +132,8 @@ static COLUMNS: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
             )
         }));
     }
+    columns.push(("project_id".into(), "VARCHAR"));
+    columns.push(("ingest_key_id".into(), "VARCHAR"));
     columns
 });
 pub static COLUMN_NAMES: LazyLock<String> = LazyLock::new(|| {
@@ -143,7 +145,7 @@ pub static COLUMN_NAMES: LazyLock<String> = LazyLock::new(|| {
 });
 pub static INSERT_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
-        "INSERT INTO events ({}) VALUES ({}) ON CONFLICT(event_id) DO NOTHING",
+        "INSERT INTO events ({}) VALUES ({}) ON CONFLICT(project_id, event_id) DO NOTHING",
         *COLUMN_NAMES,
         vec!["?"; COLUMNS.len()].join(", ")
     )
@@ -151,7 +153,7 @@ pub static INSERT_SQL: LazyLock<String> = LazyLock::new(|| {
 pub static BULK_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "INSERT INTO events ({0}) SELECT {0} FROM collector_write_stage ORDER BY ordinal
-     ON CONFLICT(event_id) DO NOTHING RETURNING event_id",
+     ON CONFLICT(project_id, event_id) DO NOTHING RETURNING project_id, event_id",
         *COLUMN_NAMES
     )
 });
@@ -176,6 +178,7 @@ fn create_events(connection: &Connection, table: &str) -> duckdb::Result<()> {
             let required = matches!(
                 name.as_str(),
                 "event_id"
+                    | "project_id"
                     | "view_id"
                     | "video_id"
                     | "event_name"
@@ -192,7 +195,7 @@ fn create_events(connection: &Connection, table: &str) -> duckdb::Result<()> {
     connection.execute_batch(&format!(
         "CREATE TABLE {table} (
         ingest_id BIGINT PRIMARY KEY DEFAULT nextval('event_order'), {},
-        UNIQUE(event_id), CHECK(context_format IN (0, 1)))",
+        UNIQUE(project_id, event_id), CHECK(context_format IN (0, 1)))",
         definitions
     ))
 }
@@ -239,6 +242,8 @@ pub fn encode(
     event: &Value,
     context: Option<&Value>,
     received: i64,
+    project: &str,
+    key_id: Option<&str>,
 ) -> Result<Vec<SqlValue>, ApiError> {
     let mut remainder = event.as_object().ok_or_else(ApiError::internal)?.clone();
     let mut values = Vec::with_capacity(COLUMNS.len());
@@ -299,6 +304,8 @@ pub fn encode(
     }
     // Retain an empty browser object to distinguish {} from a missing property.
     values[9] = SqlValue::Text(Value::Object(remainder).to_string());
+    values.push(SqlValue::Text(project.into()));
+    values.push(key_id.map_or(SqlValue::Null, |id| SqlValue::Text(id.into())));
     Ok(values)
 }
 
@@ -384,7 +391,9 @@ pub fn decode(row: &Row<'_>) -> Result<(i64, Value), ApiError> {
     if let Some(context) = context {
         record["event_context"] = context;
     }
-    if let Some(otlp) = row.get::<_, Option<String>>(index)? {
+    record["project_id"] = json!(row.get::<_, String>(index)?);
+    record["ingest_key_id"] = json!(row.get::<_, Option<String>>(index + 1)?);
+    if let Some(otlp) = row.get::<_, Option<String>>(index + 2)? {
         record["otlp"] = serde_json::from_str(&otlp).map_err(|_| ApiError::internal())?;
     }
     Ok((id, record))
@@ -395,7 +404,7 @@ pub fn page_sql(conditions: &str) -> String {
     // instead of serializing all columns to JSON inside DuckDB.
     format!("WITH page AS MATERIALIZED (SELECT ingest_id, {0} FROM events
         WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id LIMIT ?)
-        SELECT page.*, event_otlp.payload FROM page LEFT JOIN event_otlp USING(event_id) ORDER BY page.ingest_id", *COLUMN_NAMES)
+        SELECT page.*, event_otlp.payload FROM page LEFT JOIN event_otlp USING(project_id, event_id) ORDER BY page.ingest_id", *COLUMN_NAMES)
 }
 
 fn migrate_v4(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
@@ -424,7 +433,8 @@ fn migrate_v4(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
             let context = context
                 .map(|s| serde_json::from_str::<Value>(&s))
                 .transpose()?;
-            let values = encode(&event, context.as_ref(), received).map_err(|error| error.1)?;
+            let values = encode(&event, context.as_ref(), received, "default", None)
+                .map_err(|error| error.1)?;
             appender.append_row(appender_params_from_iter(
                 std::iter::once(SqlValue::BigInt(id)).chain(values),
             ))?;
@@ -436,12 +446,38 @@ fn migrate_v4(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+fn migrate_v5(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    create_events(connection, "events_v5")?;
+    let has_project: bool = connection.query_row(
+        "SELECT count(*) > 0 FROM pragma_table_info('events') WHERE name = 'project_id'",
+        [],
+        |r| r.get(0),
+    )?;
+    let selection = if has_project {
+        COLUMN_NAMES.to_string()
+    } else {
+        format!(
+            "{}, 'default', NULL",
+            COLUMN_NAMES
+                .strip_suffix(", project_id, ingest_key_id")
+                .expect("project is final storage column")
+        )
+    };
+    connection.execute_batch(&format!("INSERT INTO events_v5 SELECT ingest_id, {selection} FROM events;
+        DROP TABLE events; ALTER TABLE events_v5 RENAME TO events;
+        CREATE TABLE event_otlp_v5(project_id VARCHAR NOT NULL, event_id VARCHAR NOT NULL, payload VARCHAR NOT NULL, PRIMARY KEY(project_id, event_id));
+        INSERT INTO event_otlp_v5 SELECT 'default', event_id, payload FROM event_otlp;
+        DROP TABLE event_otlp; ALTER TABLE event_otlp_v5 RENAME TO event_otlp;
+        UPDATE collector_schema SET version = 5;"))?;
+    Ok(())
+}
+
 pub fn initialize(connection: &mut Connection) -> Result<(), Box<dyn std::error::Error>> {
     let tx = connection.transaction()?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS collector_schema (version INTEGER NOT NULL);
             INSERT INTO collector_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM collector_schema);")?;
     let version: i32 = tx.query_row("SELECT version FROM collector_schema", [], |r| r.get(0))?;
-    if !(1..=4).contains(&version) {
+    if !(1..=5).contains(&version) {
         return Err("Unsupported database schema version".into());
     }
     tx.execute_batch(
@@ -517,6 +553,9 @@ pub fn initialize(connection: &mut Connection) -> Result<(), Box<dyn std::error:
     if version < 4 {
         migrate_v4(&tx)?;
     }
+    if version < 5 {
+        migrate_v5(&tx)?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -591,7 +630,7 @@ mod tests {
                         Some(&json!({"client_ip": "192.0.2.1", "schema_version": 1})),
                     ),
                 };
-                let values = encode(&e, context.as_ref(), 123456789)
+                let values = encode(&e, context.as_ref(), 123456789, "default", None)
                     .map_err(|e| e.1)
                     .unwrap();
                 connection
@@ -600,11 +639,11 @@ mod tests {
                 let otlp = json!({"log_record": {"body": "original", "attributes": [{"key": "null", "value": {}}]}, "resource_logs": {"custom": [1, null]}});
                 connection
                     .execute(
-                        "INSERT INTO event_otlp VALUES (?, ?)",
+                        "INSERT INTO event_otlp VALUES ('default', ?, ?)",
                         params![e["event_id"].as_str().unwrap(), otlp.to_string()],
                     )
                     .unwrap();
-                let mut expected = json!({"event": e, "received_at": chrono::DateTime::from_timestamp_millis(123456789), "otlp": otlp});
+                let mut expected = json!({"project_id": "default", "ingest_key_id": null, "event": e, "received_at": chrono::DateTime::from_timestamp_millis(123456789), "otlp": otlp});
                 if let Some(context) = context {
                     expected["event_context"] = context;
                 }
@@ -673,7 +712,11 @@ mod tests {
             connection
                 .execute(
                     &INSERT_SQL,
-                    params_from_iter(encode(&next, None, 123456790).map_err(|e| e.1).unwrap()),
+                    params_from_iter(
+                        encode(&next, None, 123456790, "default", None)
+                            .map_err(|e| e.1)
+                            .unwrap(),
+                    ),
                 )
                 .unwrap();
             assert_eq!(read(&connection)[1].0, 10);

@@ -1,14 +1,15 @@
 use crate::{
-    config::{Config, Keys},
+    config::Config,
     context::RequestContext,
     event, otlp,
+    projects::{Permission, RateLimit, Registry, Resolved},
     store::Store,
 };
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, Request, State},
-    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    extract::{ConnectInfo, Extension, Request, State},
+    http::{HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -18,43 +19,17 @@ use std::{
     io::Read,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Instant,
 };
-use subtle::ConstantTimeEq;
 
 #[derive(Clone)]
 struct App {
     store: Store,
-    keys: Keys,
-    origins: Vec<String>,
+    projects: Arc<Registry>,
     max_body_bytes: usize,
     max_otlp_records: usize,
     store_ip: bool,
     trusted_proxies: Vec<ipnet::IpNet>,
     rate: Arc<Mutex<RateLimit>>,
-}
-
-struct RateLimit {
-    tokens: f64,
-    capacity: f64,
-    updated: Instant,
-}
-impl RateLimit {
-    fn take(&mut self) -> Result<(), ApiError> {
-        let now = Instant::now();
-        self.tokens = (self.tokens
-            + now.duration_since(self.updated).as_secs_f64() * self.capacity)
-            .min(self.capacity);
-        self.updated = now;
-        if self.tokens < 1.0 {
-            return Err(ApiError(
-                StatusCode::TOO_MANY_REQUESTS,
-                "Ingestion rate limit exceeded".into(),
-            ));
-        }
-        self.tokens -= 1.0;
-        Ok(())
-    }
 }
 
 pub struct ApiError(pub StatusCode, pub String);
@@ -95,33 +70,15 @@ impl IntoResponse for ApiError {
     }
 }
 
-fn authorized(headers: &HeaderMap, name: &str, expected: &str) -> Result<(), ApiError> {
-    let supplied = headers.get(name).map(|v| v.as_bytes()).unwrap_or_default();
-    if bool::from(supplied.ct_eq(expected.as_bytes())) {
-        Ok(())
-    } else {
-        Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "Missing or invalid credentials".into(),
-        ))
-    }
-}
-
-pub fn router(store: Store, keys: Keys, config: &Config) -> Router {
-    let capacity = f64::from(config.ingest_per_second);
+pub fn router(store: Store, projects: Registry, config: &Config) -> Router {
     let app = App {
         store,
-        keys,
-        origins: config.allowed_origins.clone(),
+        projects: Arc::new(projects),
         max_body_bytes: config.max_body_bytes,
         max_otlp_records: config.max_otlp_records,
         store_ip: config.store_ip,
         trusted_proxies: config.trusted_proxies.clone(),
-        rate: Arc::new(Mutex::new(RateLimit {
-            tokens: capacity,
-            capacity,
-            updated: Instant::now(),
-        })),
+        rate: Arc::new(Mutex::new(RateLimit::new(config.ingest_per_second))),
     };
     Router::new()
         .route("/healthz", get(health))
@@ -176,17 +133,47 @@ async fn otlp_errors(request: Request, next: Next) -> Response {
 
 async fn access(
     State(app): State<App>,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
     let ingest = matches!(request.uri().path(), "/v1/events" | "/v1/logs")
         && matches!(*request.method(), Method::POST | Method::OPTIONS);
+    let resolved = if ingest && request.method() != Method::OPTIONS {
+        Some(
+            app.projects.authorize(
+                request
+                    .headers()
+                    .get("x-chunkify-ingest-key")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                Permission::Ingest,
+            )?,
+        )
+    } else if !ingest && request.uri().path().starts_with("/v1/") {
+        let secret = request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .unwrap_or("");
+        Some(app.projects.authorize(secret, Permission::Read)?)
+    } else {
+        None
+    };
     let origin = if ingest {
         match request.headers().get("origin") {
             Some(origin)
-                if origin
-                    .to_str()
-                    .is_ok_and(|s| app.origins.iter().any(|o| o == s)) =>
+                if origin.to_str().is_ok_and(|s| {
+                    resolved.as_ref().map_or_else(
+                        || {
+                            app.projects
+                                .projects
+                                .values()
+                                .any(|p| p.origins.iter().any(|o| o == s))
+                        },
+                        |r| r.project.origins.iter().any(|o| o == s),
+                    )
+                }) =>
             {
                 Some(origin.clone())
             }
@@ -226,21 +213,21 @@ async fn access(
             ));
         }
     } else if ingest {
-        authorized(
-            request.headers(),
-            "x-chunkify-ingest-key",
-            &app.keys.ingest_key,
-        )?;
+        resolved
+            .as_ref()
+            .expect("authenticated ingest")
+            .project
+            .rate
+            .lock()
+            .map_err(|_| ApiError::unavailable())?
+            .take()?;
         app.rate
             .lock()
             .map_err(|_| ApiError::unavailable())?
             .take()?;
-    } else if request.uri().path().starts_with("/v1/") {
-        authorized(
-            request.headers(),
-            "authorization",
-            &format!("Bearer {}", app.keys.read_token),
-        )?;
+    }
+    if let Some(resolved) = resolved {
+        request.extensions_mut().insert(resolved);
     }
     let mut response = next.run(request).await;
     response
@@ -270,12 +257,21 @@ async fn ingest(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
 ) -> Result<Response, ApiError> {
+    let resolved = request
+        .extensions()
+        .get::<Resolved>()
+        .cloned()
+        .ok_or_else(ApiError::internal)?;
     let context = app
         .store_ip
         .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let event = read_json(request, app.max_body_bytes, false).await?;
     event::validate(&event)?;
-    let inserted = match app.store.insert(event, context).await? {
+    let inserted = match app
+        .store
+        .insert(&resolved.project, &resolved.key_id, event, context)
+        .await?
+    {
         crate::store::Receipt::Queued => {
             return Ok((
                 StatusCode::ACCEPTED,
@@ -301,13 +297,20 @@ async fn ingest_otlp(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
 ) -> Result<Json<Value>, ApiError> {
+    let resolved = request
+        .extensions()
+        .get::<Resolved>()
+        .cloned()
+        .ok_or_else(ApiError::internal)?;
     let context = app
         .store_ip
         .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let request = read_json(request, app.max_body_bytes, true).await?;
     let events = otlp::decode(&request, app.max_otlp_records)?;
     drop(request);
-    app.store.insert_batch(events, context).await?;
+    app.store
+        .insert_batch(&resolved.project, &resolved.key_id, events, context)
+        .await?;
     Ok(Json(json!({})))
 }
 
@@ -376,9 +379,12 @@ async fn read_json(request: Request, limit: usize, allow_gzip: bool) -> Result<V
 
 async fn events(
     State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
     axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(app.store.events(query).await?))
+    Ok(Json(
+        app.store.events(resolved.project.id.clone(), query).await?,
+    ))
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
     app.store.ensure_healthy()?;
@@ -391,20 +397,35 @@ async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
     Ok(Json(json!({ "status": "ok" })))
 }
 
-async fn ingestion_status(State(app): State<App>) -> Result<Json<Value>, ApiError> {
-    Ok(Json(app.store.ingestion().await?))
+async fn ingestion_status(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store.ingestion(resolved.project.id.clone()).await?,
+    ))
 }
 
 async fn summary(
     State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
     axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(app.store.summary(query, false).await?))
+    Ok(Json(
+        app.store
+            .summary(resolved.project.id.clone(), query, false)
+            .await?,
+    ))
 }
 
 async fn videos(
     State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
     axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(app.store.summary(query, true).await?))
+    Ok(Json(
+        app.store
+            .summary(resolved.project.id.clone(), query, true)
+            .await?,
+    ))
 }

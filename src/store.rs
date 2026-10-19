@@ -98,9 +98,11 @@ impl Store {
         }
         Ok(())
     }
-    pub async fn ingestion(&self) -> Result<Value, ApiError> {
+    pub async fn ingestion(&self, project: String) -> Result<Value, ApiError> {
         match &self.spool {
-            Some(spool) => Ok(json!({ "mode": "durable_queue", "queue": spool.stats().await? })),
+            Some(spool) => {
+                Ok(json!({ "mode": "durable_queue", "queue": spool.stats(Some(project)).await? }))
+            }
             None => Ok(json!({ "mode": "direct" })),
         }
     }
@@ -109,7 +111,7 @@ impl Store {
         if let Some(spool) = &self.spool {
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
             loop {
-                let stats = spool.stats().await?;
+                let stats = spool.stats(None).await?;
                 if stats.failed || tokio::time::Instant::now() >= deadline {
                     return Err(ApiError::unavailable());
                 }
@@ -132,11 +134,18 @@ impl Store {
 
     pub async fn insert(
         &self,
+        project: &crate::projects::Access,
+        key_id: &str,
         event: Value,
         request_context: Option<RequestContext>,
     ) -> Result<Receipt, ApiError> {
-        self.insert_batch(vec![IncomingEvent { event, otlp: None }], request_context)
-            .await
+        self.insert_batch(
+            project,
+            key_id,
+            vec![IncomingEvent { event, otlp: None }],
+            request_context,
+        )
+        .await
     }
 
     async fn read<T: Send + 'static>(
@@ -163,18 +172,22 @@ impl Store {
         self.call("retention", move |connection| {
             let cutoff = chrono::Utc::now().timestamp_millis() - (retention_seconds * 1000) as i64;
             let tx = connection.transaction()?;
-            tx.execute("DELETE FROM event_otlp WHERE event_id IN (SELECT event_id FROM events WHERE received_at_ms < ?)", [cutoff])?;
+            tx.execute("DELETE FROM event_otlp WHERE (project_id, event_id) IN (SELECT project_id, event_id FROM events WHERE received_at_ms < ?)", [cutoff])?;
             let removed = tx.execute("DELETE FROM events WHERE received_at_ms < ?", [cutoff])?;
             tx.commit()?;
             Ok(removed)
         }).await
     }
 
-    pub async fn delete_viewer(&self, viewer_id: String) -> Result<usize, ApiError> {
+    pub async fn delete_viewer(
+        &self,
+        project: String,
+        viewer_id: String,
+    ) -> Result<usize, ApiError> {
         self.call("delete_viewer", move |connection| {
             let tx = connection.transaction()?;
-            tx.execute("DELETE FROM event_otlp WHERE event_id IN (SELECT event_id FROM events WHERE viewer_id = ?)", [&viewer_id])?;
-            let removed = tx.execute("DELETE FROM events WHERE viewer_id = ?", [&viewer_id])?;
+            tx.execute("DELETE FROM event_otlp WHERE (project_id, event_id) IN (SELECT project_id, event_id FROM events WHERE project_id = ? AND viewer_id = ?)", [&project, &viewer_id])?;
+            let removed = tx.execute("DELETE FROM events WHERE project_id = ? AND viewer_id = ?", [&project, &viewer_id])?;
             tx.commit()?;
             Ok(removed)
         }).await
@@ -182,27 +195,31 @@ impl Store {
 
     pub async fn insert_batch(
         &self,
+        project: &crate::projects::Access,
+        key_id: &str,
         events: Vec<IncomingEvent>,
         request_context: Option<RequestContext>,
     ) -> Result<Receipt, ApiError> {
         if let Some(spool) = &self.spool {
-            spool.insert(events, request_context).await?;
+            spool
+                .insert(project, key_id, events, request_context)
+                .await?;
             Ok(Receipt::Queued)
         } else {
             self.writer
-                .insert(events, request_context)
+                .insert(project, key_id, events, request_context)
                 .await
                 .map(Receipt::Committed)
         }
     }
 
-    pub async fn events(&self, query: Query) -> Result<Value, ApiError> {
+    pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
         let filters = query.filters()?;
         let limit = query.limit()?;
         let cursor = query
             .cursor
             .as_deref()
-            .map(|value| Cursor::<i64>::decode(value, "events", &filters))
+            .map(|value| Cursor::<i64>::decode(value, "events", &filters, &project))
             .transpose()?;
         if cursor
             .as_ref()
@@ -213,10 +230,12 @@ impl Store {
         self.read("events", move |connection| {
             let through = match &cursor {
                 Some(c) => c.through,
-                None => watermark(connection)?,
+                None => watermark(connection, &project)?,
             };
             let after = cursor.map_or(0, |c| c.after);
             let (conditions, mut values) = filters.sql();
+            let conditions = format!("({conditions}) AND project_id = ?");
+            values.push(SqlValue::Text(project.clone()));
             values.extend([
                 SqlValue::BigInt(after),
                 SqlValue::BigInt(through),
@@ -232,6 +251,7 @@ impl Store {
                     next_cursor = Some(
                         Cursor {
                             version: 1,
+                            project_id: project.clone(),
                             kind: "events".into(),
                             after: last,
                             through,
@@ -250,7 +270,12 @@ impl Store {
         .await
     }
 
-    pub async fn summary(&self, query: Query, per_video: bool) -> Result<Value, ApiError> {
+    pub async fn summary(
+        &self,
+        project: String,
+        query: Query,
+        per_video: bool,
+    ) -> Result<Value, ApiError> {
         if query.event_name.is_some()
             || (!per_video && (query.cursor.is_some() || query.limit.is_some()))
         {
@@ -261,16 +286,16 @@ impl Store {
         let cursor = query
             .cursor
             .as_deref()
-            .map(|value| Cursor::<String>::decode(value, "videos", &filters))
+            .map(|value| Cursor::<String>::decode(value, "videos", &filters, &project))
             .transpose()?;
         self.read(if per_video { "videos" } else { "summary" }, move |connection| {
-            let through = match &cursor { Some(c) => c.through, None => watermark(connection)? };
+            let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
             let (conditions, filter_values) = filters.sql();
-            let mut values = vec![SqlValue::BigInt(through)];
+            let mut values = vec![SqlValue::BigInt(through), SqlValue::Text(project.clone())];
             values.extend(filter_values);
             // Date, identity and context filters select starts. Each selected view contributes its
             // whole cumulative value, even when its final event occurs after the date range.
-            let sql = format!("WITH retained AS (SELECT * FROM events WHERE ingest_id <= ?),
+            let sql = format!("WITH retained AS (SELECT * FROM events WHERE ingest_id <= ? AND project_id = ?),
                 started AS (
                     SELECT view_id, video_id, viewer_id, occurred_at_ms, context_browser_name, context_os_name, context_device_type FROM retained
                     WHERE event_name = 'chunkify.video.view_started'
@@ -312,7 +337,7 @@ impl Store {
             for row in rows {
                 let (id, video) = row?;
                 if videos.len() == limit {
-                    next_cursor = Some(Cursor { version: 1, kind: "videos".into(), after: last, through, filters: filters.clone() }.encode()?);
+                    next_cursor = Some(Cursor { version: 1, project_id: project.clone(), kind: "videos".into(), after: last, through, filters: filters.clone() }.encode()?);
                     break;
                 }
                 last = id;
@@ -323,10 +348,10 @@ impl Store {
     }
 }
 
-fn watermark(connection: &Connection) -> Result<i64, ApiError> {
+fn watermark(connection: &Connection, project: &str) -> Result<i64, ApiError> {
     Ok(connection.query_row(
-        "SELECT COALESCE(MAX(ingest_id), 0) FROM events",
-        [],
+        "SELECT COALESCE(MAX(ingest_id), 0) FROM events WHERE project_id = ?",
+        [project],
         |row| row.get(0),
     )?)
 }
@@ -373,7 +398,7 @@ mod tests {
         ready.await.unwrap();
         let result = tokio::time::timeout(
             Duration::from_millis(250),
-            store.summary(Query::default(), false),
+            store.summary("default".into(), Query::default(), false),
         )
         .await;
         release.send(()).unwrap();

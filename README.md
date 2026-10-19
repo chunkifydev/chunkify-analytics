@@ -31,15 +31,18 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
    explicit trusted-proxy configuration are implemented in the collector.
    Browser, OS and device-type filters are available on all read endpoints.
 
-This is a development version. Multiple projects/tenants and MCP remain separate
-potential follow-ups.
+6. Isolated projects, named ingest/read keys, project origin policies and ingestion
+   limits, with CLI administration. Implemented. Hosted account membership and MCP
+   remain separate follow-ups.
+
+This is a development version.
 
 ## API contract
 
 The [OpenAPI 3.1.1 document](openapi.json) describes ingestion, read endpoints,
 authentication, filters, pagination, event/context schemas and error responses.
 It also documents the experimental durable queue's acknowledgement and read
-visibility behavior. It describes the current single-project collector.
+visibility behavior and project isolation. Project administration is CLI-only.
 
 `npm run check:collector:openapi` validates the document, schemas and examples.
 `npm run test:collector` builds the SDK and collector, then checks the contract
@@ -75,17 +78,100 @@ close the database. A second writer using the same database file fails at startu
 The collector and administration commands hold an exclusive `collector.lock`
 file lock for their lifetime. Stop the collector before running administration
 commands. The OS releases the lock after a crash; leave the lock file in place.
-Startup upgrades schema versions 1–3 to version 4 without dropping events
-or changing keys. Existing events receive no invented IP context. Stop the old
+Startup upgrades schema versions 1–4 to version 5 without dropping events
+or changing existing keys. Existing data and credentials belong to the `default`
+project; historical events have `ingest_key_id: null`. Existing events receive no invented IP context. Stop the old
 service and take a backup before starting the new executable. An older executable
-cannot open schema version 4; restore its pre-upgrade backup to roll back.
+cannot open schema version 5; restore its pre-upgrade backup to roll back.
+
+### Projects and named keys
+
+A project is the boundary for ownership and access: use separate projects for
+customers, or for staging and production. Each has a stable `id` and an editable
+`name`. Names live once in `keys.json`; events reference the stable `project_id`.
+There is no additional tenant/account layer in this version.
+
+Stop the collector, keep `COLLECTOR_DATA_DIR` set, then run:
+
+```sh
+./target/debug/chunkify-analytics-collector project-create live "Production website"
+./target/debug/chunkify-analytics-collector project-create staging "Staging website"
+./target/debug/chunkify-analytics-collector project-list
+./target/debug/chunkify-analytics-collector project-rename live "Customer A — Production"
+./target/debug/chunkify-analytics-collector key-create live ingest "Website"
+./target/debug/chunkify-analytics-collector key-create live read "Dashboard backend"
+# Use the safe key ID from project-list or key-create:
+./target/debug/chunkify-analytics-collector key-rotate live KEY_ID
+./target/debug/chunkify-analytics-collector key-revoke live KEY_ID
+```
+
+`project-create <id> [name]` returns `ingest_key` and `read_token`. The name defaults
+to the ID when omitted. `key-create` and `key-rotate` return `key_id` and `secret`.
+Save these secrets when the command returns: newly created project credentials
+are stored as SHA-256 hashes and cannot be retrieved later. `project-list` returns
+project IDs, names, settings and key IDs/names/permissions, without secrets or
+hashes. Restart after administration; there is no live configuration reload.
+
+The initial `default` project's plaintext `ingest_key` and `read_token` exports
+remain in the private `keys.json` file for the existing init/rotate-key workflow.
+Once a `projects` registry is saved, its hashes are authoritative; a revoked
+primary credential is not re-enabled by the legacy export. Rotating an existing
+default primary key updates that export too. Back up the entire file.
+
+The browser sends only `X-Chunkify-Ingest-Key`. An in-memory hash lookup resolves
+its project and safe key ID; no per-request database lookup is needed. The project
+ID is not encoded in the token. Native and OTLP records receive `project_id` and
+`ingest_key_id` as trusted response metadata. Client-supplied properties remain in
+the original event but cannot redirect storage. Multiple keys for one project
+share deduplication and quotas; rotation keeps the key ID and historical events.
+An ingest key identifies the destination/integration, not a verified sender or
+viewer. `viewer_id` remains an optional client-supplied identifier.
+
+A read token permits access to exactly one project on all read endpoints,
+including queue counts. Cursors are bound to that project; a cursor never grants
+access. The same event/view/viewer IDs can occur independently in other projects.
+There is no cross-project query token or account membership API yet.
+
+#### Project limits and origins
+
+Defaults divide the installation's ingestion rate, in-flight write slots, memory
+queue budget and durable payload budget evenly across the configured projects
+(including `default`). Rate and slot defaults have a minimum of one. Each project
+inherits `COLLECTOR_ALLOWED_ORIGINS`. Keys within a project share these limits.
+The installation caps still apply, so these are ceilings, not throughput or latency
+guarantees. Read queries, writer scheduling and retained database storage are
+shared; retention is installation-wide in this first implementation.
+
+To override one project's limits, save a JSON file and run
+`project-configure live /path/to/settings.json`, then restart:
+
+```json
+{
+  "allowed_origins": ["https://player.example"],
+  "ingest_per_second": 100,
+  "queue_bytes": 4194304,
+  "spool_bytes": 16777216
+}
+```
+
+The command replaces that project's overrides. Omitted/null values inherit the
+default; `allowed_origins: []` disables browser origins for that project. Queue
+limits accept 4096–268435456 bytes and are capped by the installation limit.
+`spool_bytes` applies only with the experimental durable queue and bounds pending
+serialized payloads, not retained DuckDB storage. Restarting with lower limits
+still recovers previously acknowledged events before accepting new traffic.
+
+A full queue returns 503; exceeding a project rate returns 429; a single request
+that cannot fit its byte budget returns 413. Origin checks on POST use the
+resolved project's policy. Unauthenticated preflight uses the union of allowed
+origins, since browsers do not send the ingest key value during preflight.
 
 ### Database layout
 
 | Table | Contents |
 | --- | --- |
-| `events` | Typed event/browser columns plus a lossless JSON remainder, versioned context reconstruction, and columns for filtering, deduplication and summaries. `event_id` is unique; `view_id` groups events for a viewing attempt. An internal `ingest_id` orders pagination. |
-| `event_otlp` | Original OTLP log/resource/scope JSON, keyed by `event_id`, for events first accepted through OTLP. |
+| `events` | Typed event/browser columns plus a lossless JSON remainder, versioned context reconstruction, and columns for filtering, deduplication and summaries. `project_id` identifies ownership and `ingest_key_id` records the first accepted source key. `(project_id, event_id)` is unique; `view_id` groups events for a viewing attempt within a project. An internal `ingest_id` orders pagination. |
+| `event_otlp` | Original OTLP log/resource/scope JSON, keyed by `(project_id, event_id)`, for events first accepted through OTLP. |
 | `collector_schema` | The database schema version. |
 
 All data for an accepted event is written in one transaction. Known scalar event
@@ -254,7 +340,7 @@ monitor(document.querySelector("video"), {
 
 Send the complete SDK event. Custom mappings that remove required fields cannot
 be accepted. The collector stores the complete JSON object, including additional
-fields, and deduplicates by `event_id`. Repeating a valid event does not replace
+fields, and deduplicates by `(project_id, event_id)`. Repeating a valid event does not replace
 the first payload or count it twice.
 
 The Chunkify adapter adds `browser_context` to every event by default. Read it at
@@ -348,7 +434,7 @@ DuckDB buffers, indexes and temporary copies use additional memory. Keep the bod
 size limit and container memory limit appropriate for the deployment.
 
 Bulk insertion uses a connection-local temporary staging table. The persistent
-schema is version 4. The first occurrence of an event ID keeps its original
+schema is version 5. The first occurrence of `(project_id, event_id)` keeps its original
 payload, context and optional OTLP envelope. Duplicates within or across requests
 do not replace it. Every request receives its own result only after the shared
 transaction commits. A failed transaction fails every request in that batch and
@@ -364,7 +450,7 @@ your ingress before exposing this development service publicly.
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after commit; 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
 | `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch commits, including empty or duplicate-only batches. |
-| `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"received_at":"...","event":{...}}],"next_cursor":null}` |
+| `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
 | `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
@@ -494,7 +580,7 @@ do not match an explicit filter. `device_type=unknown` matches only a stored
 `unknown` value; it does not include events with no device information.
 
 `/v1/events` and `/v1/videos` accept `limit` from 1 to 1000, defaulting to 100.
-Follow `next_cursor` until it is null. Keep the same filters when following a
+Follow `next_cursor` until it is null. Keep the same project and filters when following a
 cursor. Invalid cursors, changed filters, unknown parameters, and invalid ranges
 return 400. Treat cursors as opaque.
 
@@ -535,7 +621,8 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
   an ingest key does not verify their authenticity.
 
 The server stores receipt time separately for retention and operations.
-Operational messages use stdout/stderr and contain no keys.
+Server operational messages use stdout/stderr and contain no keys. CLI commands
+that create or rotate project credentials return new secrets once on stdout.
 
 ## Retention and administration
 
@@ -570,8 +657,9 @@ Stop the collector, then run:
 ./target/debug/chunkify-analytics-collector delete-viewer 'viewer-123'
 ```
 
-The command matches the exact supplied `viewer_id` across all videos and both
-ingestion formats. It removes the matching events, OTLP context, and request
+The one-argument form targets the `default` project. To target another project,
+use `delete-viewer live viewer-123`. The command matches the exact supplied
+`viewer_id` within that project, across all videos and both ingestion formats. It removes the matching events, OTLP context, and request
 context atomically, then prints a count such as `{"deleted_events":42}`.
 Other viewers and anonymous
 events remain. Repeating the command succeeds with zero deletions. Restart the
@@ -591,6 +679,7 @@ Stop the collector and run one of:
 ./target/debug/chunkify-analytics-collector rotate-key read
 ```
 
+These legacy commands rotate the `default` project’s primary credential.
 Each command replaces only the selected credential. It writes a complete new
 `keys.json` through a temporary file and rename, with mode `0600` on Unix. It
 does not print credential values or modify event data.

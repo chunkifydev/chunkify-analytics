@@ -10,6 +10,7 @@ use crate::{
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env,
     path::Path,
     sync::{
@@ -48,6 +49,10 @@ impl SpoolConfig {
 
 #[derive(Serialize, Deserialize)]
 pub struct StoredRequest {
+    #[serde(default = "crate::projects::default_project")]
+    pub project_id: String,
+    #[serde(default)]
+    pub ingest_key_id: Option<String>,
     pub events: Vec<IncomingEvent>,
     pub context: Option<serde_json::Value>,
     pub received: i64,
@@ -57,6 +62,9 @@ pub struct StoredRequest {
 }
 
 struct Pending {
+    project_id: String,
+    project_limit: usize,
+    project_permit: Option<crate::projects::Admission>,
     payload: Vec<u8>,
     records: usize,
     received: i64,
@@ -79,6 +87,7 @@ struct Database {
     events: usize,
     bytes: usize,
     max_bytes: usize,
+    project_bytes: HashMap<String, usize>,
 }
 impl Database {
     fn open(path: &Path, max_bytes: usize) -> Result<Self> {
@@ -93,6 +102,35 @@ impl Database {
                 records INTEGER NOT NULL, payload BLOB NOT NULL);",
             )
             .map_err(|e| e.to_string())?;
+        let has_project: bool = connection
+            .query_row(
+                "SELECT count(*) > 0 FROM pragma_table_info('pending') WHERE name = 'project_id'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if !has_project {
+            connection
+                .execute_batch(
+                    "ALTER TABLE pending ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'",
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        connection
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS pending_project ON pending(project_id, received_ms)",
+            )
+            .map_err(|e| e.to_string())?;
+        let project_bytes = {
+            let mut statement = connection.prepare("SELECT project_id, coalesce(sum(length(payload)),0) FROM pending GROUP BY project_id").map_err(|e| e.to_string())?;
+            statement
+                .query_map([], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<HashMap<_, _>>>()
+                .map_err(|e| e.to_string())?
+        };
         // Bound database allocation as well as logical payloads. SQLite reuses
         // freed pages; the WAL has its own automatic checkpoint threshold.
         let pages = (max_bytes.saturating_mul(2) + 8388608).div_ceil(4096);
@@ -108,6 +146,7 @@ impl Database {
             events,
             bytes,
             max_bytes,
+            project_bytes,
         })
     }
     fn append(&mut self, batch: &[Pending]) -> Result<()> {
@@ -115,7 +154,7 @@ impl Database {
         {
             let mut statement = tx
                 .prepare_cached(
-                    "INSERT INTO pending (received_ms, records, payload) VALUES (?, ?, ?)",
+                    "INSERT INTO pending (received_ms, records, payload, project_id) VALUES (?, ?, ?, ?)",
                 )
                 .map_err(|e| e.to_string())?;
             for request in batch {
@@ -123,7 +162,8 @@ impl Database {
                     .execute(params![
                         request.received,
                         request.records as i64,
-                        request.payload
+                        request.payload,
+                        request.project_id
                     ])
                     .map_err(|e| e.to_string())?;
             }
@@ -132,12 +172,18 @@ impl Database {
         self.requests += batch.len();
         self.events += batch.iter().map(|r| r.records).sum::<usize>();
         self.bytes += batch.iter().map(|r| r.payload.len()).sum::<usize>();
+        for request in batch {
+            *self
+                .project_bytes
+                .entry(request.project_id.clone())
+                .or_default() += request.payload.len();
+        }
         Ok(())
     }
     fn next(&self, batch: &BatchConfig) -> Result<Vec<(i64, StoredRequest, usize)>> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, payload, records FROM pending ORDER BY id LIMIT ?")
+            .prepare("SELECT id, payload, records, project_id FROM pending ORDER BY id LIMIT ?")
             .map_err(|e| e.to_string())?;
         let mut rows = statement
             .query([batch.max_events as i64])
@@ -155,6 +201,10 @@ impl Database {
             }
             let mut stored: StoredRequest =
                 serde_json::from_slice(&payload).map_err(|e| e.to_string())?;
+            let project: String = row.get(3).map_err(|e| e.to_string())?;
+            if stored.project_id != project {
+                return Err("Queued project ownership mismatch".into());
+            }
             if stored.prepared_version != Writer::PREPARED_VERSION {
                 stored.prepared_bytes = Writer::prepared_bytes(&stored).map_err(|e| e.1)?;
                 stored.prepared_version = Writer::PREPARED_VERSION;
@@ -182,9 +232,24 @@ impl Database {
         events: usize,
         bytes: usize,
     ) -> Result<()> {
+        let removed = {
+            let mut statement = self.connection.prepare("SELECT project_id, sum(length(payload)) FROM pending WHERE id <= ? GROUP BY project_id").map_err(|e| e.to_string())?;
+            statement
+                .query_map([through], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as usize))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
         self.connection
             .execute("DELETE FROM pending WHERE id <= ?", [through])
             .map_err(|e| e.to_string())?;
+        for (project, bytes) in removed {
+            if let Some(pending) = self.project_bytes.get_mut(&project) {
+                *pending -= bytes;
+            }
+        }
         self.requests -= requests;
         self.events -= events;
         self.bytes -= bytes;
@@ -272,6 +337,8 @@ impl Spool {
     }
     pub async fn insert(
         &self,
+        project: &crate::projects::Access,
+        key_id: &str,
         events: Vec<IncomingEvent>,
         context: Option<RequestContext>,
     ) -> std::result::Result<(), ApiError> {
@@ -287,6 +354,8 @@ impl Spool {
         }
         let received = chrono::Utc::now().timestamp_millis();
         let mut stored = StoredRequest {
+            project_id: project.id.clone(),
+            ingest_key_id: Some(key_id.into()),
             events,
             context: context
                 .map(serde_json::to_value)
@@ -315,9 +384,19 @@ impl Spool {
             .clone()
             .try_acquire_many_owned(payload.len() as u32)
             .map_err(|_| ApiError::unavailable())?;
+        if payload.len() > project.queue_bytes || payload.len() > project.spool_bytes {
+            return Err(ApiError(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "Request exceeds project queue limit".into(),
+            ));
+        }
+        let project_permit = project.admit(payload.len())?;
         let (reply, response) = oneshot::channel();
         self.sender
             .try_send(Pending {
+                project_id: project.id.clone(),
+                project_limit: project.spool_bytes,
+                project_permit: Some(project_permit),
                 payload,
                 records,
                 received,
@@ -334,19 +413,19 @@ impl Spool {
             Ok(())
         }
     }
-    pub async fn stats(&self) -> std::result::Result<Stats, ApiError> {
+    pub async fn stats(&self, project: Option<String>) -> std::result::Result<Stats, ApiError> {
         let database = self.database.clone();
         let failed = self.failed.clone();
         tokio::task::spawn_blocking(move || {
             let db = database.lock().map_err(|_| ApiError::internal())?;
-            let oldest: Option<i64> = db
-                .connection
-                .query_row("SELECT min(received_ms) FROM pending", [], |r| r.get(0))
+            let (requests, events, bytes, oldest) = db.connection.query_row(
+                "SELECT count(*), coalesce(sum(records),0), coalesce(sum(length(payload)),0), min(received_ms) FROM pending WHERE (? IS NULL OR project_id = ?)",
+                params![project, project], |r| Ok((r.get::<_, i64>(0)? as usize, r.get::<_, i64>(1)? as usize, r.get::<_, i64>(2)? as usize, r.get::<_, Option<i64>>(3)?)))
                 .map_err(|_| ApiError::internal())?;
             Ok(Stats {
-                pending_requests: db.requests,
-                pending_events: db.events,
-                pending_bytes: db.bytes,
+                pending_requests: requests,
+                pending_events: events,
+                pending_bytes: bytes,
                 oldest_age_ms: oldest
                     .map_or(0, |t| (chrono::Utc::now().timestamp_millis() - t).max(0)),
                 failed: failed.load(Ordering::Acquire),
@@ -381,11 +460,25 @@ fn produce(
         let mut db = database.lock().map_err(|_| "Queue mutex poisoned")?;
         let mut admitted = Vec::new();
         let mut reserved = db.bytes;
+        let mut project_reserved = HashMap::new();
         for request in batch {
+            let used = project_reserved
+                .entry(request.project_id.clone())
+                .or_insert_with(|| {
+                    db.project_bytes
+                        .get(&request.project_id)
+                        .copied()
+                        .unwrap_or(0)
+                });
+            if *used + request.payload.len() > request.project_limit {
+                let _ = request.reply.send(Err(ApiError::unavailable()));
+                continue;
+            }
             if failed.load(Ordering::Acquire) || reserved + request.payload.len() > db.max_bytes {
                 let _ = request.reply.send(Err(ApiError::unavailable()));
             } else {
                 reserved += request.payload.len();
+                *used += request.payload.len();
                 admitted.push(request);
             }
         }
@@ -397,6 +490,7 @@ fn produce(
         for request in admitted {
             drop(request.payload);
             drop(request._permit);
+            drop(request.project_permit);
             let _ = request.reply.send(if result.is_ok() {
                 Ok(())
             } else {
@@ -520,6 +614,9 @@ mod tests {
                 CREATE TRIGGER fail_at_commit AFTER INSERT ON pending BEGIN INSERT INTO test_child VALUES (999); END;").unwrap();
         let (reply, response) = oneshot::channel();
         let request = Pending {
+            project_id: "default".into(),
+            project_limit: 4096,
+            project_permit: None,
             payload: b"test".to_vec(),
             records: 1,
             received: 0,

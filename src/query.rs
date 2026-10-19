@@ -128,19 +128,27 @@ impl Filters {
 #[derive(Serialize, Deserialize)]
 pub struct Cursor<T> {
     pub version: u8,
+    #[serde(default = "crate::projects::default_project")]
+    pub project_id: String,
     pub kind: String,
     pub after: T,
     pub through: i64,
     pub filters: Filters,
 }
 impl<T: Serialize + DeserializeOwned> Cursor<T> {
-    pub fn decode(encoded: &str, kind: &str, filters: &Filters) -> Result<Self, ApiError> {
+    pub fn decode(
+        encoded: &str,
+        kind: &str,
+        filters: &Filters,
+        project: &str,
+    ) -> Result<Self, ApiError> {
         let bytes = URL_SAFE_NO_PAD
             .decode(encoded)
             .map_err(|_| ApiError::bad("Invalid cursor"))?;
         let cursor: Self =
             serde_json::from_slice(&bytes).map_err(|_| ApiError::bad("Invalid cursor"))?;
-        if cursor.version != 1
+        if cursor.project_id != project
+            || cursor.version != 1
             || cursor.kind != kind
             || cursor.filters != *filters
             || cursor.through < 0

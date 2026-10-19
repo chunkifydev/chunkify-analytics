@@ -4,6 +4,7 @@ mod context;
 mod event;
 mod otlp;
 mod profile;
+mod projects;
 mod query;
 mod reader;
 mod spool;
@@ -22,6 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         (Some("serve"), []) => {
             let _lock = config.lock()?;
             let keys = config.keys()?;
+            let projects = projects::Registry::new(&keys, &config)?;
             let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone(), config.separate_reads)?;
             store.drain().await.map_err(|_| "Queue recovery failed")?;
             let removed = store.purge_expired(config.retention_seconds).await
@@ -49,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let shutdown = shutdown();
             println!("Listening on http://{}", listener.local_addr()?);
-            let result = axum::serve(listener, api::router(store.clone(), keys, &config)
+            let result = axum::serve(listener, api::router(store.clone(), projects, &config)
                 .into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .with_graceful_shutdown(shutdown)
                 .await;
@@ -62,23 +64,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             result?;
             Ok(())
         }
-        (Some("delete-viewer"), [viewer_id]) => {
+        (Some("delete-viewer"), [viewer_id]) | (Some("delete-viewer"), [_, viewer_id]) => {
+            let project_id = if parameters.len() == 2 { parameters[0].clone() } else { projects::default_project() };
             let _lock = config.lock()?;
-            config.keys()?;
+            let keys = config.keys()?;
+            if !projects::projects(&keys).iter().any(|p| p.id == project_id) { return Err("Unknown project".into()); }
             let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone(), config.separate_reads)?;
             store.drain().await.map_err(|_| "Queue recovery failed")?;
-            let result = store.delete_viewer(viewer_id.clone()).await;
+            let result = store.delete_viewer(project_id, viewer_id.clone()).await;
             drop(store);
             worker.join().map_err(|_| "Database worker panicked")??;
-            let removed = result.map_err(|_| "Viewer deletion failed")?;
-            println!("{}", serde_json::json!({"deleted_events": removed}));
+            println!("{}", serde_json::json!({"deleted_events": result.map_err(|_| "Viewer deletion failed")?}));
             Ok(())
         }
+        (Some(command @ ("project-list" | "project-create" | "project-rename" | "project-configure" | "key-create" | "key-revoke" | "key-rotate")), args) => config.project_command(command, args),
         (Some("rotate-key"), [kind]) => {
             let _lock = config.lock()?;
             config.rotate_key(kind)
         }
-        _ => Err("Usage: chunkify-analytics-collector init | serve | delete-viewer <viewer_id> | rotate-key <ingest|read>".into()),
+        _ => Err("Usage: chunkify-analytics-collector init | serve | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
     }
 }
 

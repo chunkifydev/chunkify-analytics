@@ -361,10 +361,10 @@ dependencies = [
  "duckdb",
  "flate2",
  "ipnet",
+ "ring",
  "rusqlite",
  "serde",
  "serde_json",
- "subtle",
  "tokio",
  "uuid",
 ]

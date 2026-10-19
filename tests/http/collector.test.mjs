@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, cp, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer, request as httpRequest } from "node:http";
 import { gzipSync } from "node:zlib";
@@ -98,8 +98,8 @@ async function collector(t, settings = {}, initialBinary = binary) {
       const [code, receivedSignal] = await exited;
       if (signal === "SIGTERM") assert.equal(code, 0, `${receivedSignal}: ${errors}`);
     },
-    async get(path) {
-      const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${keys.read_token}` } });
+    async get(path, token = keys.read_token) {
+      const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${token}` } });
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
@@ -999,6 +999,8 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   const beforePage = await server.get("/v1/events?limit=2");
   const expected = structuredClone(original);
   for (const record of expected.events) {
+    record.project_id ??= "default";
+    record.ingest_key_id ??= null;
     if (!record.event_context && record.event.browser_context) record.event_context = record.event.browser_context;
   }
   const summary = await server.get("/v1/summary");
@@ -1360,4 +1362,203 @@ test("durable queue replays the committed-but-not-dequeued crash window without 
   await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
   assert.deepEqual((await server.get("/v1/events")).events, [original]);
   assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
+});
+
+async function projectCommand(server, args) {
+  const result = await server.command(args);
+  assert.equal(result.code, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+function projectPost(server, key, event, headers = {}) {
+  return fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
+    headers: { "content-type": "application/json", "x-chunkify-ingest-key": key, ...headers } });
+}
+
+for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical IDs, cursors and deletion (${mode})`, async (t) => {
+  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INGEST_PER_SECOND: "1000",
+    COLLECTOR_INSERT_MODE: mode === "row" ? "row" : "bulk",
+    COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(mode === "durable"), COLLECTOR_BATCH_DELAY_MS: "100" });
+  await server.stop();
+  const live = await projectCommand(server, ["project-create", "live", "Production website"]);
+  const second = await projectCommand(server, ["key-create", "live", "ingest", "Mobile app"]);
+  const list = await projectCommand(server, ["project-list"]);
+  const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "ingest").id;
+  assert.equal(list.find(p => p.id === "live").name, "Production website");
+  assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.secret)));
+  const configuration = await readFile(join(server.directory, "keys.json"), "utf8");
+  for (const secret of [live.ingest_key, live.read_token, second.secret]) assert.ok(!configuration.includes(secret));
+  await server.start();
+  const events = sdkEvents("shared-video", "shared-viewer");
+  events.at(-1).playing_time_ms = 1200;
+  // The same identifiers are independent across projects. Body properties never route storage.
+  events[0].project_id = "live";
+  const liveEvents = structuredClone(events);
+  liveEvents[0].project_id = "default";
+  liveEvents.at(-1).playing_time_ms = 5400;
+  await Promise.all([
+    ...events.map(event => server.send(event)),
+    ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key },
+      resourceAttributes: { "service.name": "production" } })),
+  ]);
+  // Restart waits for all durable entries; retrying via another key must keep first delivery.
+  await server.stop();
+  await server.start();
+  await server.send(liveEvents[0], { "X-Chunkify-Ingest-Key": second.secret });
+  await server.stop();
+  await server.start();
+  const defaultRows = (await server.get("/v1/events")).events;
+  const liveRows = (await server.get("/v1/events", live.read_token)).events;
+  assert.equal(defaultRows.length, events.length);
+  assert.equal(liveRows.length, events.length);
+  assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-ingest" && !r.otlp));
+  assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id === firstKey && r.otlp));
+  assert.deepEqual(await server.get("/v1/summary"), { views: 1, unique_viewers: 1, total_playing_time_ms: 1200 });
+  assert.deepEqual(await server.get("/v1/summary", live.read_token), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
+  assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.read_token)).videos[0].total_playing_time_ms, 5400);
+  const page = await server.get("/v1/events?limit=1");
+  let response = await fetch(`${server.url}/v1/events?limit=1&cursor=${encodeURIComponent(page.next_cursor)}`,
+    { headers: { authorization: `Bearer ${live.read_token}` } });
+  assert.equal(response.status, 400);
+  // Cursors are positions, not authorization: even a forged scope cannot leak another project.
+  const cursor = JSON.parse(Buffer.from(page.next_cursor, "base64url"));
+  cursor.project_id = "live";
+  cursor.after = 0;
+  cursor.through = Number.MAX_SAFE_INTEGER;
+  const forged = Buffer.from(JSON.stringify(cursor)).toString("base64url");
+  const forgedPage = await server.get(`/v1/events?cursor=${forged}`, live.read_token);
+  assert.ok(forgedPage.events.every(r => r.project_id === "live"));
+  for (const path of ["/v1/events?project_id=live", "/v1/summary?project_id=live", "/v1/videos?project_id=live"]) {
+    response = await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${server.keys.read_token}` } });
+    assert.equal(response.status, 400);
+  }
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.ingest_key}` } })).status, 401);
+  assert.equal((await projectPost(server, live.read_token, events[0])).status, 401);
+  await server.stop();
+  await projectCommand(server, ["project-rename", "live", "Customer A — Live"]);
+  await projectCommand(server, ["delete-viewer", "default", "shared-viewer"]);
+  await server.start();
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
+  await server.stop();
+  assert.equal((await projectCommand(server, ["project-list"])).find(p => p.id === "live").name, "Customer A — Live");
+  await projectCommand(server, ["delete-viewer", "live", "shared-viewer"]);
+  await server.start();
+  assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
+});
+
+test("project credentials rotate and revoke independently without changing ownership", async (t) => {
+  const server = await collector(t);
+  await server.stop();
+  const live = await projectCommand(server, ["project-create", "live"]);
+  const extra = await projectCommand(server, ["key-create", "live", "ingest", "Website"]);
+  const extraRead = await projectCommand(server, ["key-create", "live", "read", "Dashboard"]);
+  const events = sdkEvents();
+  await server.start();
+  assert.equal((await projectPost(server, extra.secret, events[0])).status, 201);
+  await server.stop();
+  const rotated = await projectCommand(server, ["key-rotate", "live", extra.key_id]);
+  assert.equal(rotated.key_id, extra.key_id);
+  await projectCommand(server, ["key-revoke", "live", extraRead.key_id]);
+  await server.start();
+  assert.equal((await projectPost(server, extra.secret, events[1])).status, 401);
+  assert.equal((await projectPost(server, rotated.secret, events[1])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${extraRead.secret}` } })).status, 401);
+  assert.ok((await server.get("/v1/events", live.read_token)).events.every(r => r.ingest_key_id === extra.key_id));
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  await server.stop();
+  await projectCommand(server, ["key-revoke", "default", "primary-ingest"]);
+  await server.start();
+  assert.equal((await projectPost(server, server.keys.ingest_key, events[0])).status, 401, "legacy root export is not an auth fallback");
+  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0])).status, 201);
+});
+
+test("project origin policies and rate quotas apply across all of its keys", async (t) => {
+  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1000" });
+  await server.stop();
+  const live = await projectCommand(server, ["project-create", "live"]);
+  const extra = await projectCommand(server, ["key-create", "live", "ingest", "Another integration"]);
+  const settings = join(server.directory, "live-settings.json");
+  await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 1 }));
+  await projectCommand(server, ["project-configure", "live", settings]);
+  await server.start();
+  const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
+    origin: "https://live.example", "access-control-request-method": "POST", "access-control-request-headers": "x-chunkify-ingest-key,content-type" } });
+  assert.equal(preflight.status, 204);
+  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0], { origin: "https://player.example" })).status, 403);
+  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0], { origin: "https://live.example" })).status, 403);
+  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0], { origin: "https://live.example" })).status, 201);
+  const limited = await projectPost(server, extra.secret, sdkEvents()[0]);
+  assert.equal(limited.status, 429);
+  assert.equal(limited.headers.get("retry-after"), "1");
+  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0])).status, 201);
+});
+
+test("a busy project leaves admission slots for another project", async (t) => {
+  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_QUEUE_MAX_REQUESTS: "4",
+    COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  await server.stop();
+  const live = await projectCommand(server, ["project-create", "live"]);
+  await server.start();
+  const busy = Array.from({ length: 4 }, () => projectPost(server, live.ingest_key, sdkEvents()[0]));
+  const other = projectPost(server, server.keys.ingest_key, sdkEvents()[0]);
+  const responses = await Promise.all(busy);
+  assert.equal(responses.filter(r => r.status === 201).length, 2);
+  assert.equal(responses.filter(r => r.status === 503).length, 2);
+  assert.equal((await other).status, 201);
+  await Promise.all(responses.map(r => r.text()));
+});
+
+test("durable project quotas and pending counters stay isolated through crash recovery", async (t) => {
+  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_BATCH_DELAY_MS: "1000",
+    COLLECTOR_SPOOL_MAX_BYTES: "16384", COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  await server.stop();
+  const live = await projectCommand(server, ["project-create", "live"]);
+  const settings = join(server.directory, "live-settings.json");
+  await writeFile(settings, JSON.stringify({ spool_bytes: 4096 }));
+  await projectCommand(server, ["project-configure", "live", settings]);
+  await server.start();
+  const accepted = [];
+  let overloaded = false;
+  for (let i = 0; i < 10; i++) {
+    const event = sdkEvents()[0];
+    const response = await projectPost(server, live.ingest_key, event);
+    if (response.status === 503) { overloaded = true; break; }
+    assert.equal(response.status, 202);
+    accepted.push(event);
+  }
+  assert.ok(overloaded);
+  assert.equal((await server.get("/v1/ingestion")).queue.pending_events, 0);
+  assert.equal((await server.get("/v1/ingestion", live.read_token)).queue.pending_events, accepted.length);
+  const ownEvent = sdkEvents()[0];
+  assert.equal((await projectPost(server, server.keys.ingest_key, ownEvent)).status, 202);
+  await server.stop("SIGKILL");
+  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
+  assert.deepEqual((await server.get("/v1/events")).events.map(r => r.event), [ownEvent]);
+  const liveRows = (await server.get("/v1/events", live.read_token)).events;
+  assert.deepEqual(liveRows.map(r => r.event), accepted);
+  assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id));
+  assert.equal((await server.get("/v1/ingestion", live.read_token)).queue.pending_events, 0);
+});
+
+test("project administration rejects invalid changes without overwriting credentials", async (t) => {
+  const server = await collector(t);
+  await server.stop();
+  const keyFile = join(server.directory, "keys.json");
+  for (const args of [["project-create", "bad/id"], ["project-create", "live", "   "],
+    ["project-create", "default"], ["project-rename", "missing", "New name"], ["key-create", "default", "admin", "Wrong kind"]]) {
+    const before = await readFile(keyFile, "utf8");
+    assert.notEqual((await server.command(args)).code, 0);
+    assert.equal(await readFile(keyFile, "utf8"), before);
+  }
+  await projectCommand(server, ["key-revoke", "default", "primary-ingest"]);
+  const keys = JSON.parse(await readFile(keyFile, "utf8"));
+  keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "ingest",
+    hash: index.toString(16).padStart(64, "0") }));
+  await writeFile(keyFile, JSON.stringify(keys));
+  const before = await readFile(keyFile, "utf8");
+  const result = await server.command(["rotate-key", "ingest"]);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /64 keys/);
+  assert.equal(await readFile(keyFile, "utf8"), before, "failed legacy rotation must not break the registry");
 });

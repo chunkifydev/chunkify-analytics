@@ -26,6 +26,8 @@ pub struct Config {
 pub struct Keys {
     pub ingest_key: String,
     pub read_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projects: Option<Vec<crate::projects::Project>>,
 }
 
 impl Config {
@@ -54,16 +56,7 @@ impl Config {
             .map(String::from)
             .collect();
         for origin in &allowed_origins {
-            let uri: axum::http::Uri = origin.parse()?;
-            if !matches!(uri.scheme_str(), Some("http" | "https"))
-                || uri.authority().is_none()
-                || uri.path() != "/"
-                || uri.query().is_some()
-                || origin.ends_with('/')
-                || origin.contains('@')
-            {
-                return Err("Allowed origins must be exact HTTP(S) origins without a trailing slash or path.".into());
-            }
+            validate_origin(origin)?;
         }
         let max_body_bytes = env::var("COLLECTOR_MAX_BODY_BYTES")
             .unwrap_or_else(|_| "65536".into())
@@ -149,6 +142,7 @@ impl Config {
         builder.create(&self.data_dir)?;
         let _lock = self.lock()?;
         let keys = Keys {
+            projects: None,
             ingest_key: format!("cki_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
             read_token: format!("ckr_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         };
@@ -185,6 +179,9 @@ impl Config {
                     .into(),
             );
         }
+        if let Some(projects) = &keys.projects {
+            crate::projects::validate(projects)?;
+        }
         Ok(keys)
     }
 
@@ -201,6 +198,34 @@ impl Config {
             }
             _ => return Err("Expected rotate-key ingest or rotate-key read".into()),
         }
+        if let Some(projects) = &mut keys.projects {
+            let project = projects
+                .iter_mut()
+                .find(|p| p.id == crate::projects::DEFAULT_PROJECT)
+                .ok_or("Missing default project")?;
+            let id = format!("primary-{kind}");
+            let secret = if kind == "ingest" {
+                &keys.ingest_key
+            } else {
+                &keys.read_token
+            };
+            let key = crate::projects::Credential {
+                id: id.clone(),
+                name: format!("Primary {kind}"),
+                permission: crate::projects::Permission::parse(kind)?,
+                hash: crate::projects::hash(secret),
+            };
+            project.keys.retain(|k| k.id != id);
+            project.keys.push(key);
+            crate::projects::validate(projects)?;
+        }
+        self.save_keys(&keys)?;
+        println!(
+            "Rotated {kind} key. Read the new value from keys.json and restart the collector."
+        );
+        Ok(())
+    }
+    pub(crate) fn save_keys(&self, keys: &Keys) -> Result<()> {
         // Write and sync a private file on the same filesystem before replacing
         // keys.json. Readers see the complete old or complete new key pair.
         let temporary = self.data_dir.join(format!(".keys-{}.tmp", Uuid::new_v4()));
@@ -225,9 +250,23 @@ impl Config {
             let _ = fs::remove_file(&temporary);
         }
         result?;
-        println!(
-            "Rotated {kind} key. Read the new value from keys.json and restart the collector."
-        );
         Ok(())
     }
+}
+
+pub(crate) fn validate_origin(origin: &str) -> std::result::Result<(), String> {
+    let uri: axum::http::Uri = origin.parse().map_err(|_| "Invalid origin")?;
+    if !matches!(uri.scheme_str(), Some("http" | "https"))
+        || uri.authority().is_none()
+        || uri.path() != "/"
+        || uri.query().is_some()
+        || origin.ends_with('/')
+        || origin.contains('@')
+    {
+        return Err(
+            "Allowed origins must be exact HTTP(S) origins without a trailing slash or path."
+                .into(),
+        );
+    }
+    Ok(())
 }

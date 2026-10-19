@@ -424,6 +424,8 @@ fn main() -> Result<()> {
                         &r.event,
                         context::event_context(&r.event, Some(&r.request_context)).as_ref(),
                         r.received_at_ms,
+                        "default",
+                        None,
                     )
                     .map_err(|e| e.1.into())
                 } else {
@@ -442,7 +444,12 @@ fn main() -> Result<()> {
             }
             appender.flush()?;
         }
-        let inserted: HashSet<String> = tx.prepare(&format!("INSERT INTO events({columns}) SELECT {columns} FROM stage ORDER BY ordinal ON CONFLICT(event_id) DO NOTHING RETURNING event_id"))?
+        let conflict = if variant == "production" {
+            "project_id, event_id"
+        } else {
+            "event_id"
+        };
+        let inserted: HashSet<String> = tx.prepare(&format!("INSERT INTO events({columns}) SELECT {columns} FROM stage ORDER BY ordinal ON CONFLICT({conflict}) DO NOTHING RETURNING event_id"))?
             .query_map([], |r| r.get(0))?.collect::<duckdb::Result<_>>()?;
         if inserted.len() != batch.len() {
             return Err("Unexpected duplicate/missing input event".into());
@@ -451,10 +458,18 @@ fn main() -> Result<()> {
             let mut appender = tx.appender("event_otlp")?;
             for r in &batch {
                 if let Some(otlp) = &r.otlp {
-                    appender.append_row(params![
-                        r.event["event_id"].as_str().unwrap(),
-                        otlp.to_string()
-                    ])?;
+                    if variant == "production" {
+                        appender.append_row(params![
+                            "default",
+                            r.event["event_id"].as_str().unwrap(),
+                            otlp.to_string()
+                        ])?;
+                    } else {
+                        appender.append_row(params![
+                            r.event["event_id"].as_str().unwrap(),
+                            otlp.to_string()
+                        ])?;
+                    }
                     otlp_count += 1;
                 }
             }

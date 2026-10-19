@@ -80,17 +80,28 @@ impl Row {
             _ => unreachable!("validated event ID"),
         }
     }
+    fn project(&self) -> &str {
+        match self.values.get(self.values.len() - 2) {
+            Some(Value::Text(id)) => id,
+            _ => unreachable!("resolved project"),
+        }
+    }
     fn prepare(
         record: &IncomingEvent,
+        project: &str,
+        key_id: Option<&str>,
         context: Option<&serde_json::Value>,
         received: i64,
     ) -> Result<Self, ApiError> {
+        let values = crate::storage::encode(
+            &record.event,
+            event_context(&record.event, context).as_ref(),
+            received,
+            project,
+            key_id,
+        )?;
         Ok(Self {
-            values: crate::storage::encode(
-                &record.event,
-                event_context(&record.event, context).as_ref(),
-                received,
-            )?,
+            values,
             otlp: record.otlp.as_ref().map(|v| v.to_string()),
         })
     }
@@ -116,6 +127,7 @@ struct WriteRequest {
     preparation: Duration,
     reply: oneshot::Sender<Result<usize, ApiError>>,
     _permit: OwnedSemaphorePermit,
+    project_permit: Option<crate::projects::Admission>,
 }
 
 #[derive(Clone)]
@@ -129,12 +141,19 @@ pub struct Writer {
 impl Writer {
     // Bump when the prepared row representation changes. Durable requests may
     // have been admitted by an older binary with a different memory estimate.
-    pub const PREPARED_VERSION: u32 = 4;
+    pub const PREPARED_VERSION: u32 = 5;
 
     pub fn prepared_bytes(request: &crate::spool::StoredRequest) -> Result<usize, ApiError> {
         let mut bytes = size_of::<WriteRequest>() + request.events.len() * size_of::<Row>();
         for event in &request.events {
-            bytes += Row::prepare(event, request.context.as_ref(), request.received)?.heap_bytes();
+            bytes += Row::prepare(
+                event,
+                &request.project_id,
+                request.ingest_key_id.as_deref(),
+                request.context.as_ref(),
+                request.received,
+            )?
+            .heap_bytes();
         }
         Ok(bytes)
     }
@@ -147,6 +166,8 @@ impl Writer {
             for event in request.events {
                 rows.push(Row::prepare(
                     &event,
+                    &request.project_id,
+                    request.ingest_key_id.as_deref(),
                     request.context.as_ref(),
                     request.received,
                 )?);
@@ -169,6 +190,7 @@ impl Writer {
                 preparation: started.elapsed(),
                 reply,
                 _permit: permit,
+                project_permit: None,
             }))
             .map_err(|_| ApiError::unavailable())?;
         receiver
@@ -273,6 +295,8 @@ impl Writer {
 
     pub async fn insert(
         &self,
+        project: &crate::projects::Access,
+        key_id: &str,
         events: Vec<IncomingEvent>,
         request_context: Option<RequestContext>,
     ) -> Result<usize, ApiError> {
@@ -293,7 +317,15 @@ impl Writer {
             .map_err(|_| ApiError::internal())?;
         let rows: Vec<_> = events
             .into_iter()
-            .map(|record| Row::prepare(&record, context.as_ref(), received))
+            .map(|record| {
+                Row::prepare(
+                    &record,
+                    &project.id,
+                    Some(key_id),
+                    context.as_ref(),
+                    received,
+                )
+            })
             .collect::<Result<_, _>>()?;
         let bytes = size_of::<WriteRequest>()
             + rows.capacity() * size_of::<Row>()
@@ -306,6 +338,10 @@ impl Writer {
             .clone()
             .try_acquire_many_owned(bytes as u32)
             .map_err(|_| ApiError::unavailable())?;
+        if bytes > project.queue_bytes {
+            return Err(too_large());
+        }
+        let project_permit = project.admit(bytes)?;
         let (reply, receiver) = oneshot::channel();
         let request = WriteRequest {
             rows,
@@ -314,6 +350,7 @@ impl Writer {
             preparation: started.elapsed(),
             reply,
             _permit: permit,
+            project_permit: Some(project_permit),
         };
         self.sender
             .try_send(Job::Write(request))
@@ -349,6 +386,7 @@ fn flush(
         // immediately reserve the same byte budget for its next batch.
         drop(request.rows);
         drop(request._permit);
+        drop(request.project_permit);
         let _ = request.reply.send(response);
     }
 }
@@ -384,8 +422,8 @@ fn write_rows(
             if added > 0 {
                 if let Some(otlp) = &row.otlp {
                     profile.measure("insert_otlp", || {
-                        tx.prepare_cached("INSERT INTO event_otlp VALUES (?, ?)")?
-                            .execute(params![&row.values[0], otlp])
+                        tx.prepare_cached("INSERT INTO event_otlp VALUES (?, ?, ?)")?
+                            .execute(params![row.project(), &row.values[0], otlp])
                     })?;
                 }
                 counts[index] += added;
@@ -407,7 +445,7 @@ fn write_bulk(
         .iter()
         .enumerate()
         .flat_map(|(request, item)| item.rows.iter().map(move |row| (request, row)))
-        .filter(|(_, row)| seen.insert(row.id()))
+        .filter(|(_, row)| seen.insert((row.project(), row.id())))
         .collect();
     // Empty OTLP exports are valid. Avoid an empty appender/INSERT cycle.
     if rows.is_empty() {
@@ -424,19 +462,22 @@ fn write_bulk(
         }
         appender.flush()
     })?;
-    let inserted: HashSet<String> = profile.measure("insert_event", || -> duckdb::Result<_> {
-        tx.prepare_cached(&crate::storage::BULK_SQL)?
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect()
-    })?;
+    let inserted: HashSet<(String, String)> =
+        profile.measure("insert_event", || -> duckdb::Result<_> {
+            tx.prepare_cached(&crate::storage::BULK_SQL)?
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect()
+        })?;
     let mut counts = vec![0; batch.len()];
     profile.measure("insert_otlp", || -> duckdb::Result<()> {
         let mut appender = tx.appender("event_otlp")?;
         for (request, row) in rows {
-            if inserted.contains(row.id()) {
+            if inserted.contains(&(row.project().to_owned(), row.id().to_owned())) {
                 counts[request] += 1;
                 if let Some(otlp) = &row.otlp {
-                    appender.append_row(params![row.id(), otlp])?;
+                    appender.append_row(params![row.project(), row.id(), otlp])?;
                 }
             }
         }

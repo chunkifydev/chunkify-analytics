@@ -98,14 +98,15 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
         .unwrap();
     assert_eq!(otlp.len(), 3);
     assert!(otlp.iter().all(|r| r.1 != "native"));
+    let first_payload = json!({"marker":"first"}).to_string();
+    let other_project_payload = json!({"marker":"other-project"}).to_string();
     assert!(
         otlp.iter()
-            .any(|r| r.0 == "a" && r.1 == id && r.2 == json!({"marker":"first"}).to_string())
+            .any(|r| r.0 == "a" && r.1 == id && r.2 == first_payload)
     );
     assert!(
-        otlp.iter().any(|r| r.0 == "b"
-            && r.1 == id
-            && r.2 == json!({"marker":"other-project"}).to_string())
+        otlp.iter()
+            .any(|r| r.0 == "b" && r.1 == id && r.2 == other_project_payload)
     );
     assert_eq!(
         write_batch(&mut c, &[request(vec![])], true, &mut profile)

@@ -39,7 +39,7 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
    a separate follow-up.
 7. A local, read-only MCP companion for AI-assisted dashboard development. See
    [MCP setup and verification](mcp.md). MCP is required for the first release;
-   the manual AI-client dashboard walkthrough remains a release check.
+   the [Codex CLI dashboard walkthrough](mcp-walkthrough.md) passed on 2026-10-20.
 
 This is a development version.
 

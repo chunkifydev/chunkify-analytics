@@ -546,3 +546,6 @@ fn write_bulk(
     })?;
     Ok(counts)
 }
+
+#[cfg(test)]
+mod lookup_tests;

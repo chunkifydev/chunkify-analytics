@@ -436,3 +436,6 @@ mod tests {
 
 #[cfg(test)]
 mod summary_tests;
+
+#[cfg(test)]
+mod page_lookup_tests;

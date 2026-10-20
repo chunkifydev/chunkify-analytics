@@ -50,6 +50,7 @@ impl Store {
         checkpoint_threshold_mib: u32,
         spool_config: Option<crate::spool::SpoolConfig>,
         separate_reads: bool,
+        duckdb_threads: Option<usize>,
     ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
         let spool_path = path.with_file_name("ingestion.sqlite");
         if spool_config.is_none() {
@@ -59,6 +60,10 @@ impl Store {
             "checkpoint_threshold",
             format!("{checkpoint_threshold_mib} MiB"),
         )?;
+        let settings = match duckdb_threads {
+            Some(threads) => settings.with("threads", threads.to_string())?,
+            None => settings,
+        };
         let mut connection = Connection::open_with_flags(path, settings)?;
         crate::storage::initialize(&mut connection)?;
         // Clone the connection to the same database instance, after migration.
@@ -381,6 +386,7 @@ mod tests {
             64,
             None,
             true,
+            None,
         )
         .unwrap();
         let (entered, ready) = tokio::sync::oneshot::channel();

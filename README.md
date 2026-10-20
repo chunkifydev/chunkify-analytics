@@ -392,6 +392,7 @@ Serve public traffic through your HTTPS ingress. Internal HTTP is supported.
 | `COLLECTOR_QUEUE_MAX_BYTES` | `16777216` | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
 | `COLLECTOR_QUEUE_MAX_REQUESTS` | `256` | Database channel capacity, shared by writes, reads and maintenance. Range 1..4096. The byte budget also applies to writes. |
 | `COLLECTOR_INSERT_MODE` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same batching and durability rules. |
+| `COLLECTOR_DUCKDB_THREADS` | Automatic | Optional DuckDB execution thread count, from 1..256. Applies to the shared database used by writes and reads. HTTP and replay threads are separate. |
 | `COLLECTOR_CHECKPOINT_THRESHOLD_MIB` | `16` | DuckDB's automatic checkpoint threshold, in MiB. Integer from 1..1024. Larger values allow a larger write-ahead log between checkpoints; see below. |
 | `COLLECTOR_INGEST_PER_SECOND` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
 | `COLLECTOR_RETENTION_SECONDS` | `2592000` | Retention by server receipt time, in seconds. Default is 30 days. `0` disables expiration. Must be a non-negative whole number no larger than `9223372036854775`. |
@@ -1001,6 +1002,19 @@ one millisecond; a separate consumer feeds bounded batches into the existing
 DuckDB writer. The queue lock is released while DuckDB processes a batch. Entries
 are deleted only after DuckDB commits. Replay after a crash may deliver an event
 again; DuckDB's event ID uniqueness preserves the first payload and context.
+Set `COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE=true` to let the consumer prepare
+one following batch while DuckDB writes the current batch. This requires durable
+queue mode and is off by default; sequential replay remains the default.
+Both batches reserve space in `COLLECTOR_QUEUE_MAX_BYTES`; a budget that fits
+only one batch uses sequential replay. A failed write leaves its queue entries
+and the prepared successor available for recovery.
+
+Use `COLLECTOR_DUCKDB_THREADS` to control database parallelism independently of
+HTTP handling and replay. On a CPU-limited server, compare one or two database
+threads with the automatic setting before enabling the pipeline. Fewer database
+threads can slow dashboard queries. Check response latency, admission rejections,
+backlog and recovery on your workload; these options do not guarantee a request
+rate. Unsetting the thread option preserves DuckDB's automatic selection.
 
 `COLLECTOR_SPOOL_MAX_BYTES` bounds pending serialized payloads, default 64 MiB,
 range 4 KiB through 256 MiB. This is a logical payload limit; SQLite pages, WAL,

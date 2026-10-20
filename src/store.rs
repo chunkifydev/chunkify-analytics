@@ -300,23 +300,38 @@ impl Store {
             values.extend(filter_values);
             // Date, identity and context filters select starts. Each selected view contributes its
             // whole cumulative value, even when its final event occurs after the date range.
-            let sql = format!("WITH retained AS (SELECT * FROM events WHERE ingest_id <= ? AND project_id = ?),
-                started AS (
-                    SELECT view_id, video_id, viewer_id, occurred_at_ms, context_browser_name, context_os_name, context_device_type FROM retained
-                    WHERE event_name = 'chunkify.video.view_started'
-                    QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY sequence, occurred_at_ms, ingest_id) = 1
-                ), cohort AS (SELECT * FROM started WHERE {conditions}),
-                latest AS (
-                    SELECT view_id, video_id, viewer_id, playing_time_ms FROM retained
-                    WHERE event_name IN ('chunkify.video.view_ended', 'chunkify.video.view_snapshot')
-                    QUALIFY ROW_NUMBER() OVER (
-                        PARTITION BY view_id, video_id, viewer_id
-                        ORDER BY (event_name = 'chunkify.video.view_ended') DESC, sequence DESC, occurred_at_ms DESC, ingest_id DESC
-                    ) = 1
+            // Group starts and measurements by identity in one scan. Then choose the
+            // earliest start across identities, before applying any cohort filters.
+            // arg_max_null keeps a winning NULL measurement instead of using an older value.
+            let sql = format!("WITH per_identity AS (
+                    SELECT view_id, video_id, viewer_id,
+                        arg_min(struct_pack(
+                            occurred_at_ms := occurred_at_ms,
+                            context_browser_name := context_browser_name,
+                            context_os_name := context_os_name,
+                            context_device_type := context_device_type
+                        ), (sequence, occurred_at_ms, ingest_id))
+                            FILTER (WHERE event_name = 'chunkify.video.view_started') AS first_start,
+                        min((sequence, occurred_at_ms, ingest_id))
+                            FILTER (WHERE event_name = 'chunkify.video.view_started') AS start_order,
+                        arg_max_null(playing_time_ms,
+                            (event_name = 'chunkify.video.view_ended', sequence, occurred_at_ms, ingest_id))
+                            FILTER (WHERE event_name IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended')) AS playing_time_ms
+                    FROM events
+                    WHERE ingest_id <= ? AND project_id = ?
+                        AND event_name IN ('chunkify.video.view_started', 'chunkify.video.view_snapshot', 'chunkify.video.view_ended')
+                    GROUP BY view_id, video_id, viewer_id
+                ), started AS (
+                    SELECT view_id, video_id, viewer_id,
+                        first_start.occurred_at_ms AS occurred_at_ms,
+                        first_start.context_browser_name AS context_browser_name,
+                        first_start.context_os_name AS context_os_name,
+                        first_start.context_device_type AS context_device_type,
+                        COALESCE(playing_time_ms, 0) AS playing_time_ms
+                    FROM per_identity WHERE start_order IS NOT NULL
+                    QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
                 ), view_metrics AS (
-                    SELECT cohort.video_id, cohort.viewer_id, COALESCE(latest.playing_time_ms, 0) AS playing_time_ms
-                    FROM cohort LEFT JOIN latest ON cohort.view_id = latest.view_id AND cohort.video_id = latest.video_id
-                        AND cohort.viewer_id IS NOT DISTINCT FROM latest.viewer_id
+                    SELECT video_id, viewer_id, playing_time_ms FROM started WHERE {conditions}
                 )");
             if !per_video {
                 let result = connection.query_row(&format!("{sql}
@@ -418,3 +433,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod summary_tests;

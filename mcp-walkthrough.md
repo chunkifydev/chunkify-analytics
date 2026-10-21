@@ -11,7 +11,8 @@ HTTP responses. This completes the manual MCP dashboard acceptance item in
 
 This is a development acceptance demo, not a built-in dashboard shipped with
 the collector. The separate [administrator and Docker acceptance](administrator-walkthrough.md)
-passed on 2026-10-21. Capacity/default decisions remain pending.
+passed on 2026-10-21. The [recommended configuration](configuration.md) is documented; capacity validation
+remains pending.
 
 ## Environment and method
 

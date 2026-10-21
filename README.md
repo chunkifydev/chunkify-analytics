@@ -44,7 +44,9 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 The [administrator and Docker walkthrough](administrator-walkthrough.md) passed
 on 2026-10-21, including project isolation, credential management, container
 replacement, backup/restore and a legacy database upgrade to schema 5. Capacity
-validation and final release checks remain pending.
+validation and final release checks remain pending. The
+[recommended configuration](configuration.md) selects direct ingestion with
+optional administrator tuning; experimental execution modes remain opt-in.
 
 This is a development version.
 
@@ -71,6 +73,7 @@ From this directory:
 cargo build --locked
 export COLLECTOR_DATA_DIR="$PWD/data"
 export COLLECTOR_ALLOWED_ORIGINS="http://127.0.0.1:4173"
+export COLLECTOR_DUCKDB_THREADS=1
 ./target/debug/chunkify-analytics-collector init
 ./target/debug/chunkify-analytics-collector serve
 ```
@@ -220,7 +223,15 @@ for measurements and workload limitations.
 
 ## Run with Docker
 
-Docker Engine 25 or later with BuildKit is required. From the repository root:
+Docker Engine 25 or later with BuildKit is required. From the repository root,
+copy [collector.env.example](collector.env.example) to `.env` and edit the website
+origin and installation policies before starting:
+
+```sh
+cp collector.env.example .env
+```
+
+This example uses the [recommended configuration](configuration.md). Then run:
 
 ```sh
 docker build -t chunkify-analytics-collector:local .
@@ -231,7 +242,7 @@ docker run --rm \
 docker run -d --name chunkify-analytics --restart unless-stopped \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
   -p 127.0.0.1:4174:4174 \
-  -e COLLECTOR_ALLOWED_ORIGINS=https://player.example.com \
+  --env-file .env \
   chunkify-analytics-collector:local
 ```
 
@@ -384,29 +395,57 @@ Serve public traffic through your HTTPS ingress. Internal HTTP is supported.
 
 ## Configuration
 
+Start with the [recommended mode, settings and tuning policy](configuration.md).
+[collector.env.example](collector.env.example) selects one DuckDB thread and
+keeps experimental modes disabled. The tables below show built-in defaults;
+without the example's thread override, DuckDB chooses its thread count automatically.
+Administrators can change these values before starting the process. Docker
+containers must be recreated to pick up edits to an environment file.
+
+### Installation and data policy
+
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
 | `COLLECTOR_DATA_DIR` | `./data` | Directory for keys, database, and write-ahead log, relative to the working directory. |
 | `COLLECTOR_BIND` | `127.0.0.1:4174` | Listening IP address and port. Use `0.0.0.0:4174` behind an ingress when needed. |
 | `COLLECTOR_ALLOWED_ORIGINS` | Empty | Comma-separated exact website origins, without paths or trailing slashes. Empty denies requests with an Origin header. Server requests without Origin still require the ingest key. |
-| `COLLECTOR_MAX_BODY_BYTES` | `65536` | Maximum request body size in bytes. OTLP gzip requests must fit this limit both before and after decompression. Must be positive. |
-| `COLLECTOR_MAX_OTLP_RECORDS` | `100` | Maximum log records per OTLP request, across all resource and scope groups, including duplicates. Must be positive. |
-| `COLLECTOR_BATCH_MAX_EVENTS` | `100` | Maximum records per write transaction, including duplicates. Range 1..10000. A whole request must fit. |
-| `COLLECTOR_BATCH_MAX_BYTES` | `1048576` | Maximum prepared request-buffer bytes per transaction. Range 1..67108864. See write batching below. |
-| `COLLECTOR_BATCH_DELAY_MS` | `10` | Maximum time the worker spends collecting a batch. Range 0..1000 ms. `0` gives each request its own transaction. |
-| `COLLECTOR_QUEUE_MAX_BYTES` | `16777216` | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
-| `COLLECTOR_QUEUE_MAX_REQUESTS` | `256` | Database channel capacity, shared by writes, reads and maintenance. Range 1..4096. The byte budget also applies to writes. |
-| `COLLECTOR_INSERT_MODE` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same batching and durability rules. |
-| `COLLECTOR_DUCKDB_THREADS` | Automatic | Optional DuckDB execution thread count, from 1..256. Applies to the shared database used by writes and reads. HTTP and replay threads are separate. |
-| `COLLECTOR_CHECKPOINT_THRESHOLD_MIB` | `16` | DuckDB's automatic checkpoint threshold, in MiB. Integer from 1..1024. Larger values allow a larger write-ahead log between checkpoints; see below. |
-| `COLLECTOR_INGEST_PER_SECOND` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
 | `COLLECTOR_RETENTION_SECONDS` | `2592000` | Retention by server receipt time, in seconds. Default is 30 days. `0` disables expiration. Must be a non-negative whole number no larger than `9223372036854775`. |
 | `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. Ignored when retention is disabled. |
 | `COLLECTOR_STORE_IP` | `true` | Store collector-derived request IP context. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
 | `COLLECTOR_TRUSTED_PROXIES` | Empty | Comma-separated literal IPv4/IPv6 addresses or CIDRs allowed to supply `X-Forwarded-For`. Empty trusts no proxies. No hostnames, ports, or wildcards. Use IPv4 CIDRs for IPv4-mapped addresses. |
+
+### Admission limits
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `COLLECTOR_MAX_BODY_BYTES` | `65536` | Maximum request body size in bytes. OTLP gzip requests must fit this limit both before and after decompression. Must be positive. |
+| `COLLECTOR_MAX_OTLP_RECORDS` | `100` | Maximum log records per OTLP request, across all resource and scope groups, including duplicates. Must be positive. |
+| `COLLECTOR_INGEST_PER_SECOND` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
+| `COLLECTOR_QUEUE_MAX_BYTES` | `16777216` | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
+| `COLLECTOR_QUEUE_MAX_REQUESTS` | `256` | Database channel capacity, shared by writes, reads and maintenance. Range 1..4096. The byte budget also applies to writes. |
+
+### Advanced performance settings
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `COLLECTOR_BATCH_MAX_EVENTS` | `100` | Maximum records per write transaction, including duplicates. Range 1..10000. A whole request must fit. |
+| `COLLECTOR_BATCH_MAX_BYTES` | `1048576` | Maximum prepared request-buffer bytes per transaction. Range 1..67108864. See write batching below. |
+| `COLLECTOR_BATCH_DELAY_MS` | `10` | Maximum time the worker spends collecting a batch. Range 0..1000 ms. `0` gives each request its own transaction. |
+| `COLLECTOR_DUCKDB_THREADS` | Automatic | Optional DuckDB execution thread count, from 1..256. Applies to the shared database used by writes and reads. HTTP and replay threads are separate. |
+| `COLLECTOR_CHECKPOINT_THRESHOLD_MIB` | `16` | DuckDB's automatic checkpoint threshold, in MiB. Integer from 1..1024. Larger values allow a larger write-ahead log between checkpoints; see below. |
+
+### Diagnostics
+
+| Environment variable | Default | Meaning |
+| --- | --- | --- |
+| `COLLECTOR_INSERT_MODE` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same batching and durability rules. |
 | `COLLECTOR_PROFILE` | `false` | Emit one aggregate database timing report to stderr when the worker drains on graceful shutdown. Accepts only `true` or `false`. No event values or credentials are included. Intended for local performance diagnosis. |
 
+### Limits and overload
+
 Both ingestion endpoints share the rate limit. A batch consumes one request.
+The default 100 requests/s is an adjustable admission policy, not a measured
+capacity limit. Project allowances also apply; see [project limits](#project-limits-and-origins).
 The service rejects excess ingestion requests with HTTP 429 and `Retry-After: 1`.
 The database channel holds at most 256 waiting operations by default; a full channel
 returns 503. The worker also holds its active batch and may hold one deferred

@@ -10,8 +10,8 @@ HTTP responses. This completes the manual MCP dashboard acceptance item in
 [issue #381](https://github.com/chunkifydev/chunkify/issues/381).
 
 This is a development acceptance demo, not a built-in dashboard shipped with
-the collector. Full Docker lifecycle acceptance and capacity/default decisions
-remain separate release checks.
+the collector. The separate [administrator and Docker acceptance](administrator-walkthrough.md)
+passed on 2026-10-21. Capacity/default decisions remain pending.
 
 ## Environment and method
 
@@ -109,6 +109,7 @@ is not claimed as completed by this record.
 The walkthrough validates one installed AI client and the current collector
 image. It does not certify Claude Code, arbitrary MCP clients, remote MCP/OAuth,
 a production dashboard authentication model, or high-load performance. The
-container replacement check is useful persistence evidence, but does not replace
-the outstanding schema-upgrade, credential-lifecycle and backup/restore Docker
-acceptance checks. CSV export and S3 archiving remain deferred.
+container replacement check provided persistence evidence. The later
+[administrator walkthrough](administrator-walkthrough.md) completed the separate
+schema-upgrade, credential-lifecycle and backup/restore checks. CSV export and S3
+archiving remain deferred.

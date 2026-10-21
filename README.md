@@ -41,6 +41,11 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
    [MCP setup and verification](mcp.md). MCP is required for the first release;
    the [Codex CLI dashboard walkthrough](mcp-walkthrough.md) passed on 2026-10-20.
 
+The [administrator and Docker walkthrough](administrator-walkthrough.md) passed
+on 2026-10-21, including project isolation, credential management, container
+replacement, backup/restore and a legacy database upgrade to schema 5. Capacity
+validation and final release checks remain pending.
+
 This is a development version.
 
 ## API contract

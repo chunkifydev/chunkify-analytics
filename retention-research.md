@@ -100,8 +100,10 @@ reworking our event deduplication, not just changing a storage path.
 
 ## Current collector
 
-The code currently has one 30-day retention period, based on receipt time.
-It deletes events and their original OTLP context together. It does not retain
+The installation defaults to 30-day retention based on receipt time. Projects
+can override that duration, disable expiry or inherit the default. Administrators
+can change an override live on Linux/macOS through `project-retention`. The
+collector deletes events and their original OTLP context together. It does not retain
 a separate historical aggregate after expiration.
 Sources: [configuration](src/config.rs), [storage and summary queries](src/store.rs),
 [retention documentation](README.md#retention).

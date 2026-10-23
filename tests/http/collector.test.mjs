@@ -1526,6 +1526,108 @@ test("project credentials rotate and revoke independently without changing owner
   assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0])).status, 201);
 });
 
+test("project retention updates live, preserves other settings, and persists across restart", async (t) => {
+  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  await server.stop();
+  const live = await projectCommand(server, ["project-create", "live"]);
+  const settings = join(server.directory, "live-settings.json");
+  await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], retention_seconds: 60 }));
+  await projectCommand(server, ["project-configure", "live", settings]);
+  await server.start();
+  const url = server.url;
+  const events = sdkEvents("shared-video");
+  events.at(-1).playing_time_ms = 1200;
+  for (const event of events) {
+    await server.send(event);
+    await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
+  }
+  await delay(1200);
+  const result = await projectCommand(server, ["project-retention", "live", "1"]);
+  assert.deepEqual(result, { project_id: "live", retention_seconds: 1, effective_retention_seconds: 1, restart_required: false });
+  const deadline = Date.now() + 7000;
+  while ((await server.get("/v1/events", live.read_token)).events.length && Date.now() < deadline) await delay(100);
+  assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
+  assert.equal((await server.get("/v1/summary", live.read_token)).total_playing_time_ms, 0);
+  assert.equal((await server.get("/v1/events")).events.length, events.length);
+  assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 1200);
+  const listed = (await projectCommand(server, ["project-list"])).find(p => p.id === "live");
+  assert.deepEqual(listed.settings.allowed_origins, ["https://live.example"]);
+  assert.equal(listed.effective_retention_seconds, 1);
+  assert.equal(server.url, url, "retention change must not restart the HTTP server");
+  // A retry after expiration is new data. Disable expiry before resending it.
+  await projectCommand(server, ["project-retention", "live", "0"]);
+  for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
+  await delay(2200);
+  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.equal((await projectCommand(server, ["project-list"])).find(p => p.id === "live").effective_retention_seconds, 0);
+  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  // The running server's default is authoritative, even if the CLI has a different environment.
+  const inherited = await server.command(["project-retention", "live", "inherit"], { COLLECTOR_RETENTION_SECONDS: "1" });
+  assert.equal(inherited.code, 0, inherited.stderr);
+  assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 0);
+  assert.equal(JSON.parse(inherited.stdout).retention_seconds, null);
+  // Enabling a policy after startup with all expiry disabled must start expiring data.
+  await projectCommand(server, ["project-retention", "default", "1"]);
+  const secondDeadline = Date.now() + 7000;
+  while ((await server.get("/v1/events")).events.length && Date.now() < secondDeadline) await delay(100);
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+});
+
+test("startup retention uses inherited, longer, shorter and disabled project policies", async (t) => {
+  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0" });
+  await server.stop();
+  const projects = [];
+  for (const id of ["short", "long", "keep"]) projects.push(await projectCommand(server, ["project-create", id]));
+  await server.start();
+  const event = sdkEvents()[0];
+  await server.send(event);
+  for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.ingest_key } });
+  await server.stop();
+  for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
+    assert.equal((await projectCommand(server, ["project-retention", id, seconds])).restart_required, true);
+  }
+  await delay(1200);
+  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  assert.equal((await server.get("/v1/events")).events.length, 0);
+  for (const project of projects) assert.equal((await server.get("/v1/events", project.read_token)).events.length, project.project_id === "short" ? 0 : 1);
+  await server.stop();
+  // Removing an override makes existing data eligible under the inherited policy at startup.
+  await projectCommand(server, ["project-retention", "long", "inherit"]);
+  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  assert.equal((await server.get("/v1/events", projects[1].read_token)).events.length, 0);
+  assert.equal((await server.get("/v1/events", projects[2].read_token)).events.length, 1);
+});
+
+test("invalid or unpersisted project retention changes preserve policy and data", async (t) => {
+  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  await server.send(sdkEvents()[0]);
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  for (const value of ["-1", "1.5", "abc", "9223372036854776", "18446744073709551616"]) {
+    assert.notEqual((await server.command(["project-retention", "default", value])).code, 0);
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+  assert.notEqual((await server.command(["project-retention", "missing", "1"])).code, 0);
+  await chmod(server.directory, 0o500);
+  try {
+    assert.notEqual((await server.command(["project-retention", "default", "1"])).code, 0);
+    assert.equal(await readFile(file, "utf8"), before);
+  } finally { await chmod(server.directory, 0o700); }
+  await delay(2200);
+  assert.equal((await projectCommand(server, ["project-list"]))[0].effective_retention_seconds, 0);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+  await server.stop();
+  const settings = join(server.directory, "settings.json");
+  for (const retention_seconds of [-1, 1.5, "1", 9223372036854776]) {
+    await writeFile(settings, JSON.stringify({ retention_seconds }));
+    assert.notEqual((await server.command(["project-configure", "default", settings])).code, 0);
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+});
+
 test("project origin policies and rate quotas apply across all of its keys", async (t) => {
   const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1000" });
   await server.stop();

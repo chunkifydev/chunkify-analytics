@@ -9,6 +9,7 @@ mod profile;
 mod projects;
 mod query;
 mod reader;
+mod retention;
 mod spool;
 mod storage;
 mod store;
@@ -33,29 +34,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let admin = admin::Server::bind(config.clone(), projects.clone(), keys)?;
             let (store, worker) = store::Store::open(&config.data_dir.join("analytics.duckdb"), config.batch.clone(), config.profile, config.checkpoint_threshold_mib, config.spool.clone(), config.separate_reads, config.duckdb_threads)?;
             store.drain().await.map_err(|_| "Queue recovery failed")?;
-            let removed = store.purge_expired(config.retention_seconds).await
+            let removed = store.purge_expired(projects.clone()).await
                 .map_err(|_| "Startup retention sweep failed")?;
             if removed > 0 { println!("Retention removed {removed} events"); }
             let listener = tokio::net::TcpListener::bind(config.bind).await?;
-            let retention = config.retention_seconds;
             let interval = std::time::Duration::from_secs(config.retention_interval_seconds);
-            let maintenance = if retention > 0 {
-                println!("Retention: {retention} seconds; sweep interval: {} seconds", interval.as_secs());
-                let maintenance_store = store.clone();
-                Some(tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(interval).await;
-                        match maintenance_store.purge_expired(retention).await {
-                            Ok(removed) if removed > 0 => println!("Retention removed {removed} events"),
-                            Err(_) => eprintln!("Retention sweep failed; will retry at the next interval"),
-                            _ => {},
-                        }
-                    }
-                }))
+            if projects.retention.read().expect("retention policy").enabled() {
+                println!("Retention: {} seconds by default; project overrides applied; sweep interval: {} seconds", config.retention_seconds, interval.as_secs());
             } else {
-                println!("Retention: disabled");
-                None
-            };
+                println!("Retention: disabled; project policies can be enabled live");
+            }
+            // Keep the timer active even when all policies are disabled, because
+            // the administrator can enable expiration without restarting.
+            let maintenance_store = store.clone();
+            let maintenance_projects = projects.clone();
+            let maintenance = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    match maintenance_store.purge_expired(maintenance_projects.clone()).await {
+                        Ok(removed) if removed > 0 => println!("Retention removed {removed} events"),
+                        Err(_) => eprintln!("Retention sweep failed; will retry at the next interval"),
+                        _ => {},
+                    }
+                }
+            });
             let shutdown = shutdown();
             let admin = admin.start();
             println!("Listening on http://{}", listener.local_addr()?);
@@ -64,10 +66,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .with_graceful_shutdown(shutdown)
                 .await;
             admin.stop().await;
-            if let Some(maintenance) = maintenance {
-                maintenance.abort();
-                let _ = maintenance.await;
-            }
+            maintenance.abort();
+            let _ = maintenance.await;
             drop(store);
             worker.join().map_err(|_| "Database worker panicked")??;
             result?;
@@ -86,9 +86,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", serde_json::json!({"deleted_events": result.map_err(|_| "Viewer deletion failed")?}));
             Ok(())
         }
-        (Some(command @ ("project-list" | "project-create" | "project-rename" | "project-configure" | "key-create" | "key-revoke" | "key-rotate")), args) => admin::command(&config, command, args).await,
+        (Some(command @ ("project-list" | "project-create" | "project-rename" | "project-configure" | "project-retention" | "key-create" | "key-revoke" | "key-rotate")), args) => admin::command(&config, command, args).await,
         (Some("rotate-key"), [_]) => admin::command(&config, "rotate-key", &parameters).await,
-        _ => Err("Usage: chunkify-analytics-collector init | serve | mcp | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
+        _ => Err("Usage: chunkify-analytics-collector init | serve | mcp | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | project-retention <id> <seconds|inherit> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
     }
 }
 

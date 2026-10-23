@@ -78,6 +78,7 @@ pub fn credential(name: &str, permission: Permission) -> (Credential, String) {
 #[serde(default, deny_unknown_fields)]
 pub struct Settings {
     pub allowed_origins: Option<Vec<String>>,
+    pub retention_seconds: Option<u64>,
     pub ingest_per_second: Option<u32>,
     pub queue_bytes: Option<usize>,
     pub spool_bytes: Option<usize>,
@@ -168,6 +169,13 @@ pub fn validate(projects: &[Project]) -> Result<(), String> {
                 return Err("Invalid or duplicate project credential".into());
             }
         }
+        if project
+            .settings
+            .retention_seconds
+            .is_some_and(|seconds| seconds > crate::retention::MAX_SECONDS)
+        {
+            return Err("Project retention_seconds is too large".into());
+        }
         if project.settings.ingest_per_second == Some(0) {
             return Err("Project ingest rate must be positive".into());
         }
@@ -257,6 +265,7 @@ impl Access {
 }
 
 pub struct Registry {
+    pub retention: RwLock<crate::retention::Policy>,
     pub projects: HashMap<String, Arc<Access>>,
     credentials: RwLock<HashMap<String, (Permission, Resolved)>>,
 }
@@ -273,6 +282,10 @@ impl Registry {
         validate(&projects)?;
         let count = projects.len();
         let mut registry = Self {
+            retention: RwLock::new(crate::retention::Policy::new(
+                config.retention_seconds,
+                &projects,
+            )),
             projects: HashMap::new(),
             credentials: RwLock::new(HashMap::new()),
         };
@@ -399,6 +412,14 @@ pub fn apply_command(
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
                 project.name = name.clone();
             }
+            ("project-retention", [id, value]) => {
+                let seconds = if value == "inherit" { None } else {
+                    Some(value.parse::<u64>().map_err(|_| "Expected retention seconds as a non-negative whole number, or inherit")?)
+                };
+                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                project.settings.retention_seconds = seconds;
+                output = serde_json::json!({"project_id": id, "retention_seconds": seconds, "restart_required": true});
+            }
             ("project-configure", [id, file]) => {
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
                 project.settings = serde_json::from_slice(&std::fs::read(file)?)?;
@@ -423,7 +444,7 @@ pub fn apply_command(
                 if id == DEFAULT_PROJECT && key_id == "primary-read" { keys.read_token = secret.clone(); }
                 output = serde_json::json!({"project_id": id, "key_id": key_id, "secret": secret, "restart_required": true});
             }
-            _ => return Err("Expected project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
+            _ => return Err("Expected project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | project-retention <id> <seconds|inherit> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
         }
     validate(&list)?;
     keys.projects = Some(list);

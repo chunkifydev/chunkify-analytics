@@ -460,5 +460,15 @@ for (const separateReads of [false, true]) {
     const result = await quality({ video_id: "large-number" });
     assert.equal(result.startup_time_ms.median, 9007199254740992);
     assert.equal(result.buffering.total_rebuffer_duration_ms, 9007199254740992);
+    const extreme = start("large-durations");
+    await server.post("/v1/events", JSON.stringify(extreme), 201);
+    await server.post("/v1/events", JSON.stringify(event(extreme, 2, "view_ended", 1e308, 1e308, 1e308)), 201);
+    assert.equal((await quality({ video_id: "large-durations" })).buffering.ratio, 0.5);
+    const overflow = start("large-durations");
+    await server.post("/v1/events", JSON.stringify(overflow), 201);
+    await server.post("/v1/events", JSON.stringify(event(overflow, 2, "view_ended", null, 1e308, 1e308)), 201);
+    await server.get("/v1/quality?video_id=large-durations", 500);
+
+
   });
 }

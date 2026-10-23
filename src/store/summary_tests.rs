@@ -124,7 +124,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             store
                 .quality("default".into(), Query::default())
                 .await
-                .unwrap(),
+                .unwrap_or_else(|error| panic!("{}", error.1)),
             json!({
                 "views":3, "startup_time_ms":{"sample_views":0,"median":null,"p95":null},
                 "buffering":{"sample_views":0,"total_playing_time_ms":0.0,"total_rebuffer_duration_ms":0.0,"ratio":null},

@@ -1744,7 +1744,7 @@
             }
           },
           "500": {
-            "description": "Storage operation failed.",
+            "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
             "headers": {
               "Cache-Control": {
                 "schema": {

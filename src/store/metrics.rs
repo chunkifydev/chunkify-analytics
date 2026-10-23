@@ -65,7 +65,8 @@ impl Store {
         self.read("quality", move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, values) = view_cohort(project, through, &filters, true);
-            connection.query_row(&format!("{sql}, quality_samples AS (
+            let (views, startup_samples, median, p95, buffering_samples, playing, buffering, affected) =
+                connection.query_row(&format!("{sql}, quality_samples AS (
                 SELECT *, measurement.startup_time_ms AS startup_time_ms,
                     measurement.rebuffer_duration_ms AS rebuffer_duration_ms,
                     measurement.playing_time_ms IS NOT NULL
@@ -81,21 +82,28 @@ impl Store {
                 COALESCE(SUM(rebuffer_duration_ms) FILTER (WHERE has_buffering_sample), 0),
                 COUNT(*) FILTER (WHERE has_fatal_error)
             FROM quality_samples"), params_from_iter(values.iter()), |row| {
-                let views = row.get::<_, i64>(0)?;
-                let playing = row.get::<_, f64>(5)?;
-                let buffering = row.get::<_, f64>(6)?;
-                let affected = row.get::<_, i64>(7)?;
-                Ok(json!({
-                    "views": views,
-                    "startup_time_ms": {"sample_views": row.get::<_, i64>(1)?,
-                        "median": row.get::<_, Option<f64>>(2)?, "p95": row.get::<_, Option<f64>>(3)?},
-                    "buffering": {"sample_views": row.get::<_, i64>(4)?,
-                        "total_playing_time_ms": playing, "total_rebuffer_duration_ms": buffering,
-                        "ratio": (playing + buffering > 0.0).then(|| buffering / (playing + buffering))},
-                    "fatal_errors": {"affected_views": affected,
-                        "ratio": (views > 0).then(|| affected as f64 / views as f64)},
-                }))
-            }).map_err(ApiError::from)
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?,
+                    row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?,
+                    row.get::<_, i64>(4)?, row.get::<_, f64>(5)?, row.get::<_, f64>(6)?, row.get::<_, i64>(7)?))
+            })?;
+            // Reject an unrepresentable aggregate instead of serializing infinity
+            // as null or reporting a misleading zero ratio.
+            if !playing.is_finite() || !buffering.is_finite()
+                || median.is_some_and(|v| !v.is_finite()) || p95.is_some_and(|v| !v.is_finite()) {
+                return Err(ApiError::internal());
+            }
+            // Scaling avoids overflow when two valid finite durations have a
+            // sum outside DOUBLE's range.
+            let scale = playing.max(buffering);
+            let ratio = (scale > 0.0).then(|| (buffering / scale) / (playing / scale + buffering / scale));
+            Ok(json!({
+                "views": views,
+                "startup_time_ms": {"sample_views": startup_samples, "median": median, "p95": p95},
+                "buffering": {"sample_views": buffering_samples,
+                    "total_playing_time_ms": playing, "total_rebuffer_duration_ms": buffering, "ratio": ratio},
+                "fatal_errors": {"affected_views": affected,
+                    "ratio": (views > 0).then(|| affected as f64 / views as f64)},
+            }))
         }).await
     }
 

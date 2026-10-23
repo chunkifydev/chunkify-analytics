@@ -120,6 +120,9 @@ measurement count as views, with no startup/buffering sample. Orphan events do
 not contribute. A final null startup value remains unknown even if an older
 snapshot had one. Read typed numeric columns and the lossless JSON fallback so
 integral JSON floats and large numeric values are not accidentally lost.
+Calculate ratios without overflowing the sum of two finite durations. If an
+aggregate itself cannot fit a finite response number, return 500 rather than
+serializing it as a misleading null or zero.
 
 No SDK or storage-schema changes, persisted aggregates, arbitrary SQL, grouped
 quality comparisons or quality time series are included. Existing summary,

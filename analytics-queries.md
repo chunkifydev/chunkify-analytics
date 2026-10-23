@@ -221,3 +221,25 @@ operation in OpenAPI, README and MCP, and explain the complete dashboard workflo
   modes, OpenAPI examples/responses and MCP discovery/parity/isolation pass.
 - Keep read tokens private and describe the distinction between the collector,
   a customer's dashboard, and the local MCP companion.
+
+### Third-stage verification, 2026-10-23
+
+Implemented in `2ddad6d` on `codex/analytics-timeseries`.
+
+- 25 Rust unit tests and four official-client MCP integration tests passed.
+  Formatting and Clippy across all targets passed.
+- 23 HTTP/OpenAPI/context-filter checks passed, including engagement in both
+  reader modes and regression checks for quality and time-series calculations.
+  Native and OTLP engagement results matched. MCP verified isolated projects
+  with overlapping event/view IDs and different watch-time/end totals.
+- Tests cover empty and zero cohorts, historical null measurements, all filters,
+  missing final delivery, failed/ongoing attempts, duplicate deliveries,
+  conflicting final events, identity mismatches and overflowing totals.
+- Standards and Spec reviews found no actionable findings.
+- Tests used small temporary databases and disposable containers. No SDK change,
+  schema migration, browser download or capacity benchmark was needed. Existing
+  deployed collectors were not changed.
+
+The README's dashboard workflow maps each HTTP operation to a customer-facing
+card, chart, table or event inspector and explains how the local MCP companion
+helps an AI coding tool build that dashboard.

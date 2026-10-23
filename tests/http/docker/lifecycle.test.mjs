@@ -46,3 +46,28 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
   const logs = await docker(["logs", server.name]);
   assert.ok(!logs.includes(server.keys.ingest_key) && !logs.includes(server.keys.read_token));
 });
+
+
+test("docker exec manages live keys in a non-root read-only container", { timeout: 120000 }, async (t) => {
+  const server = await containerCollector();
+  t.after(() => server.close());
+  const command = async (...args) => JSON.parse(await docker(["exec", server.name, "chunkify-analytics-collector", ...args]));
+  const token = await command("key-create", "default", "read", "Dashboard");
+  assert.equal(token.restart_required, false);
+  assert.equal(await docker(["exec", server.name, "stat", "-c", "%a", "/data/admin.sock"]), "600");
+  const status = async (secret) => (await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${secret}` } })).status;
+  assert.equal(await status(token.secret), 200);
+  const rotated = await command("key-rotate", "default", token.key_id);
+  assert.equal(rotated.key_id, token.key_id);
+  assert.equal(await status(token.secret), 401);
+  assert.equal(await status(rotated.secret), 200);
+  await server.stop("kill");
+  await server.start();
+  assert.equal(await status(token.secret), 401);
+  assert.equal(await status(rotated.secret), 200);
+  await command("key-revoke", "default", token.key_id);
+  assert.equal(await status(rotated.secret), 401);
+  assert.equal((await command("project-list"))[0].keys.length, 2);
+  const logs = await docker(["logs", server.name]);
+  assert.ok(!logs.includes(token.secret) && !logs.includes(rotated.secret));
+});

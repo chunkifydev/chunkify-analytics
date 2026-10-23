@@ -1,0 +1,555 @@
+//! Local administration uses the data-directory lock when stopped, or the
+//! running collector's private socket. It never opens a second database writer.
+use crate::{
+    config::{Config, Keys},
+    projects::{self, Registry},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::sync::Arc;
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    command: String,
+    args: Vec<String>,
+}
+
+type Reply = std::result::Result<Value, String>;
+
+fn live_command(command: &str) -> bool {
+    matches!(
+        command,
+        "project-list" | "key-create" | "key-rotate" | "key-revoke" | "rotate-key"
+    )
+}
+
+// Validation and persistence finish before swapping the in-memory credentials.
+// A failed write leaves both the active credentials and cached keys unchanged.
+fn execute(
+    config: &Config,
+    keys: &mut Keys,
+    registry: Option<&Registry>,
+    request: &Request,
+) -> Result<Value> {
+    if registry.is_some() && !live_command(&request.command) {
+        return Err("Stop the collector before changing projects or project settings.".into());
+    }
+    let mut next = keys.clone();
+    let mut output = projects::apply_command(&mut next, &request.command, &request.args)?;
+    if request.command != "project-list" {
+        let warning = config.save_keys(&next)?;
+        if let Some(registry) = registry {
+            registry.replace_keys(&next);
+            output["restart_required"] = false.into();
+        }
+        *keys = next;
+        if let Some(warning) = warning {
+            output["warning"] = warning.into();
+        }
+    }
+    Ok(output)
+}
+
+pub async fn command(config: &Config, command: &str, args: &[String]) -> Result<()> {
+    let request = Request {
+        command: command.into(),
+        args: args.to_vec(),
+    };
+    let output = if let Some(_lock) = config.try_lock()? {
+        execute(config, &mut config.keys()?, None, &request)?
+    } else if live_command(command) {
+        live::send(config, &request).await?
+    } else {
+        return Err("Stop the collector before changing projects or project settings.".into());
+    };
+    if command == "rotate-key" {
+        let suffix = if output["restart_required"] == false {
+            "The new key is active."
+        } else {
+            "Start the collector to use it."
+        };
+        println!(
+            "Rotated {} key. Read the new value from keys.json. {suffix}",
+            args[0]
+        );
+        if let Some(warning) = output["warning"].as_str() {
+            eprintln!("{warning}");
+        }
+    } else {
+        println!("{output}");
+    }
+    Ok(())
+}
+
+pub use live::Server;
+
+#[cfg(unix)]
+mod live {
+    use super::*;
+    use std::{
+        fs, io,
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
+        path::PathBuf,
+        time::Duration,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{UnixListener, UnixStream},
+        sync::oneshot,
+        task::JoinHandle,
+        time::timeout,
+    };
+
+    const REQUEST_LIMIT: u64 = 16 * 1024;
+    const REPLY_LIMIT: u64 = 32 * 1024 * 1024;
+    const IO_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn socket_path(config: &Config, create: bool) -> Result<(PathBuf, Option<PathBuf>)> {
+        let directory = fs::canonicalize(&config.data_dir)?;
+        let path = directory.join("admin.sock");
+        // Use the smaller macOS limit on both platforms. Resolve aliases first
+        // so the server and CLI choose the same address for the same directory.
+        if path.as_os_str().as_bytes().len() < 104 {
+            return Ok((path, None));
+        }
+        // SAFETY: geteuid takes no pointers and only returns the process identity.
+        let uid = unsafe { libc::geteuid() };
+        let digest = ring::digest::digest(&ring::digest::SHA256, directory.as_os_str().as_bytes());
+        let hash: String = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let locator = directory.join("admin.socket-id");
+        let runtime_for = |id: uuid::Uuid| {
+            PathBuf::from(format!(
+                "/tmp/ck-admin-{uid}-{}-{}",
+                &hash[..32],
+                id.simple()
+            ))
+        };
+        let runtime = if create {
+            // An unpredictable suffix prevents another local user from reserving
+            // our runtime path before startup. The private data directory holds
+            // the locator; the canonical-path hash keeps restored copies apart.
+            if let Ok(previous) = fs::read_to_string(&locator)
+                && let Ok(id) = uuid::Uuid::parse_str(&previous)
+            {
+                let stale = runtime_for(id);
+                if fs::symlink_metadata(&stale)
+                    .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o777 == 0o700)
+                {
+                    let socket = stale.join("s");
+                    if fs::symlink_metadata(&socket)
+                        .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
+                    {
+                        let _ = fs::remove_file(socket);
+                    }
+                    let _ = fs::remove_dir(stale);
+                }
+            }
+            let id = uuid::Uuid::new_v4();
+            let runtime = runtime_for(id);
+            fs::DirBuilder::new().mode(0o700).create(&runtime)?;
+            let temporary = directory.join(format!(".admin-{id}.tmp"));
+            let saved = (|| -> io::Result<()> {
+                use std::io::Write;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&temporary)?;
+                file.write_all(id.to_string().as_bytes())?;
+                drop(file);
+                fs::rename(&temporary, &locator)
+            })();
+            if let Err(error) = saved {
+                let _ = fs::remove_file(temporary);
+                let _ = fs::remove_dir(runtime);
+                return Err(error.into());
+            }
+            runtime
+        } else {
+            runtime_for(uuid::Uuid::parse_str(&fs::read_to_string(locator)?)?)
+        };
+        let metadata = fs::symlink_metadata(&runtime)?;
+        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+            return Err("Unsafe local administration directory in /tmp; expected a private directory owned by the collector user.".into());
+        }
+        Ok((runtime.join("s"), Some(runtime)))
+    }
+
+    // Remove only the socket we bound, including on startup failure. A crashed
+    // collector leaves a socket that the next exclusive lock owner can replace.
+    struct SocketFile {
+        path: PathBuf,
+        inode: u64,
+        runtime_directory: Option<PathBuf>,
+    }
+    impl Drop for SocketFile {
+        fn drop(&mut self) {
+            if fs::symlink_metadata(&self.path)
+                .is_ok_and(|m| m.file_type().is_socket() && m.ino() == self.inode)
+            {
+                let _ = fs::remove_file(&self.path);
+                if let Some(directory) = &self.runtime_directory {
+                    let _ = fs::remove_dir(directory);
+                }
+            }
+        }
+    }
+
+    pub struct Server {
+        listener: UnixListener,
+        socket: SocketFile,
+        config: Arc<Config>,
+        registry: Arc<Registry>,
+        keys: Keys,
+        uid: u32,
+    }
+
+    impl Server {
+        // Caller must hold the exclusive data-directory lock for this lifetime.
+        pub fn bind(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Result<Self> {
+            let (path, runtime_directory) = socket_path(&config, true)?;
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(&path)?,
+                Ok(_) => return Err("admin.sock already exists and is not a socket; move it before starting the collector.".into()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error.into()),
+            }
+            let listener = UnixListener::bind(&path)?;
+            let metadata = fs::symlink_metadata(&path)?;
+            let socket = SocketFile {
+                path,
+                inode: metadata.ino(),
+                runtime_directory,
+            };
+            fs::set_permissions(&socket.path, fs::Permissions::from_mode(0o600))?;
+            Ok(Self {
+                listener,
+                socket,
+                config,
+                registry,
+                keys,
+                uid: metadata.uid(),
+            })
+        }
+
+        pub fn start(self) -> Running {
+            let (stop, mut stopped) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let Self {
+                    listener,
+                    socket,
+                    config,
+                    registry,
+                    mut keys,
+                    uid,
+                } = self;
+                loop {
+                    let connection = tokio::select! {
+                        biased;
+                        _ = &mut stopped => break,
+                        connection = listener.accept() => connection,
+                    };
+                    let Ok((mut stream, _)) = connection else {
+                        eprintln!("Local administration listener failed");
+                        break;
+                    };
+                    // macOS does not enforce socket file permissions for connect.
+                    // Peer credentials also restrict access on a shared host.
+                    if !stream
+                        .peer_cred()
+                        .is_ok_and(|peer| peer.uid() == uid || peer.uid() == 0)
+                    {
+                        continue;
+                    }
+                    let request =
+                        timeout(IO_TIMEOUT, receive::<Request>(&mut stream, REQUEST_LIMIT)).await;
+                    let reply = match request {
+                        Ok(Ok(request)) => {
+                            let config = config.clone();
+                            let registry = registry.clone();
+                            let result = tokio::task::spawn_blocking(move || {
+                                let reply = execute(&config, &mut keys, Some(&registry), &request)
+                                    .map_err(|e| e.to_string());
+                                (keys, reply)
+                            })
+                            .await;
+                            match result {
+                                Ok((updated, reply)) => {
+                                    keys = updated;
+                                    reply
+                                }
+                                Err(_) => {
+                                    eprintln!("Local administration worker failed");
+                                    break;
+                                }
+                            }
+                        }
+                        _ => Err("Invalid or incomplete administration request".into()),
+                    };
+                    if let Ok(bytes) = serde_json::to_vec(&reply) {
+                        let _ = timeout(IO_TIMEOUT, stream.write_all(&bytes)).await;
+                    }
+                }
+                drop(listener);
+                drop(socket);
+            });
+            Running { stop, task }
+        }
+    }
+
+    pub struct Running {
+        stop: oneshot::Sender<()>,
+        task: JoinHandle<()>,
+    }
+    impl Running {
+        pub async fn stop(self) {
+            let _ = self.stop.send(());
+            if self.task.await.is_err() {
+                eprintln!("Local administration worker failed during shutdown");
+            }
+        }
+    }
+
+    async fn receive<T: serde::de::DeserializeOwned>(
+        stream: &mut UnixStream,
+        limit: u64,
+    ) -> std::result::Result<T, String> {
+        let mut bytes = Vec::new();
+        stream
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|_| "Administration connection failed")?;
+        if bytes.len() as u64 > limit {
+            return Err("Administration message is too large".into());
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "Invalid administration message".into())
+    }
+
+    pub(super) async fn send(config: &Config, request: &Request) -> Result<Value> {
+        let bytes = serde_json::to_vec(request)?;
+        if bytes.len() as u64 > REQUEST_LIMIT {
+            return Err("Administration request is too large".into());
+        }
+        let (path, _) = socket_path(config, false)?;
+        let metadata = fs::symlink_metadata(&path).map_err(|_| "Data directory is busy and local administration is unavailable. Wait for startup/shutdown or stop the collector first.")?;
+        if !metadata.file_type().is_socket() {
+            return Err("admin.sock is not a socket".into());
+        }
+        let exchange = async {
+            let mut stream = UnixStream::connect(path).await.map_err(|_| "Cannot connect to the running collector; wait for startup/shutdown or stop it first.")?;
+            if stream
+                .peer_cred()
+                .map_err(|_| "Cannot verify administration server")?
+                .uid()
+                != metadata.uid()
+            {
+                return Err("Administration server owner does not match the socket".into());
+            }
+            stream
+                .write_all(&bytes)
+                .await
+                .map_err(|_| "Administration request could not be sent")?;
+            stream
+                .shutdown()
+                .await
+                .map_err(|_| "Administration request could not be sent")?;
+            receive::<Reply>(&mut stream, REPLY_LIMIT).await?
+        };
+        timeout(Duration::from_secs(15), exchange).await
+            .map_err(|_| "Administration timed out; the change may have been applied. Check project-list before retrying.")?
+            .map_err(Into::into)
+    }
+}
+
+#[cfg(not(unix))]
+mod live {
+    use super::*;
+    pub struct Server;
+    impl Server {
+        pub fn bind(_: Arc<Config>, _: Arc<Registry>, _: Keys) -> Result<Self> {
+            Ok(Self)
+        }
+        pub fn start(self) -> Self {
+            self
+        }
+        pub async fn stop(self) {}
+    }
+    pub(super) async fn send(_: &Config, _: &Request) -> Result<Value> {
+        Err("Live key administration requires Linux or macOS. Stop the collector before running this command.".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, path::PathBuf};
+
+    struct Fixture {
+        config: Arc<Config>,
+        keys: Keys,
+        registry: Arc<Registry>,
+        directory: PathBuf,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let mut config = Config::load().unwrap();
+            config.data_dir = std::env::temp_dir().join(format!(
+                "ck-admin-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..12]
+            ));
+            config.initialize().unwrap();
+            let keys = config.keys().unwrap();
+            let registry = Arc::new(Registry::new(&keys, &config).unwrap());
+            Self {
+                directory: config.data_dir.clone(),
+                config: Arc::new(config),
+                keys,
+                registry,
+            }
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+    fn request(command: &str, args: &[&str]) -> Request {
+        Request {
+            command: command.into(),
+            args: args.iter().map(|value| (*value).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn key_changes_preserve_in_flight_admissions_and_access_state() {
+        let mut fixture = Fixture::new();
+        let access = fixture
+            .registry
+            .authorize(&fixture.keys.ingest_key, projects::Permission::Ingest)
+            .ok()
+            .unwrap()
+            .project;
+        let permit = access.admit(access.queue_bytes).ok().unwrap();
+        let output = execute(
+            &fixture.config,
+            &mut fixture.keys,
+            Some(&fixture.registry),
+            &request("key-rotate", &["default", "primary-ingest"]),
+        )
+        .unwrap();
+        let updated = fixture
+            .registry
+            .authorize(
+                output["secret"].as_str().unwrap(),
+                projects::Permission::Ingest,
+            )
+            .ok()
+            .unwrap()
+            .project;
+        assert!(Arc::ptr_eq(&access, &updated));
+        assert!(updated.admit(1).is_err());
+        drop(permit);
+        assert!(updated.admit(1).is_ok());
+    }
+
+    #[test]
+    fn failed_rename_keeps_disk_and_active_keys_unchanged() {
+        let mut fixture = Fixture::new();
+        let file = fixture.directory.join("keys.json");
+        let backup = fixture.directory.join("original.json");
+        let before = fs::read(&file).unwrap();
+        fs::rename(&file, &backup).unwrap();
+        fs::create_dir(&file).unwrap();
+        assert!(
+            execute(
+                &fixture.config,
+                &mut fixture.keys,
+                Some(&fixture.registry),
+                &request("key-rotate", &["default", "primary-ingest"])
+            )
+            .is_err()
+        );
+        assert!(
+            fixture
+                .registry
+                .authorize(&fixture.keys.ingest_key, projects::Permission::Ingest)
+                .is_ok()
+        );
+        assert_eq!(serde_json::to_vec_pretty(&fixture.keys).unwrap(), before);
+        assert!(!fs::read_dir(&fixture.directory).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".keys-")
+        }));
+        fs::remove_dir(file).unwrap();
+        fs::rename(backup, fixture.directory.join("keys.json")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn private_socket_rejects_invalid_requests_and_cleans_up() {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::UnixStream,
+        };
+        let fixture = Fixture::new();
+        let _lock = fixture.config.lock().unwrap();
+        let path = fixture.directory.join("admin.sock");
+        // Never delete a regular file found where the socket should be.
+        fs::write(&path, b"keep").unwrap();
+        assert!(
+            Server::bind(
+                fixture.config.clone(),
+                fixture.registry.clone(),
+                fixture.keys.clone()
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+        fs::remove_file(&path).unwrap();
+        let server = Server::bind(
+            fixture.config.clone(),
+            fixture.registry.clone(),
+            fixture.keys.clone(),
+        )
+        .unwrap()
+        .start();
+        for body in [
+            "invalid".into(),
+            "x".repeat(16385),
+            serde_json::to_string(&request("project-create", &["blocked"])).unwrap(),
+            r#"{"command":"project-list","args":[],"unexpected":true}"#.into(),
+        ] {
+            let mut stream = UnixStream::connect(&path).await.unwrap();
+            stream.write_all(body.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).await.unwrap();
+            assert!(serde_json::from_slice::<Reply>(&bytes).unwrap().is_err());
+        }
+        assert_eq!(
+            live::send(&fixture.config, &request("project-list", &[]))
+                .await
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        server.stop().await;
+        assert!(!path.exists());
+    }
+}

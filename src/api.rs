@@ -70,10 +70,10 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn router(store: Store, projects: Registry, config: &Config) -> Router {
+pub fn router(store: Store, projects: Arc<Registry>, config: &Config) -> Router {
     let app = App {
         store,
-        projects: Arc::new(projects),
+        projects,
         max_body_bytes: config.max_body_bytes,
         max_otlp_records: config.max_otlp_records,
         store_ip: config.store_ip,

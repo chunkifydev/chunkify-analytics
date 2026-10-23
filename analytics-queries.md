@@ -243,3 +243,61 @@ Implemented in `2ddad6d` on `codex/analytics-timeseries`.
 The README's dashboard workflow maps each HTTP operation to a customer-facing
 card, chart, table or event inspector and explains how the local MCP companion
 helps an AI coding tool build that dashboard.
+
+
+## Dashboard acceptance, 2026-10-23
+
+The reusable example is in `examples/dashboard`. It has Overview, Playback
+quality, Engagement and Events pages, common cohort filters, manual refresh,
+a paginated video table and a drawer for the latest ten stored events. Node
+keeps each project's private read token on the backend. The existing Player test
+project remains separate from an explicitly labelled synthetic demo project.
+
+The actual stdio MCP companion was used for `tools/list`, `describe_api` for the
+three new operations, and `get_summary`, `get_quality`, `get_engagement` and
+`get_timeseries`. Its structured `data` matched the dashboard proxy responses
+with identical date/project scope. This validates an MCP-assisted dashboard
+workflow; the generated dashboard itself uses the HTTP API at runtime.
+
+The demo contains 816 events for 268 attempts across nine videos and seven days.
+Independent fixture calculations and real collector responses agree on 91
+supplied viewer IDs, 65,068,260 ms playing time, 170 reached-end views and 12
+fatal-error views. Startup has 236 samples, median 1,021 ms and p95 1,909 ms.
+Buffering has 256 samples and 467,546 ms rebuffer time, a ratio of approximately
+0.0071342. These are synthetic presentation data, not capacity measurements.
+
+The live walkthrough exposed a packaging defect missed by the earlier tests:
+quality SQL needed DuckDB's JSON extension, which the test environment could
+automatically install. The non-root runtime container had no writable home and
+returned 500 even for an empty quality query. Enabling the pinned DuckDB crate's
+`json` feature bundles the extension into the executable, with no runtime
+download or privilege change. A packaged regression failed before the fix and
+passed afterwards. The crate's feature definition is documented at
+https://docs.rs/crate/duckdb/1.10506.0/features.
+
+A second packaged regression confirmed that two accepted `1e308` playing-time
+values could produce a 200 timeline response with a null total. The timeline now
+rejects that unrepresentable aggregate with 500, as quality and engagement do.
+The regression failed before the guard and passed with it.
+
+Validation:
+
+- Ten dashboard backend tests passed. They cover project/route isolation, exact
+  filters, bounded event scans, large records, credential redaction and local
+  host/origin restrictions.
+- Both packaged regressions passed in the actual non-root, read-only runtime.
+- Browser checks passed for all four pages, nine-video pagination, video
+  drilldown, UTC dates, combined browser/device filters, explicit Refresh,
+  empty/null metrics, event JSON and Escape dismissal. October 23 alone returned
+  47 attempts; adding mobile and Safari returned 16. Player test retained its
+  three views and 14,281.60000038147 ms of playing time.
+- No browser console errors were observed. Source and browser responses were
+  checked for leaked runtime credentials; none were found.
+- Standards review: no remaining blockers. The event scan now has a shared
+  20-second deadline, and event-read failures preserve successful aggregates.
+- Spec review: no remaining blockers. Startup and buffering previews now include
+  sample counts; event pages use ten records per request while keeping the
+  2,000-record scan limit.
+
+The local demo stays running for manual testing. The branch's GitHub checks are
+still required before merge; the local checks above do not replace CI.

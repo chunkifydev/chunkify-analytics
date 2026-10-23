@@ -74,8 +74,10 @@ function svgElement(tag, attrs = {}, text) {
 function chart(id, metric) {
   const root = $(id); root.replaceChildren();
   if (!series.length) return;
-  const values = series.map(b => b[metric]), max = Math.max(...values, 1), isTime = metric === 'total_playing_time_ms';
-  const svg = svgElement('svg', { viewBox: '0 0 1000 230', role: 'img', 'aria-label': `${isTime ? 'Watch time' : 'Views'} by view start day in UTC. ${series.length} days. ${values.every(v => v === 0) ? 'No matching activity.' : 'Exact daily values are available in the chart data table on Overview.'}` });
+  const values = series.map(b => b[metric]), isTime = metric === 'total_playing_time_ms';
+  const maximum = Math.max(...values, 1);
+  const max = isTime ? maximum : Math.ceil(maximum / 4) * 4;
+  const svg = svgElement('svg', { viewBox: '0 0 1000 230', role: 'img', 'aria-label': `${isTime ? 'Watch time' : 'Views'} by view start day in UTC. ${series.length} ${series.length === 1 ? 'day' : 'days'}. ${values.every(v => v === 0) ? 'No matching activity.' : 'Exact daily values are available in the chart data table on Overview.'}` });
   const left = 65, width = 915, top = 15, height = 170, slot = width / values.length;
   for (let i = 0; i <= 4; i++) {
     const y = top + height * i / 4;

@@ -9,8 +9,8 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 ## Implementation stages
 
 1. Native HTTP ingestion, durable storage, separate ingest/read keys, event queries,
-   and summary metrics. Implemented. Hourly/daily start-cohort charts are available
-   through HTTP and MCP; see [analytics queries and verification](analytics-queries.md).
+   and summary metrics. Implemented. Hourly/daily start-cohort charts and playback
+   quality summaries are available through HTTP and MCP; see [analytics queries and verification](analytics-queries.md).
 2. OTLP/HTTP JSON ingestion, including batched logs and gzip. Implemented.
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.
@@ -547,6 +547,7 @@ your ingress before exposing this development service publicly.
 | `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch commits, including empty or duplicate-only batches. |
 | `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/quality` | `Authorization: Bearer READ_TOKEN` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
 | `GET /v1/timeseries` | `Authorization: Bearer READ_TOKEN` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
 | `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
@@ -753,6 +754,64 @@ New snapshots, final events, deletion or retention can change later results.
 
 The MCP companion exposes the same operation as `get_timeseries`. See
 [analytics query scope](analytics-queries.md) for the first stage and later work.
+
+### Playback quality
+
+`GET /v1/quality` returns startup time, buffering and observed fatal errors for
+one project's view cohort. It accepts the same optional date, video, viewer,
+browser, OS and device filters as summary. Pagination and event-name filters are
+not supported. Keep the read token on your backend.
+
+```sh
+curl --get 'http://127.0.0.1:4174/v1/quality' \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  --data-urlencode 'from=2026-10-19T00:00:00Z' \
+  --data-urlencode 'to=2026-10-21T00:00:00Z'
+```
+
+```json
+{
+  "views": 4,
+  "startup_time_ms": {
+    "sample_views": 2,
+    "median": 200,
+    "p95": 290
+  },
+  "buffering": {
+    "sample_views": 2,
+    "total_playing_time_ms": 9000,
+    "total_rebuffer_duration_ms": 1000,
+    "ratio": 0.1
+  },
+  "fatal_errors": {
+    "affected_views": 1,
+    "ratio": 0.25
+  }
+}
+```
+
+`startup_time_ms` gives the median and p95 of available startup measurements.
+P95 describes the slow end of the sample; percentiles use linear interpolation.
+`sample_views` shows how many views supplied a measurement. A measured zero is
+valid, while no samples returns null percentiles.
+
+`buffering.ratio` divides total rebuffer time by playing plus rebuffer time. It
+weights views by their measured durations. Only views with both durations and a
+positive combined duration contribute. Its time totals cover those samples;
+no samples returns zero totals and a null ratio. The SDK excludes startup wait,
+pauses and seeks from rebuffer time. Multiply ratios by 100 to display percentages.
+
+`fatal_errors.affected_views` counts each view once if any matching retained
+playback error is fatal. Its ratio uses all selected attempts, including failures
+before playback. Zero means no fatal error was observed; lost events can still
+hide failures. No views returns a null ratio.
+
+The final event supplies startup and buffering measurements, or the latest
+snapshot if no final event exists. Cumulative snapshots are never added together.
+A final null value stays unknown. All filters select the first retained start;
+matching later measurements/errors contribute even after `to`. Start-only views
+have no startup/buffering sample. Views without a retained start are excluded.
+The MCP companion provides the same result through `get_quality`.
 
 The server stores receipt time separately for retention and operations.
 Server operational messages use stdout/stderr and contain no keys. CLI commands

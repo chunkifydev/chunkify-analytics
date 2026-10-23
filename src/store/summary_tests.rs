@@ -118,6 +118,19 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 .unwrap_or_else(|error| panic!("{}", error.1)),
             totals(1, 1, 900.0)
         );
+        // Historical records can lack durations. Available playing time alone
+        // must not turn an unknown buffering measurement into a zero sample.
+        assert_eq!(
+            store
+                .quality("default".into(), Query::default())
+                .await
+                .unwrap(),
+            json!({
+                "views":3, "startup_time_ms":{"sample_views":0,"median":null,"p95":null},
+                "buffering":{"sample_views":0,"total_playing_time_ms":0.0,"total_rebuffer_duration_ms":0.0,"ratio":null},
+                "fatal_errors":{"affected_views":0,"ratio":0.0}
+            })
+        );
         let first = store
             .summary(
                 "default".into(),

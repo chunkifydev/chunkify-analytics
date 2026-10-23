@@ -22,7 +22,7 @@ impl Store {
             .transpose()?;
         self.read(if per_video { "videos" } else { "summary" }, move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
-            let (sql, mut values) = view_cohort(project.clone(), through, &filters);
+            let (sql, mut values) = view_cohort(project.clone(), through, &filters, false);
             if !per_video {
                 let result = connection.query_row(&format!("{sql}
                     SELECT COUNT(*), COUNT(DISTINCT viewer_id), COALESCE(SUM(playing_time_ms), 0) FROM view_metrics"),
@@ -57,6 +57,48 @@ impl Store {
         }).await
     }
 
+    pub async fn quality(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if query.event_name.is_some() || query.cursor.is_some() || query.limit.is_some() {
+            return Err(ApiError::bad("Unsupported quality query parameter"));
+        }
+        let filters = query.filters()?;
+        self.read("quality", move |connection| {
+            let through = watermark(connection, &project)?;
+            let (sql, values) = view_cohort(project, through, &filters, true);
+            connection.query_row(&format!("{sql}, quality_samples AS (
+                SELECT *, measurement.startup_time_ms AS startup_time_ms,
+                    measurement.rebuffer_duration_ms AS rebuffer_duration_ms,
+                    measurement.playing_time_ms IS NOT NULL
+                        AND measurement.rebuffer_duration_ms IS NOT NULL
+                        AND (measurement.playing_time_ms > 0 OR measurement.rebuffer_duration_ms > 0)
+                        AS has_buffering_sample
+                FROM view_metrics
+            )
+            SELECT COUNT(*), COUNT(startup_time_ms),
+                quantile_cont(startup_time_ms, 0.5), quantile_cont(startup_time_ms, 0.95),
+                COUNT(*) FILTER (WHERE has_buffering_sample),
+                COALESCE(SUM(playing_time_ms) FILTER (WHERE has_buffering_sample), 0),
+                COALESCE(SUM(rebuffer_duration_ms) FILTER (WHERE has_buffering_sample), 0),
+                COUNT(*) FILTER (WHERE has_fatal_error)
+            FROM quality_samples"), params_from_iter(values.iter()), |row| {
+                let views = row.get::<_, i64>(0)?;
+                let playing = row.get::<_, f64>(5)?;
+                let buffering = row.get::<_, f64>(6)?;
+                let affected = row.get::<_, i64>(7)?;
+                Ok(json!({
+                    "views": views,
+                    "startup_time_ms": {"sample_views": row.get::<_, i64>(1)?,
+                        "median": row.get::<_, Option<f64>>(2)?, "p95": row.get::<_, Option<f64>>(3)?},
+                    "buffering": {"sample_views": row.get::<_, i64>(4)?,
+                        "total_playing_time_ms": playing, "total_rebuffer_duration_ms": buffering,
+                        "ratio": (playing + buffering > 0.0).then(|| buffering / (playing + buffering))},
+                    "fatal_errors": {"affected_views": affected,
+                        "ratio": (views > 0).then(|| affected as f64 / views as f64)},
+                }))
+            }).map_err(ApiError::from)
+        }).await
+    }
+
     pub async fn timeseries(
         &self,
         project: String,
@@ -65,7 +107,7 @@ impl Store {
         let window = query.validate()?;
         self.read("timeseries", move |connection| {
             let through = watermark(connection, &project)?;
-            let (sql, mut values) = view_cohort(project, through, &window.filters);
+            let (sql, mut values) = view_cohort(project, through, &window.filters, false);
             let width = window.interval.milliseconds();
             values.extend([
                 SqlValue::BigInt(window.first_bucket_ms),
@@ -119,6 +161,7 @@ fn view_cohort(
     project: String,
     through: i64,
     filters: &crate::query::Filters,
+    include_quality: bool,
 ) -> (String, Vec<SqlValue>) {
     let (conditions, filter_values) = filters.sql();
     let mut values = vec![SqlValue::BigInt(through), SqlValue::Text(project.clone())];
@@ -127,7 +170,22 @@ fn view_cohort(
     // whole cumulative value, even when its final event occurs after the date range.
     // Group starts and measurements by identity in one scan. Then choose the
     // earliest start across identities, before applying any cohort filters.
-    // arg_max_null keeps a winning NULL measurement instead of using an older value.
+    // Selecting a struct keeps all measurements from the same winning event,
+    // including NULL values. Basic metrics avoid reading extra quality columns.
+    let (quality_fields, error_aggregate, quality_projection, error_events) = if include_quality {
+        (
+            format!(
+                ", startup_time_ms := {}, rebuffer_duration_ms := {}",
+                stored_number("startup_time_ms"),
+                stored_number("rebuffer_duration_ms")
+            ),
+            ", bool_or(event_name = 'chunkify.video.playback_error' AND e_error_fatal = TRUE) AS has_fatal_error",
+            ", measurement, has_fatal_error",
+            ", 'chunkify.video.playback_error'",
+        )
+    } else {
+        (String::new(), "", "", "")
+    };
     let sql = format!("WITH per_identity AS (
         SELECT view_id, video_id, viewer_id,
             arg_min(struct_pack(
@@ -139,12 +197,13 @@ fn view_cohort(
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS first_start,
             min((sequence, occurred_at_ms, ingest_id))
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS start_order,
-            arg_max_null(playing_time_ms,
+            arg_max(struct_pack(playing_time_ms := playing_time_ms{quality_fields}),
                 (event_name = 'chunkify.video.view_ended', sequence, occurred_at_ms, ingest_id))
-                FILTER (WHERE event_name IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended')) AS playing_time_ms
+                FILTER (WHERE event_name IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended')) AS measurement
+            {error_aggregate}
         FROM events
         WHERE ingest_id <= ? AND project_id = ?
-            AND event_name IN ('chunkify.video.view_started', 'chunkify.video.view_snapshot', 'chunkify.video.view_ended')
+            AND event_name IN ('chunkify.video.view_started', 'chunkify.video.view_snapshot', 'chunkify.video.view_ended'{error_events})
         GROUP BY view_id, video_id, viewer_id
     ), started AS (
         SELECT view_id, video_id, viewer_id,
@@ -152,11 +211,21 @@ fn view_cohort(
             first_start.context_browser_name AS context_browser_name,
             first_start.context_os_name AS context_os_name,
             first_start.context_device_type AS context_device_type,
-            COALESCE(playing_time_ms, 0) AS playing_time_ms
+            COALESCE(measurement.playing_time_ms, 0) AS playing_time_ms{quality_projection}
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT occurred_at_ms, video_id, viewer_id, playing_time_ms FROM started WHERE {conditions}
+        SELECT occurred_at_ms, video_id, viewer_id, playing_time_ms{quality_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
+}
+
+// Storage preserves some numeric representations in JSON, notably integral
+// floats. These field names are fixed by this module, never supplied by callers.
+fn stored_number(field: &str) -> String {
+    format!(
+        "COALESCE(e_{field}, CASE
+        WHEN json_type(event_remainder, '$.{field}') IN ('BIGINT', 'UBIGINT', 'DOUBLE')
+        THEN TRY_CAST(json_extract(event_remainder, '$.{field}') AS DOUBLE) END)"
+    )
 }

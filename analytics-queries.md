@@ -47,8 +47,7 @@ database queries or new persistent copies of analytics data are introduced.
 
 ## Later stages
 
-Playback-quality summaries, grouped comparisons and view-detail lookups can
-follow separately. Accurate watched-segment retention requires SDK work. These
+Grouped comparisons and view-detail lookups can follow separately. Accurate watched-segment retention requires SDK work. These
 features are outside this first stage.
 
 ## Verification, 2026-10-23
@@ -86,3 +85,56 @@ fixture with only the columns needed for the metrics. They do not measure HTTP
 throughput, concurrent ingestion, cold caches or production sizing. The probe
 asserted that its temporary database was removed after the run. The measurements
 support proceeding with this first stage without a new storage structure.
+
+## Second stage: playback quality summary
+
+Expose `GET /v1/quality` and MCP `get_quality` using the existing project read
+token and optional `from`, `to`, `video_id`, `viewer_id`, `browser_name`, `os_name`
+and `device_type` filters. Reject pagination, event-name and unknown parameters.
+Dates and identity/context filters select the first retained start exactly as in
+summary. One view contributes at most once, under one ingestion watermark.
+
+Return `views` and these groups:
+
+- `startup_time_ms`: `sample_views`, `median`, `p95`. Use non-null numeric startup
+  measurements from the winning final event, or latest snapshot when no final
+  event exists. Zero is a valid measurement. Compute continuous percentiles with
+  linear interpolation. No samples means null percentiles, not zero.
+- `buffering`: `sample_views`, `total_playing_time_ms`,
+  `total_rebuffer_duration_ms`, `ratio`. Use playing and rebuffer durations from
+  the same winning event. Include only views with both measurements available
+  and a positive combined duration. Ratio is total buffering divided by total
+  playing plus buffering across those views, a fraction from 0 to 1. Do not
+  average per-view ratios or add cumulative snapshots. No eligible views means
+  zero totals and a null ratio. Startup wait, pauses and seeking are not counted
+  as rebuffering by the SDK.
+- `fatal_errors`: `affected_views`, `ratio`. Count a view once if any retained
+  matching `playback_error` has `error_fatal=true`, including failures before
+  playback. Divide by all selected playback attempts (`views`). No views means
+  null; views with no observed fatal errors mean zero. This is an observed error
+  rate, not proof that all error events were delivered.
+
+All measurements and errors must match the first start's video/viewer identity.
+Later events outside the start-date window still contribute. Starts without a
+measurement count as views, with no startup/buffering sample. Orphan events do
+not contribute. A final null startup value remains unknown even if an older
+snapshot had one. Read typed numeric columns and the lossless JSON fallback so
+integral JSON floats and large numeric values are not accidentally lost.
+
+No SDK or storage-schema changes, persisted aggregates, arbitrary SQL, grouped
+quality comparisons or quality time series are included. Existing summary,
+video and timeseries responses keep their semantics. Use the bounded read worker.
+
+### Second-stage acceptance checks
+
+- Exact startup sample counts, median and p95 for odd/even samples, valid zero,
+  null final values, and empty cohorts.
+- Weighted buffering, zero-duration exclusion, same-event selection, final
+  precedence, latest snapshot fallback and no cumulative double counting.
+- Duplicate/reordered deliveries, multiple fatal errors in one view, nonfatal
+  and unknown errors, orphan events, inconsistent identity and pre-start errors.
+- Start-based date/context filtering and project isolation for overlapping IDs.
+- Native and OTLP delivery produce the same quality result; lossless numeric
+  storage fallback is covered, including JSON integral floats.
+- OpenAPI examples, live HTTP responses in both reader modes, MCP discovery,
+  parity and error handling pass. Existing metric tests remain green.

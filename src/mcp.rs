@@ -170,7 +170,7 @@ impl Companion {
                     );
                 }
             };
-            let coverage = if path == "/v1/summary" {
+            let coverage = if matches!(path, "/v1/summary" | "/v1/quality") {
                 json!({"kind": "filtered_totals"})
             } else if path == "/v1/timeseries" {
                 json!({"kind": "time_buckets", "has_more": false,

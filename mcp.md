@@ -118,8 +118,9 @@ for exact scope and remaining checks.
 
 | Tool | Purpose |
 | --- | --- |
-| `describe_api` | `overview` lists routes and dashboard guidance; `metrics` explains calculations. An operation ID such as `listEvents`, `getSummary`, `getTimeseries`, `listVideoMetrics` or `ingestEvent` returns that HTTP operation and all referenced schemas. Ingestion documentation is available, but no ingestion tool is exposed. |
+| `describe_api` | `overview` lists routes and dashboard guidance; `metrics` explains calculations. An operation ID such as `listEvents`, `getSummary`, `getQuality`, `getTimeseries`, `listVideoMetrics` or `ingestEvent` returns that HTTP operation and all referenced schemas. Ingestion documentation is available, but no ingestion tool is exposed. |
 | `get_summary` | Total views, distinct supplied viewer IDs and cumulative playing time for the selected view starts. |
+| `get_quality` | Startup median/p95, weighted buffering and observed fatal-error rates with sample counts. Same optional cohort filters as summary. |
 | `get_timeseries` | Complete hourly/daily metrics by view start, with empty buckets. Requires `from`, `to`, and `interval`; at most 1000 UTC buckets. |
 | `list_video_metrics` | One page of per-video totals, ordered by video ID. |
 | `list_events` | One page of original events, receipt metadata and flat `event_context`. |
@@ -139,6 +140,13 @@ An over-1000-bucket range is rejected before the HTTP call. Playing time belongs
 entirely to the view's start bucket, including playback after the bucket or query
 window. Label charts accordingly; this does not measure activity per clock hour.
 The existing read token, filters, response-size limit and query deadline apply.
+
+`get_quality` returns the unchanged HTTP result with `coverage.kind:
+"filtered_totals"`. It has no pagination. Display sample counts with startup and
+buffering metrics; null means unavailable, not zero. Ratios are fractions, so
+multiply by 100 for percentages. Fatal-error rates count affected attempts, not
+error events, and describe observed delivery. Use `describe_api` with topic
+`getQuality` for exact selection and denominator rules.
 
 Failures have `isError: true` and a structured `error` containing `code`,
 `message` and an optional `http_status`. Empty data is a successful result.

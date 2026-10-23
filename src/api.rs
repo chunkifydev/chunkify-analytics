@@ -84,6 +84,7 @@ pub fn router(store: Store, projects: Arc<Registry>, config: &Config) -> Router 
         .route("/healthz", get(health))
         .route("/v1/ingestion", get(ingestion_status))
         .route("/v1/summary", get(summary))
+        .route("/v1/quality", get(quality))
         .route("/v1/timeseries", get(timeseries))
         .route("/v1/videos", get(videos))
         .route(
@@ -415,6 +416,18 @@ async fn summary(
     Ok(Json(
         app.store
             .summary(resolved.project.id.clone(), query, false)
+            .await?,
+    ))
+}
+
+async fn quality(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .quality(resolved.project.id.clone(), query)
             .await?,
     ))
 }

@@ -246,7 +246,7 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
     )
     .await;
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 6);
     assert!(
         tools
             .iter()
@@ -281,6 +281,7 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
 
     for (tool, path) in [
         ("get_summary", "/v1/summary"),
+        ("get_quality", "/v1/quality"),
         ("list_video_metrics", "/v1/videos"),
         ("list_events", "/v1/events"),
     ] {
@@ -299,6 +300,39 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
         call(&live, "get_summary", json!({}), false).await["data"]["total_playing_time_ms"],
         json!(15000.0)
     );
+    for (connection, credentials, playing) in [
+        (&client, &collector.keys, 5000.0),
+        (&live, &collector.live, 15000.0),
+    ] {
+        let result = call(connection, "get_quality", json!({}), false).await;
+        assert_eq!(
+            result["data"],
+            collector
+                .get("/v1/quality", credentials["read_token"].as_str().unwrap())
+                .await
+        );
+        assert_eq!(result["coverage"]["kind"], "filtered_totals");
+        assert_eq!(result["data"]["views"], 2);
+        assert_eq!(
+            result["data"]["buffering"]["total_playing_time_ms"],
+            playing
+        );
+        assert_eq!(result["data"]["startup_time_ms"]["sample_views"], 0);
+        assert!(result["data"]["startup_time_ms"]["median"].is_null());
+    }
+    for invalid in [
+        json!({"project_id":"live"}),
+        json!({"event_name":"chunkify.video.view_started"}),
+        json!({"limit":1}),
+        json!({"cursor":"x"}),
+        json!({"from":"invalid"}),
+        json!({"from":"2026-10-21T00:00:00Z", "to":"2026-10-19T00:00:00Z"}),
+    ] {
+        assert_eq!(
+            call(&client, "get_quality", invalid, true).await["error"]["code"],
+            "invalid_arguments"
+        );
+    }
     let timeseries_tool = tools
         .iter()
         .find(|tool| tool.name == "get_timeseries")
@@ -432,7 +466,12 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
     );
     for wrong in ["bad-token", collector.keys["ingest_key"].as_str().unwrap()] {
         let unauthorized = connect(&collector.url, wrong, true).await;
-        for tool in ["list_events", "get_summary", "list_video_metrics"] {
+        for tool in [
+            "list_events",
+            "get_summary",
+            "get_quality",
+            "list_video_metrics",
+        ] {
             let result = call(&unauthorized, tool, json!({}), true).await;
             assert_eq!(result["error"]["code"], "unauthorized");
             assert!(!result.to_string().contains(wrong));

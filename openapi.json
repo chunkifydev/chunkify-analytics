@@ -110,7 +110,7 @@
       "get": {
         "operationId": "getIngestionStatus",
         "summary": "Inspect ingestion mode and pending queue",
-        "description": "Private operational status. Pending counts, bytes and age are limited to the read token’s project; mode and failure state describe the shared queue. Default direct mode has no queue object. Experimental durable_queue mode includes duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only.",
+        "description": "Private operational status. Pending counts, bytes and age are limited to the read token\u2019s project; mode and failure state describe the shared queue. Default direct mode has no queue object. Experimental durable_queue mode includes duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only.",
         "tags": [
           "Operations"
         ],
@@ -1550,6 +1550,154 @@
                       "total_playing_time_ms": 0
                     }
                   ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/quality": {
+      "get": {
+        "operationId": "getQuality",
+        "summary": "Read playback quality for a view cohort",
+        "description": "Limited to the project resolved from the read token. All filters select the earliest retained view_started by sequence, occurrence time, then ingestion order, as in summary. Each view is one playback attempt, including failures before playback. Matching video_id/viewer_id measurements come from the final view_ended when present, otherwise the latest view_snapshot; event precedence is followed by sequence, occurrence time and ingestion order. All fields come from that one event, including nulls. Later events outside the start-date window still contribute. startup_time_ms reports non-null sample count and continuous, linearly interpolated median/p95. Zero is valid; no measurements returns null percentiles. Buffering uses only views with both durations available and positive combined duration; ratio is SUM(rebuffer_duration_ms) / (SUM(playing_time_ms) + SUM(rebuffer_duration_ms)), not the average of per-view ratios. Its totals cover only those samples; no samples returns zero totals and null ratio. Fatal errors count distinct selected views with any retained matching playback_error where error_fatal=true; ratio divides by all selected attempts. No views returns null, while no observed fatal error among selected views returns zero. Error metrics describe observed delivery, not guaranteed error-free playback. Missing final events can leave partial values. Start-only views have no measurement samples. Orphans are excluded; retention/deletion remove contributions. Ratios are fractions from 0 to 1. Unknown parameters, event_name, cursor and limit are rejected.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Playback-quality metrics and sample counts for selected starts.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Quality"
+                },
+                "example": {
+                  "views": 4,
+                  "startup_time_ms": {
+                    "sample_views": 2,
+                    "median": 200,
+                    "p95": 290
+                  },
+                  "buffering": {
+                    "sample_views": 2,
+                    "total_playing_time_ms": 9000,
+                    "total_rebuffer_duration_ms": 1000,
+                    "ratio": 0.1
+                  },
+                  "fatal_errors": {
+                    "affected_views": 1,
+                    "ratio": 0.25
+                  }
                 }
               }
             }
@@ -4133,6 +4281,119 @@
           "buckets"
         ],
         "additionalProperties": false
+      },
+      "Quality": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "views",
+          "startup_time_ms",
+          "buffering",
+          "fatal_errors"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Selected playback attempts with a retained start, including failed attempts."
+          },
+          "startup_time_ms": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sample_views",
+              "median",
+              "p95"
+            ],
+            "properties": {
+              "sample_views": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Views with a non-null startup measurement on the selected final event or latest snapshot."
+              },
+              "median": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Continuous median startup time in milliseconds, or null without samples."
+              },
+              "p95": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Continuous 95th percentile startup time in milliseconds, or null without samples."
+              }
+            },
+            "description": "Time from attempt to first playing, measured once per eligible view. This is not first-frame timing."
+          },
+          "buffering": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sample_views",
+              "total_playing_time_ms",
+              "total_rebuffer_duration_ms",
+              "ratio"
+            ],
+            "properties": {
+              "sample_views": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Views with playing and rebuffer durations available and positive combined duration."
+              },
+              "total_playing_time_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Sum of playing time for eligible buffering samples only."
+              },
+              "total_rebuffer_duration_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Sum of rebuffer time for the same samples."
+              },
+              "ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Total rebuffer time divided by combined playing and rebuffer time. Null without samples. Multiply by 100 for percent.",
+                "maximum": 1
+              }
+            },
+            "description": "Duration-weighted buffering. Startup wait, pauses and seeking are excluded by the SDK. Unknown durations are not treated as zero."
+          },
+          "fatal_errors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "affected_views",
+              "ratio"
+            ],
+            "properties": {
+              "affected_views": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Distinct selected views with at least one observed matching fatal playback_error, including before playback starts."
+              },
+              "ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Affected views divided by all selected attempts; null when views is zero. Multiply by 100 for percent.",
+                "maximum": 1
+              }
+            },
+            "description": "Observed fatal errors. Lost events can undercount this metric; absence of an error is not proof of successful playback."
+          }
+        },
+        "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
       }
     }
   },

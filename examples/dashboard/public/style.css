@@ -174,3 +174,5 @@ footer{flex-direction:column;gap:10px}
 .facts>div{font-size:12px}
 }
 
+
+.quality-strip small{display:block;font-size:10px;color:#9eb7ac;margin-top:3px}

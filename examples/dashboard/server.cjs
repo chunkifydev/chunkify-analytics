@@ -82,7 +82,7 @@ function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
       if (Object.hasOwn(routes, url.pathname)) {
         const { project, query } = buildQuery(url);
         if (url.pathname !== '/api/events') return json(200, await upstream(routes[url.pathname], project, query));
-        query.set('limit', '100');
+        query.set('limit', '10');
         let sample = []; let next = null; let pages = 0; let scanned = 0;
         do {
           if (next) query.set('cursor', next);
@@ -91,7 +91,7 @@ function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
           scanned += page.events.length;
           sample = sample.concat(page.events).slice(-10);
           next = page.next_cursor; pages++;
-        } while (next && pages < 20);
+        } while (next && pages < 200);
         return json(200, { events: next ? [] : sample.reverse(), coverage: { complete: !next, scanned, pages, order: 'descending ingestion order', limit: 10 } });
       }
       if (!Object.hasOwn(assets, url.pathname)) throw new SafeError(404, 'Not found.');

@@ -94,7 +94,7 @@ function chart(id, metric) {
 function fillMetrics(summary, quality, engagement, timeline) {
   const values = {
     views: count(summary.views), unique_viewers: count(summary.unique_viewers), playing_time: watch(summary.total_playing_time_ms), average_overview: watch(engagement.average_playing_time_ms),
-    startup_preview: startup(quality.startup_time_ms.median), buffer_preview: percent(quality.buffering.ratio), error_preview: percent(quality.fatal_errors.ratio),
+    startup_preview: startup(quality.startup_time_ms.median), startup_preview_coverage: `${count(quality.startup_time_ms.sample_views)} / ${count(quality.views)} attempts`, buffer_preview_coverage: `${count(quality.buffering.sample_views)} / ${count(quality.views)} attempts`, buffer_preview: percent(quality.buffering.ratio), error_preview: percent(quality.fatal_errors.ratio),
     startup_median: startup(quality.startup_time_ms.median), startup_p95: startup(quality.startup_time_ms.p95), buffer_ratio: percent(quality.buffering.ratio), error_ratio: percent(quality.fatal_errors.ratio),
     startup_coverage: `${count(quality.startup_time_ms.sample_views)} / ${count(quality.views)} attempts`, buffer_coverage: `${count(quality.buffering.sample_views)} / ${count(quality.views)} attempts`,
     quality_views: count(quality.views), fatal_views: count(quality.fatal_errors.affected_views), buffer_time: watch(quality.buffering.total_rebuffer_duration_ms), buffer_playing: watch(quality.buffering.total_playing_time_ms),
@@ -115,12 +115,16 @@ async function refresh() {
   $('status').className = ''; $('status').textContent = 'Loading collector data…'; $('results').hidden = true; $('updated').textContent = ''; $('applied').textContent = '';
   if ($('event-detail').open) $('event-detail').close();
   try {
-    const [summary, quality, engagement, timeline, videos, events] = await Promise.all(['summary', 'quality', 'engagement', 'timeseries', 'videos', 'events'].map(route => read(route)));
-    fillMetrics(summary, quality, engagement, timeline); showVideos(videos); showEvents(events);
+    const [summary, quality, engagement, timeline, videos, events] = await Promise.all([...['summary', 'quality', 'engagement', 'timeseries', 'videos'].map(route => read(route)), read('events').catch(error => ({ error: error.message }))]);
+    fillMetrics(summary, quality, engagement, timeline); showVideos(videos);
+    if (events.error) {
+      $('events-body').replaceChildren(); rows('events-body', [], 5);
+      $('event-coverage').textContent = `Events unavailable: ${events.error} Press Refresh to retry. Metrics on other pages are available.`;
+    } else showEvents(events);
     const project = projects.find(p => p.id === filters.get('project'));
     $('source-badge').textContent = project.synthetic ? 'Synthetic demo data' : project.name;
     $('applied').textContent = `${project.name} · ${filters.get('from').slice(0, 10)} to ${new Date(Date.parse(filters.get('to')) - 86400000).toISOString().slice(0, 10)} UTC · ${filters.get('video_id') || 'All videos'}${['device_type', 'browser_name', 'os_name', 'viewer_id'].filter(k => filters.has(k)).map(k => ` · ${k.replaceAll('_', ' ')}: ${filters.get(k)}`).join('')}`;
-    $('status').textContent = summary.views ? 'Up to date. Refresh to load new events.' : 'No views match these filters.';
+    $('status').textContent = summary.views ? (events.error ? 'Metrics updated. Events are unavailable; see the Events page.' : 'Up to date. Refresh to load new events.') : 'No views match these filters.';
     $('updated').textContent = `Updated ${new Date().toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
     $('results').hidden = false;
   } catch (error) { $('status').className = 'error'; $('status').textContent = `${error.message} Change the filters or try Refresh again.`; }

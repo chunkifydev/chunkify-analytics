@@ -84,7 +84,7 @@ test('does not label an incomplete bounded scan as the newest events', async () 
   let pages = 0;
   const { handler } = setup(async () => Response.json({ events: [{event:{event_id:`event-${++pages}`}}], next_cursor: `page-${pages+1}` }));
   const result = await request(handler, '/api/events?project=live');
-  assert.equal(pages, 20);
+  assert.equal(pages, 200);
   assert.deepEqual(result.body.events, []);
   assert.equal(result.body.coverage.complete, false);
 });
@@ -121,4 +121,14 @@ test('foreign hosts and origins cannot read the local credentialed proxy', async
     await handler({ url: '/api/summary', method: 'GET', headers }, res);
     assert.equal(res.status, 403);
   }
+});
+
+test('small event pages fit ten large accepted events under the response cap', async () => {
+  const { handler } = setup(async url => {
+    assert.equal(url.searchParams.get('limit'), '10');
+    return Response.json({ events: Array.from({ length: 10 }, (_, id) => ({ event: { event_id: id, custom: 'x'.repeat(60000) } })), next_cursor: null });
+  });
+  const result = await request(handler, '/api/events');
+  assert.equal(result.status, 200);
+  assert.equal(result.body.events.length, 10);
 });

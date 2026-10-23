@@ -35,7 +35,7 @@ function buildQuery(url) {
   if (url.pathname === '/api/videos') query.set('limit', '8');
   return { project, query };
 }
-function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
+function createHandler({ env = process.env, fetchImpl = fetch, demo = null } = {}) {
   async function upstream(route, project, query, deadline) {
     if (!Object.values(routes).includes(route)) throw new SafeError(400, 'Unknown read route.');
     const token = env[projects[project]];
@@ -77,7 +77,7 @@ function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
       if (url.pathname === '/api/projects') {
         if (url.search) throw new SafeError(400, 'Unsupported query parameter.');
         const names = { demo: 'Demo data', live: 'Live', staging: 'Staging', player: 'Player test' };
-        return json(200, { projects: Object.keys(projects).filter(id => env[projects[id]]).map(id => ({ id, name: names[id], synthetic: id === 'demo' })) });
+        return json(200, { projects: Object.keys(projects).filter(id => env[projects[id]]).map(id => ({ id, name: names[id], synthetic: id === 'demo' })), ...(demo ? { demo } : {}) });
       }
       if (Object.hasOwn(routes, url.pathname)) {
         const { project, query } = buildQuery(url);

@@ -14,7 +14,9 @@
     "check:collector:openapi": "node --test tests/http/openapi-schema.test.mjs",
     "build:collector:docker": "docker build -t chunkify-analytics-collector:test .",
     "test:collector:docker": "npm run build:collector:docker && node --test tests/http/docker/*.test.mjs",
-    "benchmark:collector": "npm run build:collector:docker && node tests/http/docker/load.mjs"
+    "benchmark:collector": "npm run build:collector:docker && node tests/http/docker/load.mjs",
+    "demo": "node examples/demo/start.mjs",
+    "demo:pack": "node examples/demo/pack.mjs"
   },
   "devDependencies": {
     "@chunkify/analytics": "0.4.0",

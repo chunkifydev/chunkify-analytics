@@ -33,6 +33,8 @@ jobs:
       - run: cargo fmt --check
       - name: Build collector
         run: cargo build --locked
+      - name: Test native demo lifecycle
+        run: node --test examples/demo/*.test.mjs
       - name: Test HTTP API and browser adapters
         run: node --test tests/http/*.test.mjs
       - run: cargo test --locked

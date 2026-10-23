@@ -179,3 +179,5 @@ footer{flex-direction:column;gap:10px}
 
 
 .quality-strip small{display:block;font-size:10px;color:#9eb7ac;margin-top:3px}
+
+.demo-nav{display:flex;align-items:center;gap:20px;font-size:12px}

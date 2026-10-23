@@ -4,6 +4,10 @@ A small vanilla HTML/JavaScript dashboard with a Node backend. It demonstrates
 how an AI can use the collector's MCP contract and data to build a dashboard.
 At runtime, the backend reads the HTTP API; the browser never receives a read token.
 
+For automatic native setup with sample data and a preconfigured player, use the
+[local demo launcher](../demo/README.md). The manual setup below connects this
+dashboard to an existing collector.
+
 ## Run
 
 Use Node 24 and a collector version with the summary, quality, engagement and

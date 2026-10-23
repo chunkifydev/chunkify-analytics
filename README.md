@@ -51,6 +51,30 @@ optional administrator tuning; experimental execution modes remain opt-in.
 
 This is a development version.
 
+## Try the local demo
+
+For a coworker walkthrough, use the optional [native demo](examples/demo/README.md).
+It prepares sample analytics, starts the dashboard, and provides a player page
+that sends real events through `createChunkifyAdapter`. No Docker is required.
+
+A shared demo bundle needs only **Node.js 24** and a collector executable matching
+the recipient's OS and CPU, included by the bundle packer. From a repository checkout:
+
+```sh
+npm ci
+npm run demo -- --collector /absolute/path/to/chunkify-analytics-collector
+```
+
+Developers with a local `cargo build --locked` can simply run `npm run demo`.
+The dashboard opens automatically. It includes 268 sample views, per-video
+filters, playback quality, engagement, event details and rendition breakdowns.
+Select **Try the player** to collect real events, then refresh **Player test**.
+Ctrl+C stops the demo; its private `demo-data/` directory persists between runs.
+
+This is a temporary local demonstration, separate from the collector's production
+API. See the [demo guide](examples/demo/README.md) for sharing a clean bundle,
+port options, data reset and platform limitations.
+
 ## API contract
 
 The [OpenAPI 3.1.1 document](openapi.json) describes ingestion, read endpoints,

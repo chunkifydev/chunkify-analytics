@@ -7,7 +7,7 @@ const watch = ms => ms == null ? 'Not available' : ms >= 3600000 ? `${format.for
 const startup = ms => ms == null ? 'Not available' : `${format.format(ms)} ms`;
 let filters = new URLSearchParams();
 let cursors = [null], pageIndex = 0, nextCursor = null, busy = false;
-let series = [], projects = [];
+let series = [], projects = [], demo = null;
 const descriptions = {
   overview: ['Playback overview', 'An overview of your audience and their viewing experience.'],
   quality: ['Playback quality', 'Understand startup delays, buffering and observed playback errors.'],
@@ -163,10 +163,26 @@ async function initialize() {
   try {
     const response = await fetch('/api/projects', { signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error('Cannot load project configuration.');
-    ({ projects } = await response.json());
+    ({ projects, demo = null } = await response.json());
     if (!projects.length) throw new Error('Configure a project read token on the dashboard server, then reload.');
     $('project').replaceChildren(...projects.map(p => new Option(p.name, p.id)));
-    setDays(7); $('filters').requestSubmit();
+    const requested = new URLSearchParams(location.search).get('project');
+    if (projects.some(project => project.id === requested)) $('project').value = requested;
+    if (demo) {
+      $('try-player').hidden = false;
+      $('sample-dates').hidden = false;
+      $('sample-dates').addEventListener('click', () => {
+        $('project').value = 'demo'; $('from').value = demo.from; $('to').value = demo.to;
+        $('filters').requestSubmit();
+      });
+      $('project').addEventListener('change', () => {
+        if ($('project').value === 'demo') { $('from').value = demo.from; $('to').value = demo.to; }
+        else setDays(7);
+      });
+    }
+    setDays(7);
+    if (demo && $('project').value === 'demo') { $('from').value = demo.from; $('to').value = demo.to; }
+    $('filters').requestSubmit();
   } catch (error) { $('status').className = 'error'; $('status').textContent = error.message; }
 }
 initialize();

@@ -4,10 +4,14 @@ A small vanilla HTML/JavaScript dashboard with a Node backend. It demonstrates
 how an AI can use the collector's MCP contract and data to build a dashboard.
 At runtime, the backend reads the HTTP API; the browser never receives a read token.
 
+For automatic native setup with sample data and a preconfigured player, use the
+[local demo launcher](../demo/README.md). The manual setup below connects this
+dashboard to an existing collector.
+
 ## Run
 
 Use Node 24 and a collector version with the summary, quality, engagement and
-UTC timeseries routes. From the repository root, set the collector URL and one
+UTC timeseries routes, plus `order=desc` on `/v1/events`. From the repository root, set the collector URL and one
 or more private read tokens in your shell or a private environment file:
 
 ```sh
@@ -44,7 +48,7 @@ Requests from foreign hosts or browser origins are refused.
    sample coverage and underlying counts/durations.
 3. **Engagement:** average watch time, reached-end count/rate and a watch-time chart.
 4. **Events:** the last 10 received matching events. Open a row for measurements,
-   browser/device context and the full stored JSON.
+   browser/device context, cumulative playing time by rendition and the full stored JSON.
 
 Filters apply across pages after pressing Refresh. Changing pages does not fetch
 again. There is no polling. Dates are whole UTC days; Through includes the selected
@@ -56,10 +60,10 @@ Chart data is available as a table on Overview. Unavailable measurements stay
 unavailable; they are not converted to zero. Summary totals cover all matching
 views, regardless of the current video page. Unique IDs cannot be added across
 videos or days. Aggregate filters select view starts; Events filters select the
-events' own occurrence time and context. The latest-event scan stops at 2,000
-records and asks for narrower filters if it cannot determine the latest ten.
-The full scan has a 20-second deadline. An Events failure leaves aggregate
-results visible and shows a retry message on the Events page.
+events' own occurrence time and context. The latest ten events come from one
+`/v1/events?order=desc&limit=10` request, without scanning older pages.
+An Events failure leaves aggregate results visible and shows a retry message
+on the Events page.
 
 Reached-end means the final event reports `reason=ended`, not that the whole
 video was watched. Startup is attempt-to-first-playing, not first-frame timing.
@@ -85,18 +89,30 @@ unset CHUNKIFY_DEMO_INGEST_KEY
 
 It sends 816 synthetic events for 268 views across nine videos, seven days,
 91 supplied viewer IDs and mixed browser/device contexts. It takes about 90
-seconds at ten events per second. Same-day reruns use the same event IDs and
+seconds at ten events per second. Successful views include media resolution and
+player dimensions. Synthetic hls.js views include single-rendition playback or
+480p/720p/1080p switches, with cumulative rendition times in snapshots and end
+events. Native-playback samples keep rendition measurements unavailable; view
+starts have no media resolution yet. Rendition totals exclude pauses and buffering.
+These are fabricated measurements, not a playback test.
+
+Events are immutable: rerunning an updated seed does not replace previously
+stored samples. Use a fresh demo project to load changed fixtures.
+
+Same-day reruns use the same event IDs and
 are deduplicated. Running it on another day creates another dataset; do not
 use a production project's ingest key. No real viewer data is sent elsewhere.
 
 ## Verification
 
 ```sh
-node --test examples/dashboard/server.test.cjs
+node --test examples/dashboard/*.test.*
 ```
 
 Backend tests cover project isolation, exact filter forwarding for every metric,
-pagination, bounded latest-event scans, error redaction and local-origin checks.
+pagination, a single bounded newest-events request, error redaction and local-origin checks.
+Fixture tests check rendition totals, cumulative snapshots and unavailable native
+measurements.
 For MCP parity, call `get_summary`, `get_quality`, `get_engagement` and
 `get_timeseries` with the same read token and filters. Compare their `data` with
 the dashboard's `/api/…` JSON; only display units and rounding differ in the UI.

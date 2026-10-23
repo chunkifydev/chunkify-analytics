@@ -6,3 +6,7 @@
 .DS_Store
 .env
 .env.*
+/demo-data/
+/demo-data.setup-*/
+/bin/
+/dist/

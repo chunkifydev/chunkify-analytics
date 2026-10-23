@@ -48,6 +48,48 @@ function detailSection(title, fields) {
   }
   section.append(heading, list); return section;
 }
+function renditionSection(event) {
+  const section = document.createElement('section'); section.id = 'rendition-details';
+  const heading = document.createElement('h3'); heading.textContent = 'Playing time by rendition';
+  const note = document.createElement('p'); note.className = 'rendition-note';
+  section.append(heading, note);
+  const renditions = event.rendition_playing_time;
+  if (!Array.isArray(renditions) || !renditions.length) {
+    note.textContent = Array.isArray(renditions)
+      ? 'No playing time recorded for a known rendition yet.'
+      : 'Not provided. Rendition tracking requires a supported player connector.';
+    return section;
+  }
+  note.textContent = 'Cumulative for this view at this event. Excludes pauses, buffering, seeks and playback before a rendition was known.';
+  const wrap = document.createElement('div'); wrap.className = 'table-wrap';
+  const table = document.createElement('table');
+  table.setAttribute('aria-label', 'Cumulative playing time by rendition');
+  const head = table.createTHead().insertRow();
+  for (const label of ['Resolution', 'Codec', 'Bitrate', 'Frame rate', 'Playing time']) {
+    const cell = document.createElement('th'); cell.scope = 'col'; cell.textContent = label; head.append(cell);
+  }
+  const body = table.createTBody();
+  for (const rendition of renditions) {
+    const r = rendition || {};
+    const row = body.insertRow();
+    for (const value of [dimensions(r.width, r.height), display(r.codec),
+      r.bitrate_bps == null ? missing : `${format.format(r.bitrate_bps / 1000000)} Mbps`,
+      r.frame_rate == null ? missing : `${display(r.frame_rate)} fps`, duration(r.playing_time_ms)]) {
+      row.insertCell().textContent = value;
+    }
+  }
+  wrap.append(table); section.append(wrap);
+  // Only sum known numeric durations. Preserve unavailable measurements as unavailable.
+  if (renditions.every(r => r && Number.isFinite(r.playing_time_ms) && r.playing_time_ms >= 0)) {
+    const total = renditions.reduce((sum, r) => sum + r.playing_time_ms, 0);
+    if (Number.isFinite(total)) {
+      const label = document.createElement('p'); label.className = 'rendition-total';
+      label.textContent = `Total tracked across renditions: ${duration(total)}`;
+      section.append(label);
+    }
+  }
+  return section;
+}
 function openEvent(record, row, trigger) {
   const e = record.event || {};
   const context = record.event_context || {};
@@ -67,10 +109,12 @@ function openEvent(record, row, trigger) {
       ['Buffering count', e.rebuffer_count], ['Seek time', duration(e.seek_duration_ms)], ['Seek count', e.seek_count],
       ['Media resolution', dimensions(e.media_width_px, e.media_height_px)],
       ['Selected rendition', dimensions(e.selected_rendition_width, e.selected_rendition_height)],
+      ['Rendition switches', e.rendition_switch_count],
       ['Player size', dimensions(e.player_width_px, e.player_height_px)],
       ['Startup time', duration(e.startup_time_ms)], ['End reason', e.reason],
       ['Error category', e.error_category], ['Error code', e.error_code], ['Fatal error', e.error_fatal],
     ]),
+    renditionSection(e),
     detailSection('Context', [
       ['Browser', version(context.browser_name, context.browser_version)],
       ['Operating system', version(context.os_name, context.os_version)],

@@ -35,7 +35,7 @@ function buildQuery(url) {
   if (url.pathname === '/api/videos') query.set('limit', '8');
   return { project, query };
 }
-function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
+function createHandler({ env = process.env, fetchImpl = fetch, demo = null } = {}) {
   async function upstream(route, project, query, deadline) {
     if (!Object.values(routes).includes(route)) throw new SafeError(400, 'Unknown read route.');
     const token = env[projects[project]];
@@ -77,24 +77,16 @@ function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
       if (url.pathname === '/api/projects') {
         if (url.search) throw new SafeError(400, 'Unsupported query parameter.');
         const names = { demo: 'Demo data', live: 'Live', staging: 'Staging', player: 'Player test' };
-        return json(200, { projects: Object.keys(projects).filter(id => env[projects[id]]).map(id => ({ id, name: names[id], synthetic: id === 'demo' })) });
+        return json(200, { projects: Object.keys(projects).filter(id => env[projects[id]]).map(id => ({ id, name: names[id], synthetic: id === 'demo' })), ...(demo ? { demo } : {}) });
       }
       if (Object.hasOwn(routes, url.pathname)) {
         const { project, query } = buildQuery(url);
-        // Bound the entire scan, not just each page, below the browser timeout.
         const deadline = AbortSignal.timeout(20000);
         if (url.pathname !== '/api/events') return json(200, await upstream(routes[url.pathname], project, query, deadline));
-        query.set('limit', '10');
-        let sample = []; let next = null; let pages = 0; let scanned = 0;
-        do {
-          if (next) query.set('cursor', next);
-          const page = await upstream('/v1/events', project, query, deadline);
-          if (!Array.isArray(page.events)) throw new SafeError(502, 'Invalid collector event page.');
-          scanned += page.events.length;
-          sample = sample.concat(page.events).slice(-10);
-          next = page.next_cursor; pages++;
-        } while (next && pages < 200);
-        return json(200, { events: next ? [] : sample.reverse(), coverage: { complete: !next, scanned, pages, order: 'descending ingestion order', limit: 10 } });
+        query.set('limit', '10'); query.set('order', 'desc');
+        const page = await upstream('/v1/events', project, query, deadline);
+        if (!Array.isArray(page.events) || page.events.length > 10) throw new SafeError(502, 'Invalid collector event page.');
+        return json(200, { events: page.events, coverage: { complete: true, scanned: page.events.length, pages: 1, order: 'descending ingestion order', limit: 10, has_more: !!page.next_cursor } });
       }
       if (!Object.hasOwn(assets, url.pathname)) throw new SafeError(404, 'Not found.');
       const [file, type] = assets[url.pathname];

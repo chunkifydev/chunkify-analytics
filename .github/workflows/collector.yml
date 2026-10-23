@@ -27,12 +27,14 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - run: npm ci
       - run: npm run check:collector:openapi
-      - name: Test local dashboard backend
-        run: node --test examples/dashboard/server.test.cjs
+      - name: Test local dashboard
+        run: node --test examples/dashboard/*.test.*
       - run: npx playwright install --with-deps --only-shell chromium
       - run: cargo fmt --check
       - name: Build collector
         run: cargo build --locked
+      - name: Test native demo lifecycle
+        run: node --test examples/demo/*.test.mjs
       - name: Test HTTP API and browser adapters
         run: node --test tests/http/*.test.mjs
       - run: cargo test --locked

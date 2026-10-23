@@ -110,7 +110,7 @@
       "get": {
         "operationId": "getIngestionStatus",
         "summary": "Inspect ingestion mode and pending queue",
-        "description": "Private operational status. Pending counts, bytes and age are limited to the read token\u2019s project; mode and failure state describe the shared queue. Default direct mode has no queue object. Experimental durable_queue mode includes duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only.",
+        "description": "Private operational status. Pending counts, bytes and age are limited to the read token’s project; mode and failure state describe the shared queue. Default direct mode has no queue object. Experimental durable_queue mode includes duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only.",
         "tags": [
           "Operations"
         ],
@@ -194,7 +194,7 @@
       "get": {
         "operationId": "listEvents",
         "summary": "Read retained analytics events",
-        "description": "Limited to the project resolved from the read token. Returns full canonical payloads in ascending server ingestion order, with receipt time and optional context. All filters combine using AND; time filters use event occurred_at, not receipt time. Unknown query parameters are rejected. Private reads have no cross-origin browser access headers.",
+        "description": "Limited to the project resolved from the read token. Returns full canonical payloads in server ingestion order, ascending by default. Use order=desc to retrieve the newest received events first, with receipt time and optional context. All filters combine using AND; time filters use event occurred_at, not receipt time. Unknown query parameters are rejected. Private reads have no cross-origin browser access headers.",
         "tags": [
           "Queries"
         ],
@@ -228,6 +228,9 @@
           },
           {
             "$ref": "#/components/parameters/cursor"
+          },
+          {
+            "$ref": "#/components/parameters/order"
           }
         ],
         "responses": {
@@ -2035,7 +2038,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Opaque next_cursor from the same project, endpoint and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention or deletion can remove records between pages. A cursor is not a durable database snapshot or authorization token."
+        "description": "Opaque next_cursor from the same project, endpoint, event order and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention or deletion can remove records between pages. A cursor is not a durable database snapshot or authorization token."
       },
       "origin": {
         "name": "Origin",
@@ -2098,6 +2101,19 @@
             "day"
           ]
         }
+      },
+      "order": {
+        "name": "order",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "asc"
+        },
+        "description": "Event ingestion order only. asc returns oldest first; desc returns newest first. This orders by server receipt sequence, not event occurrence time. Keep the same order when following a cursor. Other read routes reject this parameter."
       }
     },
     "schemas": {

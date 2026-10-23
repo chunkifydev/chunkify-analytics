@@ -2,7 +2,7 @@ use crate::{
     api::ApiError,
     context::RequestContext,
     event::IncomingEvent,
-    query::{Cursor, Query},
+    query::{Cursor, EventOrder, Query},
     reader::Reader,
     writer::{BatchConfig, Writer},
 };
@@ -219,12 +219,18 @@ impl Store {
     }
 
     pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        let order = query.order.unwrap_or_default();
+        // Preserve existing ascending cursors; bind descending cursors to their order.
+        let kind = match order {
+            EventOrder::Asc => "events",
+            EventOrder::Desc => "events_desc",
+        };
         let filters = query.filters()?;
         let limit = query.limit()?;
         let cursor = query
             .cursor
             .as_deref()
-            .map(|value| Cursor::<i64>::decode(value, "events", &filters, &project))
+            .map(|value| Cursor::<i64>::decode(value, kind, &filters, &project))
             .transpose()?;
         if cursor
             .as_ref()
@@ -237,16 +243,28 @@ impl Store {
                 Some(c) => c.through,
                 None => watermark(connection, &project)?,
             };
-            let after = cursor.map_or(0, |c| c.after);
+            let after = cursor.as_ref().map_or(0, |c| c.after);
+            let (lower, upper) = match order {
+                EventOrder::Asc => (after, through),
+                EventOrder::Desc => (
+                    0,
+                    cursor
+                        .as_ref()
+                        .map_or(through, |c| c.after.saturating_sub(1)),
+                ),
+            };
             let (conditions, mut values) = filters.sql();
             let conditions = format!("({conditions}) AND project_id = ?");
             values.push(SqlValue::Text(project.clone()));
             values.extend([
-                SqlValue::BigInt(after),
-                SqlValue::BigInt(through),
+                SqlValue::BigInt(lower),
+                SqlValue::BigInt(upper),
                 SqlValue::BigInt((limit + 1) as i64),
             ]);
-            let mut statement = connection.prepare(&crate::storage::page_sql(&conditions))?;
+            let mut statement = connection.prepare(&crate::storage::page_sql(
+                &conditions,
+                matches!(order, EventOrder::Desc),
+            ))?;
             let mut rows = statement.query(params_from_iter(values.iter()))?;
             let mut events = Vec::new();
             let mut last = after;
@@ -257,7 +275,7 @@ impl Store {
                         Cursor {
                             version: 1,
                             project_id: project.clone(),
-                            kind: "events".into(),
+                            kind: kind.into(),
                             after: last,
                             through,
                             filters: filters.clone(),

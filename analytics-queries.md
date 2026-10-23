@@ -141,3 +141,29 @@ video and timeseries responses keep their semantics. Use the bounded read worker
   storage fallback is covered, including JSON integral floats.
 - OpenAPI examples, live HTTP responses in both reader modes, MCP discovery,
   parity and error handling pass. Existing metric tests remain green.
+
+### Second-stage verification, 2026-10-23
+
+Implemented in `b09f18b`, with the reviewed numeric fix in `6ceb54e`.
+
+- 24 Rust unit tests and four official-client MCP integration tests passed.
+  Formatting and Clippy across all targets passed.
+- 21 HTTP, OpenAPI and context-filter checks passed. Quality and existing time
+  series were exercised with both database reader modes. Native and OTLP
+  quality results matched. MCP checks included overlapping IDs across projects.
+- Regression cases cover missing historical durations, final null measurements,
+  repeated snapshots/errors, inconsistent identity, integral JSON floats and
+  large numeric values preserved in JSON.
+- Standards review found no actionable issues. Spec review found an overflow
+  when adding two finite durations. The old binary reproduced a ratio of zero
+  for equal durations of `1e308`; the fix returns 0.5. Totals that themselves
+  exceed finite output range now return the documented 500 error. Both review
+  axes confirmed no remaining findings after the fix.
+- Tests used temporary databases and disposable containers. No capacity benchmark,
+  browser download, previous-binary upgrade test or SDK change was needed for
+  this stage. Existing deployed collectors were not changed.
+
+This completes the planned first playback-quality summary. Grouped comparisons,
+quality trends and more engagement metrics can wait for actual dashboard needs.
+The next useful validation is a real player session displayed in a dashboard,
+using the new endpoint and its sample counts.

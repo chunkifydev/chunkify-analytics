@@ -29,7 +29,7 @@ const session = monitor(document.querySelector("#player"), {
 // When your page finishes monitoring this view:
 // session.destroy();`;
   $('start').disabled = false; $('copy').disabled = false;
-  status('Ready. Start a view, then refresh Player test analytics to see it arrive.');
+  status('Ready. Enter your video URL and start a view, then refresh Player test analytics to see it arrive.');
 } catch (error) { status(`Could not load the demo: ${error.message} Check your internet connection and reload.`, true); }
 $('play-form').addEventListener('submit', async event => {
   event.preventDefault();

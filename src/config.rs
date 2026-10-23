@@ -33,6 +33,13 @@ pub struct Keys {
 
 impl Config {
     pub fn lock(&self) -> Result<fs::File> {
+        self.try_lock()?.ok_or_else(|| {
+            "Data directory is in use. Stop the collector and any administration command first."
+                .into()
+        })
+    }
+
+    pub fn try_lock(&self) -> Result<Option<fs::File>> {
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -42,8 +49,8 @@ impl Config {
         }
         let file = options.open(self.data_dir.join("collector.lock"))?;
         match file.try_lock() {
-            Ok(()) => Ok(file),
-            Err(fs::TryLockError::WouldBlock) => Err("Data directory is in use. Stop the collector and any administration command first.".into()),
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(error)) => Err(error.into()),
         }
     }
@@ -199,47 +206,7 @@ impl Config {
         Ok(keys)
     }
 
-    pub fn rotate_key(&self, kind: &str) -> Result<()> {
-        let mut keys = self.keys()?;
-        match kind {
-            "ingest" => {
-                keys.ingest_key =
-                    format!("cki_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-            }
-            "read" => {
-                keys.read_token =
-                    format!("ckr_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-            }
-            _ => return Err("Expected rotate-key ingest or rotate-key read".into()),
-        }
-        if let Some(projects) = &mut keys.projects {
-            let project = projects
-                .iter_mut()
-                .find(|p| p.id == crate::projects::DEFAULT_PROJECT)
-                .ok_or("Missing default project")?;
-            let id = format!("primary-{kind}");
-            let secret = if kind == "ingest" {
-                &keys.ingest_key
-            } else {
-                &keys.read_token
-            };
-            let key = crate::projects::Credential {
-                id: id.clone(),
-                name: format!("Primary {kind}"),
-                permission: crate::projects::Permission::parse(kind)?,
-                hash: crate::projects::hash(secret),
-            };
-            project.keys.retain(|k| k.id != id);
-            project.keys.push(key);
-            crate::projects::validate(projects)?;
-        }
-        self.save_keys(&keys)?;
-        println!(
-            "Rotated {kind} key. Read the new value from keys.json and restart the collector."
-        );
-        Ok(())
-    }
-    pub(crate) fn save_keys(&self, keys: &Keys) -> Result<()> {
+    pub(crate) fn save_keys(&self, keys: &Keys) -> Result<Option<String>> {
         // Write and sync a private file on the same filesystem before replacing
         // keys.json. Readers see the complete old or complete new key pair.
         let temporary = self.data_dir.join(format!(".keys-{}.tmp", Uuid::new_v4()));
@@ -256,15 +223,22 @@ impl Config {
             file.sync_all()?;
             drop(file);
             fs::rename(&temporary, self.data_dir.join("keys.json"))?;
-            #[cfg(unix)]
-            fs::File::open(&self.data_dir)?.sync_all()?;
             Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temporary);
         }
         result?;
-        Ok(())
+        // Rename has committed the change. Even if the directory sync fails,
+        // callers must activate these keys and return any newly generated secret.
+        #[cfg(unix)]
+        if fs::File::open(&self.data_dir)
+            .and_then(|directory| directory.sync_all())
+            .is_err()
+        {
+            return Ok(Some("Keys were updated, but syncing the directory failed; durability across a system crash is uncertain.".into()));
+        }
+        Ok(None)
     }
 }
 

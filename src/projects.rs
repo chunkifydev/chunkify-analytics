@@ -8,7 +8,7 @@ use ring::digest::{SHA256, digest};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Instant,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -258,7 +258,7 @@ impl Access {
 
 pub struct Registry {
     pub projects: HashMap<String, Arc<Access>>,
-    credentials: HashMap<String, (Permission, Resolved)>,
+    credentials: RwLock<HashMap<String, (Permission, Resolved)>>,
 }
 
 #[derive(Clone)]
@@ -274,7 +274,7 @@ impl Registry {
         let count = projects.len();
         let mut registry = Self {
             projects: HashMap::new(),
-            credentials: HashMap::new(),
+            credentials: RwLock::new(HashMap::new()),
         };
         let global_spool = config.spool.as_ref().map_or(67108864, |s| s.max_bytes);
         for project in projects {
@@ -305,7 +305,33 @@ impl Registry {
                     .min(global_spool),
             });
             for key in project.keys {
-                registry.credentials.insert(
+                registry
+                    .credentials
+                    .get_mut()
+                    .expect("credentials lock")
+                    .insert(
+                        key.hash,
+                        (
+                            key.permission,
+                            Resolved {
+                                project: access.clone(),
+                                key_id: key.id,
+                            },
+                        ),
+                    );
+            }
+            registry.projects.insert(project.id, access);
+        }
+        Ok(registry)
+    }
+    // Only credentials change while serving. Reuse the exact Access objects so
+    // rate tokens, admission permits, origins and project budgets stay intact.
+    pub fn replace_keys(&self, keys: &Keys) {
+        let mut credentials = HashMap::new();
+        for project in projects(keys) {
+            let access = &self.projects[&project.id];
+            for key in project.keys {
+                credentials.insert(
                     key.hash,
                     (
                         key.permission,
@@ -316,12 +342,14 @@ impl Registry {
                     ),
                 );
             }
-            registry.projects.insert(project.id, access);
         }
-        Ok(registry)
+        *self.credentials.write().expect("credentials lock") = credentials;
     }
+
     pub fn authorize(&self, secret: &str, permission: Permission) -> Result<Resolved, ApiError> {
         self.credentials
+            .read()
+            .expect("credentials lock")
             .get(&hash(secret))
             .filter(|(p, _)| *p == permission)
             .map(|(_, project)| project.clone())
@@ -334,21 +362,29 @@ impl Registry {
     }
 }
 
-impl Config {
-    pub fn project_command(
-        &self,
-        command: &str,
-        args: &[String],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let _lock = self.lock()?;
-        let mut keys = self.keys()?;
-        let mut list = projects(&keys);
-        let mut output = serde_json::json!({"restart_required": true});
-        match (command, args) {
+pub fn apply_command(
+    keys: &mut Keys,
+    command: &str,
+    args: &[String],
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let mut list = projects(keys);
+    let mut output = serde_json::json!({"restart_required": true});
+    match (command, args) {
             ("project-list", []) => {
-                println!("{}", serde_json::to_string(&list.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "settings": p.settings,
-                    "keys": p.keys.iter().map(|k| serde_json::json!({"id": k.id, "name": k.name, "permission": k.permission})).collect::<Vec<_>>() })).collect::<Vec<_>>())?);
-                return Ok(());
+                return Ok(serde_json::json!(list.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "settings": p.settings,
+                    "keys": p.keys.iter().map(|k| serde_json::json!({"id": k.id, "name": k.name, "permission": k.permission})).collect::<Vec<_>>() })).collect::<Vec<_>>()));
+            }
+            ("rotate-key", [kind]) => {
+                let permission = Permission::parse(kind)?;
+                let (mut key, secret) = credential(&format!("Primary {kind}"), permission);
+                key.id = format!("primary-{kind}");
+                if permission == Permission::Ingest { keys.ingest_key = secret; }
+                else { keys.read_token = secret; }
+                // Keep the legacy format until named projects/keys are used.
+                if keys.projects.is_none() { return Ok(output); }
+                let project = list.iter_mut().find(|p| p.id == DEFAULT_PROJECT).ok_or("Missing default project")?;
+                project.keys.retain(|k| k.id != key.id);
+                project.keys.push(key);
             }
             ("project-create", [id]) | ("project-create", [id, _]) => {
                 validate_id(id)?;
@@ -389,10 +425,7 @@ impl Config {
             }
             _ => return Err("Expected project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
         }
-        validate(&list)?;
-        keys.projects = Some(list);
-        self.save_keys(&keys)?;
-        println!("{output}");
-        Ok(())
-    }
+    validate(&list)?;
+    keys.projects = Some(list);
+    Ok(output)
 }

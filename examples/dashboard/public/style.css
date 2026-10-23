@@ -118,6 +118,9 @@ summary{cursor:pointer}
 .drawer-content dl{display:grid;grid-template-columns:180px 1fr;gap:9px;font-size:12px}
 .drawer-content dt{color:var(--muted)}
 .drawer-content dd{margin:0;overflow-wrap:anywhere}
+.rendition-note{font-size:12px;color:var(--muted);line-height:1.6}
+.rendition-total{font-size:12px;font-weight:600}
+#rendition-details th,#rendition-details td{padding:12px 8px;white-space:nowrap}
 .drawer-content .missing{color:#7d8da2}
 .drawer-content pre{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.6 ui-monospace,monospace;background:#111c29;padding:16px;border-radius:6px}
 .drawer-content details p{margin-top:10px;font-size:12px}

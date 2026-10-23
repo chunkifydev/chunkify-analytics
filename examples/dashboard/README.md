@@ -44,7 +44,7 @@ Requests from foreign hosts or browser origins are refused.
    sample coverage and underlying counts/durations.
 3. **Engagement:** average watch time, reached-end count/rate and a watch-time chart.
 4. **Events:** the last 10 received matching events. Open a row for measurements,
-   browser/device context and the full stored JSON.
+   browser/device context, cumulative playing time by rendition and the full stored JSON.
 
 Filters apply across pages after pressing Refresh. Changing pages does not fetch
 again. There is no polling. Dates are whole UTC days; Through includes the selected
@@ -85,18 +85,30 @@ unset CHUNKIFY_DEMO_INGEST_KEY
 
 It sends 816 synthetic events for 268 views across nine videos, seven days,
 91 supplied viewer IDs and mixed browser/device contexts. It takes about 90
-seconds at ten events per second. Same-day reruns use the same event IDs and
+seconds at ten events per second. Successful views include media resolution and
+player dimensions. Synthetic hls.js views include single-rendition playback or
+480p/720p/1080p switches, with cumulative rendition times in snapshots and end
+events. Native-playback samples keep rendition measurements unavailable; view
+starts have no media resolution yet. Rendition totals exclude pauses and buffering.
+These are fabricated measurements, not a playback test.
+
+Events are immutable: rerunning an updated seed does not replace previously
+stored samples. Use a fresh demo project to load changed fixtures.
+
+Same-day reruns use the same event IDs and
 are deduplicated. Running it on another day creates another dataset; do not
 use a production project's ingest key. No real viewer data is sent elsewhere.
 
 ## Verification
 
 ```sh
-node --test examples/dashboard/server.test.cjs
+node --test examples/dashboard/*.test.*
 ```
 
 Backend tests cover project isolation, exact filter forwarding for every metric,
 pagination, bounded latest-event scans, error redaction and local-origin checks.
+Fixture tests check rendition totals, cumulative snapshots and unavailable native
+measurements.
 For MCP parity, call `get_summary`, `get_quality`, `get_engagement` and
 `get_timeseries` with the same read token and filters. Compare their `data` with
 the dashboard's `/api/…` JSON; only display units and rounding differ in the UI.

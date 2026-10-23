@@ -1413,3 +1413,10 @@ requests/s, returned 48,411 HTTP 503 responses as the durable queue approached
 its byte limit, and exceeded the dashboard p95 targets. All 900,890 acknowledged
 events survived restart. Memory counters, queue growth and database profiles
 identify the next optimization work in that report.
+
+## Dashboard example
+
+The [local dashboard example](examples/dashboard/README.md) includes an overview,
+playback quality, engagement and an event explorer. It uses the HTTP read API
+with private tokens on a Node backend and includes optional synthetic demo data.
+The collector MCP describes these same metrics for AI-assisted dashboard building.

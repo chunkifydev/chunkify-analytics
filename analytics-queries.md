@@ -50,3 +50,39 @@ database queries or new persistent copies of analytics data are introduced.
 Playback-quality summaries, grouped comparisons and view-detail lookups can
 follow separately. Accurate watched-segment retention requires SDK work. These
 features are outside this first stage.
+
+## Verification, 2026-10-23
+
+The first stage was implemented on `codex/analytics-timeseries`, based on
+`41655af`. The feature commit is `b4ce252`; the subsequent MCP cleanup only shares
+OpenAPI parameter reference resolution between its two callers.
+
+- Rust: 23 unit tests and four official-client MCP integration tests passed.
+  Formatting and Clippy across all targets passed.
+- HTTP and contract checks: 19 OpenAPI/context-filter tests passed, including the
+  new time-series tests with both database reader modes. Another 57 collector
+  regression tests passed. One crash-recovery check was rerun after adding its
+  Python prerequisite to the disposable test image; permission checks ran as a
+  non-root container user.
+- The unchanged Chromium adapter test was not run in this pass. Two optional
+  previous-executable upgrade tests were skipped because no previous binary was
+  supplied. No schema migration or SDK changes are part of this feature.
+- Standards and Spec reviews found no remaining findings after the shared MCP
+  parameter-resolution cleanup.
+
+A disposable query probe seeded 300,000 rows representing 100,000 views across
+30 days, with start/snapshot/end events, 100 videos and 10,000 supplied viewer IDs.
+It exercised the actual Store methods with one DuckDB thread on the shared
+Docker Desktop VM. Views, playing time and summary totals were asserted.
+
+| Query | Returned buckets | Median of five queries | Observed range |
+| --- | --- | --- | --- |
+| Hourly | 720 | 109.4 ms | 95.7–119.2 ms |
+| Daily | 30 | 96.7 ms | 94.7–103.4 ms |
+| Existing summary | Not applicable | 92.7 ms | 92.3–98.7 ms |
+
+These were sequential queries immediately after seeding, using a synthetic
+fixture with only the columns needed for the metrics. They do not measure HTTP
+throughput, concurrent ingestion, cold caches or production sizing. The probe
+asserted that its temporary database was removed after the run. The measurements
+support proceeding with this first stage without a new storage structure.

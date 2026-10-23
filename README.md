@@ -9,7 +9,8 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 ## Implementation stages
 
 1. Native HTTP ingestion, durable storage, separate ingest/read keys, event queries,
-   and summary metrics. Implemented.
+   and summary metrics. Implemented. Hourly/daily start-cohort charts are available
+   through HTTP and MCP; see [analytics queries and verification](analytics-queries.md).
 2. OTLP/HTTP JSON ingestion, including batched logs and gzip. Implemented.
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.

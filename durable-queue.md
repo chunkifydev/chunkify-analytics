@@ -10,6 +10,14 @@ A producer groups incoming requests for up to one millisecond and acknowledges
 only after a SQLite transaction commits with `synchronous=FULL`. A consumer reads
 bounded batches, releases the SQLite lock, waits for DuckDB to commit, and then
 removes the queue entries. It never holds a SQLite transaction during DuckDB work.
+With `COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE=true`, the consumer prepares at most
+one successor while the current write runs. The default is sequential replay. Both
+prepared batches share the existing writer byte budget; smaller budgets fall
+back to sequential replay. The successor is submitted only after the preceding
+write and queue deletion succeed. `COLLECTOR_DUCKDB_THREADS` optionally limits
+DuckDB parallelism, shared by the writer and reader. It defaults to DuckDB's
+automatic choice. Measure the pipeline together with this setting and the existing
+request/byte limits; more overlap can increase CPU contention.
 
 A native response is HTTP 202, meaning durable receipt for later processing.
 OTLP keeps the standard successful HTTP 200 export response. Events can become

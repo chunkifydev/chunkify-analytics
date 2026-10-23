@@ -81,13 +81,38 @@ Then start Claude Code from that environment and use `/mcp` to check the
 connection and tool list. Local scope keeps the registration in your private
 Claude configuration. The command syntax follows the
 [official Claude Code MCP guide](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
-The automated interoperability check uses the official Rust MCP client; the
-interactive Claude Code dashboard walkthrough is still a release check.
+The automated interoperability check uses the official Rust MCP client. The
+[Codex CLI dashboard walkthrough](mcp-walkthrough.md) passed on 2026-10-20; the
+Claude Code setup example has not had a separate interactive walkthrough.
 
 The collector can run in Docker while the companion runs locally. The container
 image also includes `mcp`; an interactive process needs stdin attached and no
 TTY. A companion container connects to the configured collector over HTTP and
 does not mount the database volume.
+
+### Codex CLI setup example
+
+In your private Codex configuration, add a stdio server and explicitly forward
+these environment variables from the shell that launches Codex:
+
+```toml
+[mcp_servers.chunkify-analytics]
+command = "/absolute/path/to/chunkify-analytics-collector"
+args = ["mcp"]
+env_vars = ["CHUNKIFY_MCP_COLLECTOR_URL", "CHUNKIFY_MCP_READ_TOKEN"]
+required = true
+```
+
+Set the URL and project read token in that shell or its secret manager, then
+start Codex and use the dashboard prompt below. Keep real credentials outside
+repository configuration and prompts. Separate server entries can select
+separate projects; each entry must receive its own read token.
+
+This configuration follows the [official Codex MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+The recorded walkthrough used Codex CLI 0.160.0 with temporary per-run server
+entries and Docker-executed stdio companions. It exercised both projects without
+changing the user's global configuration. See [the acceptance record](mcp-walkthrough.md)
+for exact scope and remaining checks.
 
 ### Available tools
 
@@ -148,8 +173,8 @@ lifecycles, discovery, live HTTP parity, two projects with overlapping IDs,
 filters, pagination, forged scopes, invalid credentials, errors, size bounds,
 concurrency, timeouts and cancellation. CI includes them in `cargo test`.
 
-Before release, also
-connect an AI coding client and ask it to build a small dashboard with total
+For manual release acceptance, connect an AI coding client and ask it to build
+a small dashboard with total
 views, unique viewers, total playing time, a per-video table and date/video
 filters. Compare its totals with the HTTP API and check that the read token is
 only used by the dashboard backend. Record this manual check separately from
@@ -164,6 +189,7 @@ Formatting, Clippy across all targets, and Standards/Spec reviews passed.
 Review caught and resolved an oversized-continuation edge case, covered by a
 live test using Unicode filters and long stored video IDs.
 
-The interactive AI dashboard walkthrough, latest Docker acceptance and final
-capacity checks remain pending. These results do not establish release capacity
-or certify every MCP client.
+The AI dashboard walkthrough subsequently passed on 2026-10-20 with Codex CLI;
+see [its acceptance record](mcp-walkthrough.md). Full Docker lifecycle acceptance
+and final capacity checks remain pending. These results do not establish release
+capacity or certify every MCP client.

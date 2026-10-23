@@ -77,6 +77,16 @@ fn any_value(value: &Value) -> Result<Value, ApiError> {
     Ok(result)
 }
 
+// Copy only envelope metadata. Cloning a resource/scope and then removing its
+// children inside the log loop copies the entire batch once per event.
+fn envelope_metadata(value: &Value, child_field: &str) -> Result<Map<String, Value>, ApiError> {
+    Ok(object(value)?
+        .iter()
+        .filter(|(key, _)| key.as_str() != child_field)
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect())
+}
+
 pub fn decode(request: &Value, max_records: usize) -> Result<Vec<IncomingEvent>, ApiError> {
     let mut remaining = max_records;
     for resource in array(request, "resourceLogs")? {
@@ -93,15 +103,13 @@ pub fn decode(request: &Value, max_records: usize) -> Result<Vec<IncomingEvent>,
     }
     let mut events = Vec::new();
     for resource in array(request, "resourceLogs")? {
+        let resource_context = envelope_metadata(resource, "scopeLogs")?;
         for scope in array(resource, "scopeLogs")? {
+            let scope_context = envelope_metadata(scope, "logRecords")?;
             for log in array(scope, "logRecords")? {
                 let mut event = Value::Object(attributes(array(log, "attributes")?)?);
                 event::restore_otlp_nulls(&mut event);
                 event::validate(&event)?;
-                let mut resource_context = object(resource)?.clone();
-                resource_context.remove("scopeLogs");
-                let mut scope_context = object(scope)?.clone();
-                scope_context.remove("logRecords");
                 events.push(IncomingEvent { event, otlp: Some(json!({
                     "resource_logs": resource_context, "scope_logs": scope_context, "log_record": log,
                 })) });

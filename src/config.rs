@@ -16,6 +16,7 @@ pub struct Config {
     pub store_ip: bool,
     pub profile: bool,
     pub checkpoint_threshold_mib: u32,
+    pub duckdb_threads: Option<usize>,
     pub batch: crate::writer::BatchConfig,
     pub spool: Option<crate::spool::SpoolConfig>,
     pub separate_reads: bool,
@@ -97,8 +98,21 @@ impl Config {
         if !(1..=1024).contains(&checkpoint_threshold_mib) {
             return Err("COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024".into());
         }
+        let duckdb_threads = env::var("COLLECTOR_DUCKDB_THREADS")
+            .ok()
+            .map(|value| -> Result<usize> {
+                let count = value
+                    .parse::<usize>()
+                    .map_err(|_| "COLLECTOR_DUCKDB_THREADS must be between 1 and 256")?;
+                if !(1..=256).contains(&count) {
+                    return Err("COLLECTOR_DUCKDB_THREADS must be between 1 and 256".into());
+                }
+                Ok(count)
+            })
+            .transpose()?;
         Ok(Self {
             checkpoint_threshold_mib,
+            duckdb_threads,
             batch: crate::writer::BatchConfig::load()?,
             spool: crate::spool::SpoolConfig::load()?,
             separate_reads: env::var("COLLECTOR_EXPERIMENTAL_READ_WORKER")

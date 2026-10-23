@@ -44,8 +44,9 @@ Verified on macOS on 2026-10-19 against the published SDK 0.4.0:
 - Standards and Spec migration reviews report zero findings.
 
 Native validation reused the existing Cargo dependency cache; the Rust code was
-built from the extracted repository. A fresh Docker build is compiling bundled
-DuckDB. Container lifecycle verification is pending; CI includes the Docker build
-and lifecycle/benchmark-runner checks. No new capacity benchmark was run.
+built from the extracted repository. The first [standalone Linux CI run](https://github.com/chunkifydev/chunkify-analytics/actions/runs/39294655348)
+passed both jobs on 2026-10-19. The native job took 15m14s. Docker release
+compilation took 28m57s, followed by 16 passing lifecycle and benchmark-runner
+tests in 21 seconds. No new capacity benchmark was run.
 The manual AI dashboard walkthrough and first-release acceptance checks remain
 separate from repository migration.

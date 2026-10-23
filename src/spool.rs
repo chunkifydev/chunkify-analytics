@@ -28,6 +28,7 @@ type Result<T> = std::result::Result<T, String>;
 #[derive(Clone)]
 pub struct SpoolConfig {
     pub max_bytes: usize,
+    pub prepare_ahead: bool,
 }
 impl SpoolConfig {
     pub fn load() -> std::result::Result<Option<Self>, Box<dyn std::error::Error>> {
@@ -43,7 +44,14 @@ impl SpoolConfig {
         if !(4096..=268435456).contains(&max_bytes) {
             return Err("COLLECTOR_SPOOL_MAX_BYTES must be between 4096 and 268435456".into());
         }
-        Ok(Some(Self { max_bytes }))
+        let prepare_ahead = env::var("COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE")
+            .unwrap_or_else(|_| "false".into())
+            .parse()
+            .map_err(|_| "COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE must be true or false")?;
+        Ok(Some(Self {
+            max_bytes,
+            prepare_ahead,
+        }))
     }
 }
 
@@ -79,6 +87,11 @@ pub struct Stats {
     pub pending_bytes: usize,
     pub oldest_age_ms: i64,
     pub failed: bool,
+}
+
+enum NextBatch {
+    Ready(Vec<(i64, StoredRequest, usize)>),
+    AwaitPreviousCommit,
 }
 
 struct Database {
@@ -180,13 +193,13 @@ impl Database {
         }
         Ok(())
     }
-    fn next(&self, batch: &BatchConfig) -> Result<Vec<(i64, StoredRequest, usize)>> {
+    fn next(&self, after: i64, batch: &BatchConfig) -> Result<NextBatch> {
         let mut statement = self
             .connection
-            .prepare("SELECT id, payload, records, project_id FROM pending ORDER BY id LIMIT ?")
+            .prepare("SELECT id, payload, records, project_id FROM pending WHERE id > ? ORDER BY id LIMIT ?")
             .map_err(|e| e.to_string())?;
         let mut rows = statement
-            .query([batch.max_events as i64])
+            .query([after, batch.max_events as i64])
             .map_err(|e| e.to_string())?;
         let mut result = Vec::new();
         let mut bytes = 0;
@@ -206,6 +219,14 @@ impl Database {
                 return Err("Queued project ownership mismatch".into());
             }
             if stored.prepared_version != Writer::PREPARED_VERSION {
+                // Legacy size calculation temporarily prepares rows. Run it
+                // only after the preceding write releases its memory budget.
+                if after > 0 {
+                    if result.is_empty() {
+                        return Ok(NextBatch::AwaitPreviousCommit);
+                    }
+                    break;
+                }
                 stored.prepared_bytes = Writer::prepared_bytes(&stored).map_err(|e| e.1)?;
                 stored.prepared_version = Writer::PREPARED_VERSION;
             }
@@ -223,7 +244,7 @@ impl Database {
                 payload.len(),
             ));
         }
-        Ok(result)
+        Ok(NextBatch::Ready(result))
     }
     fn complete(
         &mut self,
@@ -326,7 +347,14 @@ impl Spool {
             })
         };
         let consumer = thread::spawn(move || {
-            let result = consume(&database, &closed, &failed, &batch, &writer);
+            let result = consume(
+                &database,
+                &closed,
+                &failed,
+                &batch,
+                &writer,
+                config.prepare_ahead,
+            );
             if result.is_err() {
                 failed.store(true, Ordering::Release);
                 eprintln!("Durable queue consumer failed; pending events retained");
@@ -502,20 +530,63 @@ fn produce(
     Ok(())
 }
 
+// Queue rows remain owned by SQLite until this particular write succeeds.
+struct Replaying {
+    through: i64,
+    requests: usize,
+    events: usize,
+    bytes: usize,
+    completion: crate::writer::Replay,
+}
+impl Replaying {
+    fn complete(self, database: &Mutex<Database>) -> Result<()> {
+        self.completion
+            .wait()
+            .map_err(|_| "DuckDB replay failed; pending events retained")?;
+        database
+            .lock()
+            .map_err(|_| "Queue mutex poisoned")?
+            .complete(self.through, self.requests, self.events, self.bytes)
+    }
+}
+
 fn consume(
     database: &Mutex<Database>,
     closed: &AtomicBool,
     failed: &AtomicBool,
     batch: &BatchConfig,
     writer: &Writer,
+    prepare_ahead: bool,
 ) -> Result<()> {
+    let mut replaying: Option<Replaying> = None;
     loop {
-        let pending = database
-            .lock()
-            .map_err(|_| "Queue mutex poisoned")?
-            .next(batch)?;
+        // Keep sequential replay unless the pipeline is explicitly enabled.
+        if !prepare_ahead && let Some(previous) = replaying.take() {
+            previous.complete(database)?;
+        }
+        let (pending, producer_closed) = {
+            let db = database.lock().map_err(|_| "Queue mutex poisoned")?;
+            // Read closure before the queue snapshot. A producer that closes
+            // after an empty snapshot may still have appended its final batch.
+            let producer_closed = closed.load(Ordering::Acquire);
+            let after = replaying.as_ref().map_or(0, |r| r.through);
+            (db.next(after, batch)?, producer_closed)
+        };
+        let pending = match pending {
+            NextBatch::Ready(pending) => pending,
+            NextBatch::AwaitPreviousCommit => {
+                replaying
+                    .take()
+                    .ok_or("Legacy replay requires a preceding write")?
+                    .complete(database)?;
+                continue;
+            }
+        };
         if pending.is_empty() {
-            if closed.load(Ordering::Acquire) {
+            if let Some(previous) = replaying.take() {
+                previous.complete(database)?;
+            }
+            if producer_closed {
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(2));
@@ -528,14 +599,31 @@ fn consume(
         let requests = pending.len();
         let events = pending.iter().map(|(_, r, _)| r.events.len()).sum();
         let bytes = pending.iter().map(|(_, _, size)| size).sum();
-        // No queue lock or SQLite transaction remains open during DuckDB work.
-        writer
-            .replay(pending.into_iter().map(|(_, r, _)| r).collect())
-            .map_err(|_| "DuckDB replay failed; pending events retained")?;
-        database
-            .lock()
-            .map_err(|_| "Queue mutex poisoned")?
-            .complete(through, requests, events, bytes)?;
+        let stored: Vec<_> = pending.into_iter().map(|(_, r, _)| r).collect();
+        // One in-flight write and at most one prepared successor. Both share
+        // the writer's existing byte budget; small budgets use serial replay.
+        let mut prepared = writer.prepare_replay(&stored).map_err(|e| e.1)?;
+        if prepared.is_none()
+            && let Some(previous) = replaying.take()
+        {
+            previous.complete(database)?;
+            prepared = writer.prepare_replay(&stored).map_err(|e| e.1)?;
+        }
+        let prepared = prepared.ok_or("Prepared replay exceeds available queue memory")?;
+        drop(stored);
+        if let Some(previous) = replaying.take() {
+            previous.complete(database)?;
+        }
+        // Do not submit the successor after a failed predecessor. The pending
+        // rows and any dropped prepared successor remain recoverable in SQLite.
+        let completion = writer.submit_replay(prepared).map_err(|e| e.1)?;
+        replaying = Some(Replaying {
+            through,
+            requests,
+            events,
+            bytes,
+            completion,
+        });
     }
 }
 
@@ -574,7 +662,9 @@ mod tests {
             queue_requests: 8,
             bulk: true,
         };
-        let pending = database.next(&batch).unwrap();
+        let NextBatch::Ready(pending) = database.next(0, &batch).unwrap() else {
+            panic!("legacy sizing must proceed without a preceding write");
+        };
         assert_eq!(
             pending.len(),
             1,
@@ -588,7 +678,7 @@ mod tests {
             ..batch
         };
         assert!(
-            database.next(&smaller).is_err(),
+            database.next(0, &smaller).is_err(),
             "an oversized first request must remain queued"
         );
         assert_eq!(
@@ -657,3 +747,6 @@ mod tests {
         std::fs::remove_dir_all(directory).unwrap();
     }
 }
+
+#[cfg(test)]
+mod pipeline_tests;

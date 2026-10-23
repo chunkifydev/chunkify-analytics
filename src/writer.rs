@@ -130,6 +130,24 @@ struct WriteRequest {
     project_permit: Option<crate::projects::Admission>,
 }
 
+// Prepared replay rows own their byte reservation before they can be queued.
+pub struct PreparedReplay {
+    rows: Vec<Row>,
+    bytes: usize,
+    preparation: Duration,
+    permit: OwnedSemaphorePermit,
+}
+
+pub struct Replay(oneshot::Receiver<Result<usize, ApiError>>);
+impl Replay {
+    pub fn wait(self) -> Result<(), ApiError> {
+        self.0
+            .blocking_recv()
+            .map_err(|_| ApiError::unavailable())??;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct Writer {
     sender: mpsc::SyncSender<Job>,
@@ -139,6 +157,11 @@ pub struct Writer {
 }
 
 impl Writer {
+    #[cfg(test)]
+    pub(crate) fn reserved_replay_bytes(&self) -> usize {
+        self.config.queue_bytes - self.budget.available_permits()
+    }
+
     // Bump when the prepared row representation changes. Durable requests may
     // have been admitted by an older binary with a different memory estimate.
     pub const PREPARED_VERSION: u32 = 5;
@@ -157,15 +180,43 @@ impl Writer {
         }
         Ok(bytes)
     }
-    // Called only by the durable-queue thread. Preserve receipt time and request
-    // context across recovery; SQLite retains the batch until this commit succeeds.
-    pub fn replay(&self, requests: Vec<crate::spool::StoredRequest>) -> Result<usize, ApiError> {
+    // Only the durable consumer prepares replay rows. A busy budget leaves the
+    // decoded requests untouched so it can finish the previous write and retry.
+    pub fn prepare_replay(
+        &self,
+        requests: &[crate::spool::StoredRequest],
+    ) -> Result<Option<PreparedReplay>, ApiError> {
         let started = Instant::now();
-        let mut rows = Vec::with_capacity(requests.iter().map(|r| r.events.len()).sum());
+        let reserved = requests.iter().try_fold(0usize, |bytes, r| {
+            bytes
+                .checked_add(r.prepared_bytes)
+                .ok_or_else(ApiError::internal)
+        })?;
+        let records = requests.iter().try_fold(0usize, |count, r| {
+            count
+                .checked_add(r.events.len())
+                .ok_or_else(ApiError::internal)
+        })?;
+        if records > self.config.max_events
+            || reserved > self.config.max_bytes
+            || reserved < size_of::<WriteRequest>() + records * size_of::<Row>()
+        {
+            return Err(ApiError::internal());
+        }
+        let permit = match self
+            .budget
+            .clone()
+            .try_acquire_many_owned(reserved.try_into().map_err(|_| ApiError::internal())?)
+        {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(None),
+            Err(tokio::sync::TryAcquireError::Closed) => return Err(ApiError::unavailable()),
+        };
+        let mut rows = Vec::with_capacity(records);
         for request in requests {
-            for event in request.events {
+            for event in &request.events {
                 rows.push(Row::prepare(
-                    &event,
+                    event,
                     &request.project_id,
                     request.ingest_key_id.as_deref(),
                     request.context.as_ref(),
@@ -176,26 +227,33 @@ impl Writer {
         let bytes = size_of::<WriteRequest>()
             + rows.capacity() * size_of::<Row>()
             + rows.iter().map(Row::heap_bytes).sum::<usize>();
-        let permit = self
-            .budget
-            .clone()
-            .try_acquire_many_owned(bytes.try_into().map_err(|_| ApiError::internal())?)
-            .map_err(|_| ApiError::unavailable())?;
+        // Stored estimates include a WriteRequest for every original request;
+        // combining requests can use less memory, but must never use more.
+        if bytes > reserved {
+            return Err(ApiError::internal());
+        }
+        Ok(Some(PreparedReplay {
+            rows,
+            bytes,
+            preparation: started.elapsed(),
+            permit,
+        }))
+    }
+
+    pub fn submit_replay(&self, prepared: PreparedReplay) -> Result<Replay, ApiError> {
         let (reply, receiver) = oneshot::channel();
         self.sender
             .send(Job::Write(WriteRequest {
-                rows,
-                bytes,
+                rows: prepared.rows,
+                bytes: prepared.bytes,
                 queued: Instant::now(),
-                preparation: started.elapsed(),
+                preparation: prepared.preparation,
                 reply,
-                _permit: permit,
+                _permit: prepared.permit,
                 project_permit: None,
             }))
             .map_err(|_| ApiError::unavailable())?;
-        receiver
-            .blocking_recv()
-            .map_err(|_| ApiError::unavailable())?
+        Ok(Replay(receiver))
     }
     pub fn start(
         mut connection: Connection,
@@ -488,3 +546,6 @@ fn write_bulk(
     })?;
     Ok(counts)
 }
+
+#[cfg(test)]
+mod lookup_tests;

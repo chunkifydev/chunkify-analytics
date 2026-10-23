@@ -6,9 +6,14 @@ COPY src ./src
 COPY openapi.json ./
 ARG TARGETARCH
 ARG BUILD_JOBS=2
+# CI changes this value to run Cargo even when image layers were restored.
+# Unlike --no-cache, this preserves the dependency cache mounts.
+ARG CI_BUILD_ID=local
 RUN --mount=type=cache,id=collector-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=collector-target-${TARGETARCH},target=/app/target \
-    cargo build --locked --release --jobs "$BUILD_JOBS" \
+    printf 'Cargo build check: %s\n' "$CI_BUILD_ID" \
+    && cargo clean --release --package chunkify-analytics-collector \
+    && cargo build --locked --release --jobs "$BUILD_JOBS" \
     && cp target/release/chunkify-analytics-collector /usr/local/bin/chunkify-analytics-collector
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587

@@ -53,27 +53,9 @@ This is a development version.
 
 ## Try the local demo
 
-For a coworker walkthrough, use the optional [native demo](examples/demo/README.md).
-It prepares sample analytics, starts the dashboard, and provides a player page
-that sends real events through `createChunkifyAdapter`. No Docker is required.
-
-A shared demo bundle needs only **Node.js 24** and a collector executable matching
-the recipient's OS and CPU, included by the bundle packer. From a repository checkout:
-
-```sh
-npm ci
-npm run demo -- --collector /absolute/path/to/chunkify-analytics-collector
-```
-
-Developers with a local `cargo build --locked` can simply run `npm run demo`.
-The dashboard opens automatically. It includes 268 sample views, per-video
-filters, playback quality, engagement, event details and rendition breakdowns.
-Select **Try the player** to collect real events, then refresh **Player test**.
-Ctrl+C stops the demo; its private `demo-data/` directory persists between runs.
-
-This is a temporary local demonstration, separate from the collector's production
-API. See the [demo guide](examples/demo/README.md) for sharing a clean bundle,
-port options, data reset and platform limitations.
+The [dashboard demo](#dashboard-demo) runs directly from this repository with
+sample analytics and a player that sends real events to your local collector.
+Follow that section for the Mac prerequisites, build commands and walkthrough.
 
 ## API contract
 
@@ -1440,9 +1422,107 @@ its byte limit, and exceeded the dashboard p95 targets. All 900,890 acknowledged
 events survived restart. Memory counters, queue growth and database profiles
 identify the next optimization work in that report.
 
-## Dashboard example
+## Dashboard demo
 
-The [local dashboard example](examples/dashboard/README.md) includes an overview,
-playback quality, engagement and an event explorer. It uses the HTTP read API
-with private tokens on a Node backend and includes optional synthetic demo data.
-The collector MCP describes these same metrics for AI-assisted dashboard building.
+Run the complete demo directly from this repository. It includes the collector,
+the dashboard with synthetic analytics, and a player that sends real events
+through `createChunkifyAdapter`. This is the same dashboard and player as the
+shared demo bundle. Docker and a separately downloaded executable are not required.
+
+### 1. Prepare your Mac once
+
+Skip tools you already have installed.
+
+- Install **Node.js 24** from [Node.js downloads](https://nodejs.org/en/download).
+  npm is included. If you use nvm, run `nvm install 24` and `nvm use 24`.
+- Install **Apple Command Line Tools** for the C++ compiler used to build DuckDB.
+  Full Xcode is not needed. Run this command and follow the installation dialog:
+
+```sh
+xcode-select --install
+```
+
+- Install **Rust and Cargo** with the [official Rust installer](https://rust-lang.org/tools/install/):
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Follow the prompts, then reopen your terminal so it can find Cargo. Check the tools:
+
+```sh
+node --version
+npm --version
+cargo --version
+rustc --version
+clang++ --version
+```
+
+Node must report `v24.x`. CI uses Rust 1.99.0; an older rustup installation can be
+updated with `rustup update stable`.
+[Apple's installation guide](https://developer.apple.com/documentation/xcode/installing-the-command-line-tools)
+and the [full demo guide](examples/demo/README.md) have more setup details.
+
+### 2. Get the repository
+
+If you do not already have a checkout:
+
+```sh
+git clone https://github.com/chunkifydev/chunkify-analytics.git
+cd chunkify-analytics
+```
+
+Otherwise, open a terminal in your existing `chunkify-analytics` checkout. Get the
+latest version of `main`:
+
+```sh
+git fetch origin
+git switch main
+git pull --ff-only
+```
+
+### 3. Build and start
+
+From the repository root:
+
+```sh
+npm ci
+cargo build --locked
+npm run demo -- --collector target/debug/chunkify-analytics-collector
+```
+
+The first build compiles DuckDB and can take several minutes. The launch command
+selects that freshly built collector, creates projects and keys, generates **816 synthetic
+events for 268 views across nine videos**, and opens the dashboard automatically.
+Keep the terminal open. No manual database setup, token entry or seed command is needed.
+
+If port 8787 is occupied, use `npm run demo -- --collector target/debug/chunkify-analytics-collector --port 0` to select a free port.
+
+### 4. Explore and send real events
+
+1. Select **Demo data** to explore Overview, Playback quality, Engagement and Events.
+   Open an event for its media resolution, rendition timings and stored JSON.
+2. Click **Try the player**. Paste your own HTTP(S) video URL into the empty field,
+   choose a video ID, and click **Start demo view**.
+3. Play, pause, seek or change quality, then open **Player test analytics** and
+   click **Refresh** to see received events and watch time.
+4. Click **Finish view** on the player, then refresh again for its final summary.
+
+The video URL field starts empty with the placeholder `put your video link here.mp4`.
+Use a full URL, such as your own hosted MP4 or HLS stream; it must allow browser
+access. Internet access is required for the player and SDK modules from jsDelivr.
+The collector and database run locally. The dashboard uses manual refresh.
+
+### 5. Stop and run it again
+
+Press **Ctrl+C** to stop the dashboard and collector. Your private `demo-data/`
+directory is kept and ignored by Git. Next time, run `npm run demo -- --collector target/debug/chunkify-analytics-collector` again; the
+sample data and your player events are preserved without duplicate seeding.
+
+After pulling source updates, run `npm ci` and `cargo build --locked` again before
+starting the demo. The [full demo guide](examples/demo/README.md) also covers data
+reset, custom collector paths and optional archive sharing.
+
+This temporary demo uses the HTTP read API with private tokens on a Node backend.
+The collector MCP describes these same routes and metrics for AI-assisted dashboard
+building; running the demo does not require an MCP client.

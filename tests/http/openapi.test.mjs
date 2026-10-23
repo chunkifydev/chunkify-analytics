@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ import { gzipSync } from "node:zlib";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
-import { component, assertRequest, assertResponse } from "./openapi-support.mjs";
+import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics-collector");
 
@@ -209,7 +210,7 @@ test("OTLP gzip, all seven SDK events and cross-transport duplicates match the c
 test("documented authentication, CORS and protocol errors match the API", async t => {
   const event = sdkPlayback(t)[0];
   const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "8192", COLLECTOR_MAX_OTLP_RECORDS: "1" });
-  for (const path of ["/v1/events", "/v1/summary", "/v1/videos", "/v1/ingestion"]) {
+  for (const path of ["/v1/events", "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos", "/v1/ingestion"]) {
     await server.get(path, 401, {});
     await server.get(path, 401, { Authorization: `Bearer ${server.keys.ingest_key}` });
     const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${server.keys.read_token}`, Origin: "https://player.example" } });
@@ -277,3 +278,291 @@ test("experimental queue responses and committed visibility follow the same cont
   assert.equal(page.events[0].otlp, undefined, "the first native delivery keeps its original transport context");
   assert.equal((await server.get("/v1/summary")).views, 1);
 });
+
+
+for (const separateReads of [false, true]) {
+  test(`timeseries returns bounded UTC start cohorts with summary parity (separate reads: ${separateReads})`, async t => {
+    const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" });
+    const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+    const start = (at, viewer, video = "video-a", browser = "Chrome") => ({
+      ...sample, event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
+      occurred_at: at, video_id: video, viewer_id: viewer,
+      browser_context: { schema_version: 1, browser_name: browser, os_name: "Linux", device_type: "desktop" },
+    });
+    const measurement = (event, sequence, kind, playing, at = event.occurred_at) => ({
+      ...event, event_id: randomUUID(), sequence, event_name: `chunkify.video.${kind}`,
+      occurred_at: at, playing_time_ms: playing, reason: kind === "view_ended" ? "destroyed" : null,
+    });
+    const a = start("2026-10-19T10:30:00Z", "returning-viewer");
+    const b = start("2026-10-19T11:00:00Z", "returning-viewer", "video-b", "Firefox");
+    const anonymous = start("2026-10-19T11:59:59.999Z", null);
+    const before = start("2026-10-19T10:29:59.999Z", "outside");
+    const after = start("2026-10-19T14:00:00Z", "outside");
+    const orphan = start("2026-10-19T12:00:00Z", "orphan");
+    const old = start("1969-12-31T23:30:00Z", "old");
+    const boundary = start("1970-01-01T00:00:00Z", "boundary");
+    const nextDay = start("2026-10-20T10:00:00Z", "returning-viewer");
+    const rows = [
+      // Receive a later, inconsistent start first. The earliest sequence remains authoritative.
+      { ...a, event_id: randomUUID(), sequence: 2, occurred_at: "2026-10-19T12:00:00Z", video_id: "wrong-video", browser_context: { schema_version: 1, browser_name: "Safari" } },
+      a, measurement(a, 3, "view_ended", 500, "2026-10-21T00:00:00Z"),
+      measurement(a, 90, "view_snapshot", 99999),
+      { ...measurement(a, 100, "view_ended", 99999), video_id: "wrong-video" },
+      b, measurement(b, 3, "view_snapshot", 1000), measurement(b, 2, "view_snapshot", 200),
+      anonymous, before, measurement(before, 2, "view_ended", 8000), after,
+      measurement(orphan, 2, "view_ended", 99999), old, boundary,
+      nextDay, measurement(nextDay, 2, "view_ended", 700),
+    ];
+    for (const event of rows) await server.post("/v1/events", JSON.stringify(event), 201);
+    await server.post("/v1/events", JSON.stringify(a), 200);
+    const params = { from: "2026-10-19T10:30:00Z", to: "2026-10-19T14:00:00Z", interval: "hour" };
+    const series = (overrides = {}) => server.get(`/v1/timeseries?${new URLSearchParams({ ...params, ...overrides })}`);
+    const bucket = (hour, views, viewers, playing) => ({ bucket_start: `2026-10-19T${hour}:00:00.000Z`,
+      views, unique_viewers: viewers, total_playing_time_ms: playing });
+    const result = await series();
+    assert.deepEqual(result, { from: "2026-10-19T10:30:00.000Z", to: "2026-10-19T14:00:00.000Z",
+      interval: "hour", timezone: "UTC", buckets: [bucket("10", 1, 1, 500), bucket("11", 2, 1, 1000), bucket("12", 0, 0, 0), bucket("13", 0, 0, 0)] });
+    const summary = await server.get(`/v1/summary?${new URLSearchParams({ from: params.from, to: params.to })}`);
+    assert.equal(result.buckets.reduce((sum, row) => sum + row.views, 0), summary.views);
+    assert.equal(result.buckets.reduce((sum, row) => sum + row.total_playing_time_ms, 0), summary.total_playing_time_ms);
+    assert.equal(summary.unique_viewers, 1);
+    assert.equal(result.buckets.reduce((sum, row) => sum + row.unique_viewers, 0), 2, "unique viewers are not additive");
+    assert.deepEqual(await series({ from: "2026-10-19T12:30:00+02:00", to: "2026-10-19T16:00:00+02:00" }), result);
+    assert.deepEqual((await series({ browser_name: "Chrome", os_name: "Linux", device_type: "desktop", viewer_id: "returning-viewer", video_id: "video-a" })).buckets,
+      [bucket("10", 1, 1, 500), bucket("11", 0, 0, 0), bucket("12", 0, 0, 0), bucket("13", 0, 0, 0)]);
+    for (const filter of [{ browser_name: "Safari" }, { video_id: "wrong-video" }, { device_type: "mobile" }, { viewer_id: "missing" }]) {
+      assert.ok((await series(filter)).buckets.every(row => row.views === 0 && row.unique_viewers === 0 && row.total_playing_time_ms === 0));
+    }
+    assert.deepEqual((await series({ from: "2026-10-19T10:30:00Z", to: "2026-10-19T11:00:00Z" })).buckets, [bucket("10", 1, 1, 500)]);
+    assert.deepEqual((await series({ interval: "day", from: "2026-10-19T10:30:00Z", to: "2026-10-21T00:00:00Z" })).buckets, [
+      { bucket_start: "2026-10-19T00:00:00.000Z", views: 4, unique_viewers: 2, total_playing_time_ms: 1500 },
+      { bucket_start: "2026-10-20T00:00:00.000Z", views: 1, unique_viewers: 1, total_playing_time_ms: 700 },
+    ]);
+    assert.deepEqual((await series({ from: "1969-12-31T23:30:00Z", to: "1970-01-01T00:00:00Z" })).buckets,
+      [{ bucket_start: "1969-12-31T23:00:00.000Z", views: 1, unique_viewers: 1, total_playing_time_ms: 0 }]);
+    const maxStart = Date.parse("2020-01-01T00:00:00Z");
+    for (const [interval, width] of [["hour", 3600000], ["day", 86400000]]) {
+      assert.equal((await series({ interval, from: new Date(maxStart).toISOString(), to: new Date(maxStart + 1000 * width).toISOString() })).buckets.length, 1000);
+      await server.get(`/v1/timeseries?${new URLSearchParams({ interval, from: new Date(maxStart).toISOString(), to: new Date(maxStart + 1000 * width + 1).toISOString() })}`, 400);
+    }
+    for (const invalid of [{}, { from: params.from }, { ...params, interval: "week" }, { ...params, from: params.to },
+      { ...params, to: params.from }, { ...params, from: "invalid" }, { ...params, from: "2026-10-19" },
+      { ...params, limit: "1" }, { ...params, cursor: "x" }, { ...params, project_id: "other" },
+      { ...params, event_name: "chunkify.video.view_started" }, { ...params, timezone: "Europe/Paris" },
+      { ...params, browser_name: "" }, { ...params, os_name: "x".repeat(65) }, { ...params, device_type: "TV" },
+      { ...params, from: "2026-10-19T10:00:00.0001Z", to: "2026-10-19T10:00:00.0009Z" }]) {
+      await server.get(`/v1/timeseries?${new URLSearchParams(invalid)}`, 400);
+    }
+    await server.get(`/v1/timeseries?${new URLSearchParams(params)}&interval=day`, 400);
+    for (const token of [null, "invalid", server.keys.ingest_key]) {
+      await server.get(`/v1/timeseries?${new URLSearchParams(params)}`, 401, token ? { Authorization: `Bearer ${token}` } : {});
+    }
+    for (const path of ["/v1/summary", "/v1/videos", "/v1/events"]) await server.get(`${path}?interval=day`, 400);
+  });
+}
+
+
+for (const separateReads of [false, true]) {
+  test(`quality measures each view once with explicit coverage (separate reads: ${separateReads})`, async t => {
+    const settings = { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" };
+    const server = await collector(t, settings);
+    const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+    const start = (video = "a", browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
+      ...sample, event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
+      occurred_at: at, video_id: video, viewer_id: viewer,
+      browser_context: { schema_version: 1, browser_name: browser, os_name: "Linux", device_type: "desktop" },
+    });
+    const event = (view, sequence, kind, startup = null, playing = 0, buffering = 0, extra = {}) => ({
+      ...view, event_id: randomUUID(), sequence, event_name: `chunkify.video.${kind}`,
+      startup_time_ms: startup, playing_time_ms: playing, rebuffer_duration_ms: buffering,
+      rebuffer_ratio: 0.99, // Deliberately not the ratio used by the aggregate.
+      reason: kind === "view_ended" ? "destroyed" : null, ...extra,
+    });
+    const a = start();
+    const b = start("b", "Firefox");
+    const c = start("c", "Chrome", "2026-10-19T12:00:00Z", null);
+    const d = start("no-snapshot");
+    const e = start("zero-startup");
+    const f = start("failed");
+    const before = start("outside", "Chrome", "2026-10-18T23:59:59.999Z");
+    const after = start("outside", "Chrome", "2026-10-20T00:00:00Z");
+    const fatal = (view, sequence, extra = {}) => event(view, sequence, "playback_error", null, 0, 0, { error_fatal: true, ...extra });
+    const aEnd = event(a, 5, "view_ended", 100, 900, 100, { occurred_at: "2026-10-21T12:00:00Z", browser_context: { schema_version: 1, browser_name: "Safari" } });
+    const rows = [
+      { ...a, event_id: randomUUID(), sequence: 2, video_id: "wrong-video", browser_context: { schema_version: 1, browser_name: "Safari" } },
+      a, event(a, 99, "view_snapshot", 9999, 99999, 99999), aEnd,
+      fatal(a, 3), fatal(a, 4),
+      event(a, 100, "view_ended", 9999, 99999, 99999, { viewer_id: "wrong-viewer" }),
+      b, event(b, 3, "view_snapshot", 300, 100, 100), event(b, 2, "view_snapshot", 50, 50, 50),
+      fatal(b, 4, { viewer_id: "wrong-viewer" }), fatal(b, 5, { video_id: "wrong-video" }),
+      event(b, 6, "playback_state_changed", null, 99999, 99999, { from_state: "playing", to_state: "paused", previous_state_duration_ms: 10, playhead_seconds: 10, error_fatal: true }),
+      c, event(c, 2, "view_snapshot", 9999, 9000, 9000), event(c, 3, "view_ended", null, 1000, 0),
+      fatal(c, 4, { error_fatal: false }),
+      d, event(d, 2, "playback_error", 9999, 99999, 99999, { error_fatal: null }),
+      e, event(e, 2, "view_ended", 0),
+      f, fatal(f, 2), event(f, 3, "view_ended", null, 0, 0, { startup_outcome: "failed_before_start" }),
+      before, fatal(before, 2), event(before, 3, "view_ended", 9999, 99999, 99999),
+      after, fatal(after, 2), event(after, 3, "view_ended", 9999, 99999, 99999),
+      fatal(start("orphan"), 2), event(start("orphan"), 3, "view_ended", 9999, 99999, 99999),
+    ];
+    for (const row of rows) {
+      assertRequest("/v1/events", "post", row);
+      // Exercise integral JSON floats, which lossless storage retains in JSON.
+      const body = JSON.stringify(row).replace('"startup_time_ms":100,', '"startup_time_ms":100.0,')
+        .replace('"rebuffer_duration_ms":100,', '"rebuffer_duration_ms":100.0,');
+      await server.post("/v1/events", body, 201);
+    }
+    await server.post("/v1/events", JSON.stringify(aEnd), 200);
+    const filters = { from: "2026-10-19T00:00:00Z", to: "2026-10-20T00:00:00Z" };
+    const quality = (extra = {}) => server.get(`/v1/quality?${new URLSearchParams({ ...filters, ...extra })}`);
+    const expected = {
+      views: 6, startup_time_ms: { sample_views: 3, median: 100, p95: 280 },
+      buffering: { sample_views: 3, total_playing_time_ms: 2000, total_rebuffer_duration_ms: 200, ratio: 200 / 2200 },
+      fatal_errors: { affected_views: 2, ratio: 2 / 6 },
+    };
+    assert.deepEqual(await quality(), expected);
+    assert.equal((await server.get(`/v1/summary?${new URLSearchParams(filters)}`)).views, expected.views);
+    const empty = { views: 0, startup_time_ms: { sample_views: 0, median: null, p95: null },
+      buffering: { sample_views: 0, total_playing_time_ms: 0, total_rebuffer_duration_ms: 0, ratio: null },
+      fatal_errors: { affected_views: 0, ratio: null } };
+    for (const extra of [{ video_id: "wrong-video" }, { viewer_id: "wrong-viewer" }, { browser_name: "Safari" },
+      { os_name: "macOS" }, { device_type: "mobile" }, { from: "2026-10-22T00:00:00Z", to: "2026-10-23T00:00:00Z" }]) {
+      assert.deepEqual(await quality(extra), empty);
+    }
+    assert.deepEqual(await quality({ video_id: "b", viewer_id: "viewer", browser_name: "Firefox", os_name: "Linux", device_type: "desktop" }), {
+      views: 1, startup_time_ms: { sample_views: 1, median: 300, p95: 300 },
+      buffering: { sample_views: 1, total_playing_time_ms: 100, total_rebuffer_duration_ms: 100, ratio: 0.5 },
+      fatal_errors: { affected_views: 0, ratio: 0 },
+    });
+    const even = await quality({ viewer_id: "viewer", browser_name: "Chrome" });
+    assert.deepEqual(even.startup_time_ms, { sample_views: 2, median: 50, p95: 95 });
+    assert.deepEqual((await quality({ video_id: "no-snapshot" })).startup_time_ms, empty.startup_time_ms);
+    assert.deepEqual((await quality({ video_id: "zero-startup" })).startup_time_ms, { sample_views: 1, median: 0, p95: 0 });
+    assert.deepEqual((await quality({ video_id: "failed" })).fatal_errors, { affected_views: 1, ratio: 1 });
+    assert.deepEqual(await quality({ from: "2026-10-19T02:00:00+02:00", to: "2026-10-20T02:00:00+02:00" }), expected);
+    for (const invalid of [{ limit: "1" }, { cursor: "x" }, { event_name: "chunkify.video.view_started" },
+      { project_id: "other" }, { interval: "day" }, { from: "invalid" }, { from: filters.to },
+      { to: filters.from }, { browser_name: "" }, { os_name: "x".repeat(65) }, { device_type: "TV" }]) {
+      await server.get(`/v1/quality?${new URLSearchParams({ ...filters, ...invalid })}`, 400);
+    }
+    await server.get("/v1/quality?video_id=a&video_id=b", 400);
+    for (const token of [null, "invalid", server.keys.ingest_key]) {
+      await server.get("/v1/quality", 401, token ? { Authorization: `Bearer ${token}` } : {});
+    }
+    const otlpServer = await collector(t, settings);
+    await otlpServer.post("/v1/logs", JSON.stringify(await otlpPayload(rows)), 200);
+    assert.deepEqual(await otlpServer.get(`/v1/quality?${new URLSearchParams(filters)}`), expected);
+    // Large JSON integers also live in the storage remainder. This independent
+    // cohort verifies extraction without affecting the realistic ratios above.
+    const large = start("large-number");
+    await server.post("/v1/events", JSON.stringify(large), 201);
+    await server.post("/v1/events", JSON.stringify(event(large, 2, "view_ended", 9007199254740992, 1, 9007199254740992)), 201);
+    const result = await quality({ video_id: "large-number" });
+    assert.equal(result.startup_time_ms.median, 9007199254740992);
+    assert.equal(result.buffering.total_rebuffer_duration_ms, 9007199254740992);
+    const extreme = start("large-durations");
+    await server.post("/v1/events", JSON.stringify(extreme), 201);
+    await server.post("/v1/events", JSON.stringify(event(extreme, 2, "view_ended", 1e308, 1e308, 1e308)), 201);
+    assert.equal((await quality({ video_id: "large-durations" })).buffering.ratio, 0.5);
+    const overflow = start("large-durations");
+    await server.post("/v1/events", JSON.stringify(overflow), 201);
+    await server.post("/v1/events", JSON.stringify(event(overflow, 2, "view_ended", null, 1e308, 1e308)), 201);
+    await server.get("/v1/quality?video_id=large-durations", 500);
+
+
+  });
+}
+
+
+for (const separateReads of [false, true]) {
+  test(`engagement uses all attempts and the selected final event (separate reads: ${separateReads})`, async t => {
+    const settings = { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" };
+    const server = await collector(t, settings);
+    const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+    const start = (video, browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
+      ...sample, event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
+      occurred_at: at, video_id: video, viewer_id: viewer,
+      browser_context: { schema_version: 1, browser_name: browser, os_name: "Linux", device_type: "desktop" },
+    });
+    const event = (view, sequence, kind, playing, reason = null, extra = {}) => ({
+      ...view, event_id: randomUUID(), sequence, event_name: `chunkify.video.${kind}`,
+      playing_time_ms: playing, reason, ...extra,
+    });
+    const a = start("ended"), b = start("ongoing", "Firefox"), c = start("start-only");
+    const d = start("page-exit"), e = start("failed"), f = start("conflicting-ends");
+    const g = start("end-order", "Chrome", "2026-10-19T12:00:00Z", null), h = start("unknown-end");
+    const before = start("outside", "Chrome", "2026-10-18T23:59:59.999Z");
+    const after = start("outside", "Chrome", "2026-10-20T00:00:00Z");
+    const orphan = start("orphan");
+    const aEnd = event(a, 3, "view_ended", 8000, "ended", {
+      occurred_at: "2026-10-21T12:00:00Z", browser_context: { schema_version: 1, browser_name: "Safari" },
+    });
+    const rows = [
+      { ...a, event_id: randomUUID(), sequence: 2, video_id: "wrong-video", browser_context: { schema_version: 1, browser_name: "Safari" } },
+      a, aEnd, event(a, 90, "view_snapshot", 99999),
+      event(a, 100, "view_ended", 99999, "destroyed", { viewer_id: "wrong-viewer" }),
+      event(a, 100, "view_ended", 99999, "destroyed", { video_id: "wrong-video" }),
+      b, event(b, 3, "view_snapshot", 4000, "ended"), event(b, 2, "view_snapshot", 1000),
+      c, event(c, 2, "playback_error", 99999, "ended", { error_fatal: true }),
+      d, event(d, 2, "view_ended", 2000, "page_exit"),
+      e, event(e, 2, "view_ended", 0, "destroyed", { startup_outcome: "failed_before_start" }),
+      f, event(f, 3, "view_ended", 6000, "ended"), event(f, 3, "view_ended", 6000, "destroyed"),
+      g, event(g, 4, "view_ended", 1000, "ended", { occurred_at: "2026-10-19T13:00:00Z" }),
+      event(g, 3, "view_ended", 99999, "destroyed", { occurred_at: "2026-10-19T14:00:00Z" }),
+      event(g, 4, "view_ended", 99999, "destroyed", { occurred_at: "2026-10-19T12:30:00Z" }),
+      h, event(h, 2, "view_ended", 0),
+      before, event(before, 2, "view_ended", 99999, "ended"),
+      after, event(after, 2, "view_ended", 99999, "ended"),
+      event(orphan, 2, "view_ended", 99999, "ended"),
+    ];
+    for (const row of rows) {
+      assertRequest("/v1/events", "post", row);
+      await server.post("/v1/events", JSON.stringify(row), 201);
+    }
+    await server.post("/v1/events", JSON.stringify(aEnd), 200);
+    const filters = { from: "2026-10-19T00:00:00Z", to: "2026-10-20T00:00:00Z" };
+    const engagement = (extra = {}) => server.get(`/v1/engagement?${new URLSearchParams({ ...filters, ...extra })}`);
+    const metrics = (views, playing, reached) => ({ views, total_playing_time_ms: playing,
+      average_playing_time_ms: views ? playing / views : null, reached_end_views: reached,
+      reached_end_ratio: views ? reached / views : null });
+    const expected = metrics(8, 21000, 2);
+    assert.deepEqual(await engagement(), expected);
+    const summary = await server.get(`/v1/summary?${new URLSearchParams(filters)}`);
+    assert.equal(expected.views, summary.views);
+    assert.equal(expected.total_playing_time_ms, summary.total_playing_time_ms);
+    assert.deepEqual(await engagement({ video_id: "ended", viewer_id: "viewer", browser_name: "Chrome", os_name: "Linux", device_type: "desktop" }), metrics(1, 8000, 1));
+    assert.deepEqual(await engagement({ browser_name: "Firefox" }), metrics(1, 4000, 0));
+    assert.deepEqual(await engagement({ viewer_id: "viewer" }), metrics(7, 20000, 1));
+    for (const video_id of ["start-only", "failed", "unknown-end"]) {
+      assert.deepEqual(await engagement({ video_id }), metrics(1, 0, 0));
+    }
+    assert.deepEqual(await engagement({ video_id: "conflicting-ends" }), metrics(1, 6000, 0));
+    assert.deepEqual(await engagement({ video_id: "end-order" }), metrics(1, 1000, 1));
+    for (const extra of [{ video_id: "wrong-video" }, { viewer_id: "wrong-viewer" }, { browser_name: "Safari" },
+      { os_name: "macOS" }, { device_type: "mobile" }, { video_id: "orphan" },
+      { from: "2026-10-22T00:00:00Z", to: "2026-10-23T00:00:00Z" }]) {
+      assert.deepEqual(await engagement(extra), metrics(0, 0, 0));
+    }
+    assert.deepEqual(await engagement({ from: "2026-10-19T02:00:00+02:00", to: "2026-10-20T02:00:00+02:00" }), expected);
+    assert.deepEqual(await engagement({ from: "2026-10-19T12:00:00Z", to: "2026-10-19T12:00:00.001Z" }), expected);
+    assert.deepEqual(await engagement({ to: "2026-10-19T12:00:00Z" }), metrics(0, 0, 0));
+    for (const invalid of [{ limit: "1" }, { cursor: "x" }, { event_name: "chunkify.video.view_started" },
+      { project_id: "other" }, { interval: "day" }, { from: "invalid" }, { from: filters.to },
+      { to: filters.from }, { browser_name: "" }, { os_name: "x".repeat(65) }, { device_type: "TV" }]) {
+      await server.get(`/v1/engagement?${new URLSearchParams({ ...filters, ...invalid })}`, 400);
+    }
+    await server.get("/v1/engagement?video_id=a&video_id=b", 400);
+    for (const token of [null, "invalid", server.keys.ingest_key]) {
+      await server.get("/v1/engagement", 401, token ? { Authorization: `Bearer ${token}` } : {});
+    }
+    const otlpServer = await collector(t, settings);
+    await otlpServer.post("/v1/logs", JSON.stringify(await otlpPayload(rows)), 200);
+    assert.deepEqual(await otlpServer.get(`/v1/engagement?${new URLSearchParams(filters)}`), expected);
+    for (let i = 0; i < 2; i++) {
+      const huge = start("overflow");
+      await server.post("/v1/events", JSON.stringify(huge), 201);
+      await server.post("/v1/events", JSON.stringify(event(huge, 2, "view_ended", 1e308, "ended")), 201);
+    }
+    await server.get("/v1/engagement?video_id=overflow", 500);
+  });
+}

@@ -9,7 +9,8 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 ## Implementation stages
 
 1. Native HTTP ingestion, durable storage, separate ingest/read keys, event queries,
-   and summary metrics. Implemented.
+   and summary metrics. Implemented. Hourly/daily start-cohort charts and playback
+   quality and engagement summaries are available through HTTP and MCP; see [analytics queries and verification](analytics-queries.md).
 2. OTLP/HTTP JSON ingestion, including batched logs and gzip. Implemented.
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.
@@ -389,7 +390,7 @@ same version, retention, deletion, and credential rules in the backup section be
 
 ## Send analytics
 
-Use the analytics package from this branch:
+Use the analytics SDK in your player application:
 
 ```js
 import { monitor } from "@chunkify/analytics";
@@ -537,6 +538,43 @@ The SDK continues to send once without retrying. Limits are configurable safegua
 not a throughput guarantee. Configure connection and request timeouts at
 your ingress before exposing this development service publicly.
 
+## Build a dashboard with the collector
+
+1. Run the collector as a standalone server or Docker container with a persistent
+   data directory. Initialize credentials once. Use a project per customer or
+   environment, such as staging and production; the project keys select its data.
+2. Connect the player's analytics SDK through `createChunkifyAdapter`, passing
+   the ingestion URL and that project's ingest key. The SDK sends playback events
+   and browser context. The collector validates and stores them, adds request IP
+   context when enabled, and ignores repeated event IDs within a project.
+3. Give your dashboard backend a private project read token. It calls the routes
+   below and sends the needed results to your frontend. Read tokens stay out of
+   browser code; read endpoints do not enable browser CORS.
+4. Choose a date range and optional video/viewer/browser/OS/device filters. Use
+   the same filters across dashboard cards. Summary dates select view starts;
+   later measurements still belong to those views. Independent requests may see
+   new arrivals between cards, so refresh them together.
+
+| Dashboard element | Collector request |
+| --- | --- |
+| Total views, supplied unique viewer IDs, playing time | `GET /v1/summary` |
+| Hourly/daily views and playing-time chart | `GET /v1/timeseries` with `from`, `to`, `interval` |
+| Table of videos and their totals | `GET /v1/videos`; follow pagination |
+| Selected video's average watch time and reached-end rate | `GET /v1/engagement?video_id=...` |
+| Startup speed, buffering and observed fatal errors | `GET /v1/quality` |
+| Inspect received events and their context | `GET /v1/events`; follow pagination |
+
+Omit `video_id` from engagement or quality to show the whole project's selected
+views. Supply it for a video's detail panel. These two endpoints return summaries;
+they do not return per-video tables or time buckets. A time-series bucket's playing
+time belongs to views started in that bucket, not when each second was played.
+
+An AI coding tool can use the [local MCP companion](mcp.md) with the collector URL
+and a private project read token. It discovers the API, queries these same metrics
+and uses its coding tools to create a dashboard. The finished dashboard's backend
+calls the HTTP API directly; it does not need the AI assistant running. The
+collector provides data and calculations; customers choose their dashboard UI.
+
 ## HTTP API
 
 | Method and path | Authorization | Response |
@@ -546,6 +584,9 @@ your ingress before exposing this development service publicly.
 | `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch commits, including empty or duplicate-only batches. |
 | `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/engagement` | `Authorization: Bearer READ_TOKEN` | Average playing time per attempt and observed reached-end count/rate. |
+| `GET /v1/quality` | `Authorization: Bearer READ_TOKEN` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
+| `GET /v1/timeseries` | `Authorization: Bearer READ_TOKEN` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
 | `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
 Native ingestion accepts `Content-Type: application/json` and one complete schema
@@ -713,6 +754,146 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
 - Final events do not imply video completion. Missing events can make metrics
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an ingest key does not verify their authenticity.
+
+### Hourly and daily charts
+
+`GET /v1/timeseries` returns the same metrics grouped by the time each view
+started. Supply `from`, `to` and `interval=hour` or `interval=day`. The existing
+video, viewer, browser, OS and device filters also apply. The project is selected
+by the private read token.
+
+```sh
+curl --get 'http://127.0.0.1:4174/v1/timeseries' \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  --data-urlencode 'from=2026-10-19T00:00:00Z' \
+  --data-urlencode 'to=2026-10-21T00:00:00Z' \
+  --data-urlencode 'interval=day'
+```
+
+The response contains normalized `from`/`to` bounds, `interval`, `timezone: "UTC"`
+and ascending `buckets`. Each bucket has `bucket_start`, `views`, `unique_viewers`
+and `total_playing_time_ms`. Empty buckets contain zeros. Hourly buckets align to
+UTC hours, and daily buckets align to midnight UTC, regardless of input offsets.
+The first/last bucket may be partial; only view starts in `[from, to)` count.
+Dates have millisecond precision, as with the other read endpoints.
+
+A request can cover at most 1000 buckets, including empty/partial buckets. Larger
+ranges return 400: select a shorter range or use daily buckets. There is no
+pagination or silent truncation. Unsupported parameters such as `limit`, `cursor`,
+`event_name`, `timezone` and `project_id` return 400.
+
+Label playing-time charts **Playing time for views started in this period**.
+A view contributes its entire retained cumulative playing time to its start
+bucket, even if it plays after that bucket or after `to`. This does not measure
+concurrent viewers or allocate viewing activity across clock hours. Bucket views
+and playing time sum to the matching summary on unchanged data. Bucket unique
+viewers must not be summed, because a viewer may appear in several buckets.
+New snapshots, final events, deletion or retention can change later results.
+
+The MCP companion exposes the same operation as `get_timeseries`. See
+[analytics query scope](analytics-queries.md) for the first stage and later work.
+
+### Watch time and reaching the end
+
+`GET /v1/engagement` accepts the same optional date, video, viewer, browser, OS
+and device filters as summary. The private read token selects the project.
+There is no pagination. The MCP tool is `get_engagement`.
+
+```sh
+curl --get 'http://127.0.0.1:4174/v1/engagement' \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  --data-urlencode 'video_id=video-123' \
+  --data-urlencode 'from=2026-10-19T00:00:00Z' \
+  --data-urlencode 'to=2026-10-21T00:00:00Z'
+```
+
+```json
+{
+  "views": 4,
+  "total_playing_time_ms": 120000,
+  "average_playing_time_ms": 30000,
+  "reached_end_views": 1,
+  "reached_end_ratio": 0.25
+}
+```
+
+This example represents four playback attempts, 120 seconds of total playing
+time, 30 seconds per attempt on average, and one attempt reaching the end: 25%.
+The average uses all selected attempts, including failed and ongoing views.
+It is not the average per unique viewer. Label it **Average watch time per attempt**.
+
+The collector uses one final measurement per view, or the latest snapshot if
+there is no final event. Missing values contribute zero, as in summary. The
+selected final event must have `reason: ended` to count as reaching the end.
+Closing a page, destroying a player or changing source does not count. Multiple
+final events use the same sequence/time/ingestion ordering as playing time.
+An ended reason on a snapshot does not count.
+
+With no views, both the average and ratio are null, while counts and total time
+are zero. With views but no measured time or observed end, these values are zero.
+All filters select the first start; matching later events can contribute even
+after the date window. Retention/deletion and missing browser delivery affect
+these metrics. Replays with a new view ID count as new attempts. Live videos and
+ongoing attempts can lower the reached-end rate. Seeking to the end can count,
+so this does not measure whether the whole video was watched.
+
+### Playback quality
+
+`GET /v1/quality` returns startup time, buffering and observed fatal errors for
+one project's view cohort. It accepts the same optional date, video, viewer,
+browser, OS and device filters as summary. Pagination and event-name filters are
+not supported. Keep the read token on your backend.
+
+```sh
+curl --get 'http://127.0.0.1:4174/v1/quality' \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  --data-urlencode 'from=2026-10-19T00:00:00Z' \
+  --data-urlencode 'to=2026-10-21T00:00:00Z'
+```
+
+```json
+{
+  "views": 4,
+  "startup_time_ms": {
+    "sample_views": 2,
+    "median": 200,
+    "p95": 290
+  },
+  "buffering": {
+    "sample_views": 2,
+    "total_playing_time_ms": 9000,
+    "total_rebuffer_duration_ms": 1000,
+    "ratio": 0.1
+  },
+  "fatal_errors": {
+    "affected_views": 1,
+    "ratio": 0.25
+  }
+}
+```
+
+`startup_time_ms` gives the median and p95 of available startup measurements.
+P95 describes the slow end of the sample; percentiles use linear interpolation.
+`sample_views` shows how many views supplied a measurement. A measured zero is
+valid, while no samples returns null percentiles.
+
+`buffering.ratio` divides total rebuffer time by playing plus rebuffer time. It
+weights views by their measured durations. Only views with both durations and a
+positive combined duration contribute. Its time totals cover those samples;
+no samples returns zero totals and a null ratio. The SDK excludes startup wait,
+pauses and seeks from rebuffer time. Multiply ratios by 100 to display percentages.
+
+`fatal_errors.affected_views` counts each view once if any matching retained
+playback error is fatal. Its ratio uses all selected attempts, including failures
+before playback. Zero means no fatal error was observed; lost events can still
+hide failures. No views returns a null ratio.
+
+The final event supplies startup and buffering measurements, or the latest
+snapshot if no final event exists. Cumulative snapshots are never added together.
+A final null value stays unknown. All filters select the first retained start;
+matching later measurements/errors contribute even after `to`. Start-only views
+have no startup/buffering sample. Views without a retained start are excluded.
+The MCP companion provides the same result through `get_quality`.
 
 The server stores receipt time separately for retention and operations.
 Server operational messages use stdout/stderr and contain no keys. CLI commands
@@ -1232,3 +1413,10 @@ requests/s, returned 48,411 HTTP 503 responses as the durable queue approached
 its byte limit, and exceeded the dashboard p95 targets. All 900,890 acknowledged
 events survived restart. Memory counters, queue growth and database profiles
 identify the next optimization work in that report.
+
+## Dashboard example
+
+The [local dashboard example](examples/dashboard/README.md) includes an overview,
+playback quality, engagement and an event explorer. It uses the HTTP read API
+with private tokens on a Node backend and includes optional synthetic demo data.
+The collector MCP describes these same metrics for AI-assisted dashboard building.

@@ -84,6 +84,7 @@ pub fn router(store: Store, projects: Arc<Registry>, config: &Config) -> Router 
         .route("/healthz", get(health))
         .route("/v1/ingestion", get(ingestion_status))
         .route("/v1/summary", get(summary))
+        .route("/v1/timeseries", get(timeseries))
         .route("/v1/videos", get(videos))
         .route(
             "/v1/logs",
@@ -426,6 +427,18 @@ async fn videos(
     Ok(Json(
         app.store
             .summary(resolved.project.id.clone(), query, true)
+            .await?,
+    ))
+}
+
+async fn timeseries(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::TimeseriesQuery>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .timeseries(resolved.project.id.clone(), query)
             .await?,
     ))
 }

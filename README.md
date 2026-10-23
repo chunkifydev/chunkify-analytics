@@ -546,6 +546,7 @@ your ingress before exposing this development service publicly.
 | `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch commits, including empty or duplicate-only batches. |
 | `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/timeseries` | `Authorization: Bearer READ_TOKEN` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
 | `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
 Native ingestion accepts `Content-Type: application/json` and one complete schema
@@ -713,6 +714,44 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
 - Final events do not imply video completion. Missing events can make metrics
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an ingest key does not verify their authenticity.
+
+### Hourly and daily charts
+
+`GET /v1/timeseries` returns the same metrics grouped by the time each view
+started. Supply `from`, `to` and `interval=hour` or `interval=day`. The existing
+video, viewer, browser, OS and device filters also apply. The project is selected
+by the private read token.
+
+```sh
+curl --get 'http://127.0.0.1:4174/v1/timeseries' \
+  -H "Authorization: Bearer $READ_TOKEN" \
+  --data-urlencode 'from=2026-10-19T00:00:00Z' \
+  --data-urlencode 'to=2026-10-21T00:00:00Z' \
+  --data-urlencode 'interval=day'
+```
+
+The response contains normalized `from`/`to` bounds, `interval`, `timezone: "UTC"`
+and ascending `buckets`. Each bucket has `bucket_start`, `views`, `unique_viewers`
+and `total_playing_time_ms`. Empty buckets contain zeros. Hourly buckets align to
+UTC hours, and daily buckets align to midnight UTC, regardless of input offsets.
+The first/last bucket may be partial; only view starts in `[from, to)` count.
+Dates have millisecond precision, as with the other read endpoints.
+
+A request can cover at most 1000 buckets, including empty/partial buckets. Larger
+ranges return 400: select a shorter range or use daily buckets. There is no
+pagination or silent truncation. Unsupported parameters such as `limit`, `cursor`,
+`event_name`, `timezone` and `project_id` return 400.
+
+Label playing-time charts **Playing time for views started in this period**.
+A view contributes its entire retained cumulative playing time to its start
+bucket, even if it plays after that bucket or after `to`. This does not measure
+concurrent viewers or allocate viewing activity across clock hours. Bucket views
+and playing time sum to the matching summary on unchanged data. Bucket unique
+viewers must not be summed, because a viewer may appear in several buckets.
+New snapshots, final events, deletion or retention can change later results.
+
+The MCP companion exposes the same operation as `get_timeseries`. See
+[analytics query scope](analytics-queries.md) for the first stage and later work.
 
 The server stores receipt time separately for retention and operations.
 Server operational messages use stdout/stderr and contain no keys. CLI commands

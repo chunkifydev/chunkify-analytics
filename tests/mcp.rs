@@ -246,7 +246,7 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
     )
     .await;
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 5);
     assert!(
         tools
             .iter()
@@ -299,6 +299,70 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
         call(&live, "get_summary", json!({}), false).await["data"]["total_playing_time_ms"],
         json!(15000.0)
     );
+    let timeseries_tool = tools
+        .iter()
+        .find(|tool| tool.name == "get_timeseries")
+        .unwrap();
+    assert_eq!(
+        timeseries_tool.input_schema["required"],
+        json!(["from", "to", "interval"])
+    );
+    let series_args =
+        json!({"from":"2026-10-19T00:00:00Z", "to":"2026-10-21T00:00:00Z", "interval":"day"});
+    let series_path =
+        "/v1/timeseries?from=2026-10-19T00:00:00Z&to=2026-10-21T00:00:00Z&interval=day";
+    for (connection, credentials, expected) in [
+        (&client, &collector.keys, 5000.0),
+        (&live, &collector.live, 15000.0),
+    ] {
+        let result = call(connection, "get_timeseries", series_args.clone(), false).await;
+        assert_eq!(
+            result["data"],
+            collector
+                .get(series_path, credentials["read_token"].as_str().unwrap())
+                .await
+        );
+        assert_eq!(result["coverage"]["kind"], "time_buckets");
+        assert_eq!(result["coverage"]["has_more"], false);
+        assert_eq!(
+            result["data"]["buckets"][0]["total_playing_time_ms"],
+            expected
+        );
+        assert_eq!(result["data"]["buckets"][1]["views"], 0);
+        let mut filtered = series_args.clone();
+        filtered["video_id"] = json!("a");
+        let result = call(connection, "get_timeseries", filtered, false).await;
+        assert_eq!(result["data"]["buckets"][0]["views"], 1);
+        assert_eq!(
+            result["data"]["buckets"][0]["total_playing_time_ms"],
+            expected / 2.0
+        );
+    }
+    for invalid in [
+        json!({}),
+        json!({"from":"2026-10-19T00:00:00Z"}),
+        json!({"from":"2020-01-01T00:00:00Z","to":"2026-01-01T00:00:00Z","interval":"hour"}),
+    ] {
+        assert_eq!(
+            call(&client, "get_timeseries", invalid, true).await["error"]["code"],
+            "invalid_arguments"
+        );
+    }
+    for (name, value) in [
+        ("interval", json!("week")),
+        ("limit", json!(1)),
+        ("project_id", json!("live")),
+        ("from", json!("invalid")),
+        ("to", json!(null)),
+        ("cursor", json!("invalid")),
+    ] {
+        let mut invalid = series_args.clone();
+        invalid[name] = value;
+        assert_eq!(
+            call(&client, "get_timeseries", invalid, true).await["error"]["code"],
+            "invalid_arguments"
+        );
+    }
     for (tool, key) in [("list_events", "events"), ("list_video_metrics", "videos")] {
         let first = call(&client, tool, json!({"limit":1}), false).await;
         assert_eq!(first["coverage"]["has_more"], true);
@@ -373,6 +437,10 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
             assert_eq!(result["error"]["code"], "unauthorized");
             assert!(!result.to_string().contains(wrong));
         }
+        assert_eq!(
+            call(&unauthorized, "get_timeseries", series_args.clone(), true).await["error"]["code"],
+            "unauthorized"
+        );
         unauthorized.cancel().await.unwrap();
     }
     client.cancel().await.unwrap();

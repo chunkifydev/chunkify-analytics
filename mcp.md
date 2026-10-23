@@ -118,8 +118,9 @@ for exact scope and remaining checks.
 
 | Tool | Purpose |
 | --- | --- |
-| `describe_api` | `overview` lists routes and dashboard guidance; `metrics` explains calculations. An operation ID such as `listEvents`, `getSummary`, `listVideoMetrics` or `ingestEvent` returns that HTTP operation and all referenced schemas. Ingestion documentation is available, but no ingestion tool is exposed. |
+| `describe_api` | `overview` lists routes and dashboard guidance; `metrics` explains calculations. An operation ID such as `listEvents`, `getSummary`, `getTimeseries`, `listVideoMetrics` or `ingestEvent` returns that HTTP operation and all referenced schemas. Ingestion documentation is available, but no ingestion tool is exposed. |
 | `get_summary` | Total views, distinct supplied viewer IDs and cumulative playing time for the selected view starts. |
+| `get_timeseries` | Complete hourly/daily metrics by view start, with empty buckets. Requires `from`, `to`, and `interval`; at most 1000 UTC buckets. |
 | `list_video_metrics` | One page of per-video totals, ordered by video ID. |
 | `list_events` | One page of original events, receipt metadata and flat `event_context`. |
 
@@ -129,7 +130,15 @@ project overrides, are rejected. Query results contain `data`, the unchanged
 HTTP response, and `coverage`. Pages include `data.next_cursor`; use it with the
 same filters to continue. `coverage.has_more` identifies incomplete traversal.
 A first video page is not a top-videos ranking. Use `get_summary` for totals;
-adding per-video unique viewers counts the same viewer more than once.
+adding per-video or per-bucket unique viewers can count the same viewer more than once.
+
+`get_timeseries` requires a bounded date range and `interval: "hour"` or `"day"`.
+It returns all requested UTC buckets with `coverage.kind: "time_buckets"` and
+`coverage.has_more: false`; it is not a paginated tool. Empty buckets contain zeros.
+An over-1000-bucket range is rejected before the HTTP call. Playing time belongs
+entirely to the view's start bucket, including playback after the bucket or query
+window. Label charts accordingly; this does not measure activity per clock hour.
+The existing read token, filters, response-size limit and query deadline apply.
 
 Failures have `isError: true` and a structured `error` containing `code`,
 `message` and an optional `http_status`. Empty data is a successful result.

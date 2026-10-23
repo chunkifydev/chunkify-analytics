@@ -18,6 +18,80 @@ pub struct Query {
     pub cursor: Option<String>,
 }
 
+pub const MAX_TIME_BUCKETS: usize = 1000;
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeInterval {
+    Hour,
+    Day,
+}
+
+impl TimeInterval {
+    pub fn milliseconds(self) -> i64 {
+        match self {
+            Self::Hour => 3_600_000,
+            Self::Day => 86_400_000,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimeseriesQuery {
+    pub from: String,
+    pub to: String,
+    pub interval: TimeInterval,
+    pub video_id: Option<String>,
+    pub viewer_id: Option<String>,
+    pub browser_name: Option<String>,
+    pub os_name: Option<String>,
+    pub device_type: Option<String>,
+}
+
+pub struct TimeseriesWindow {
+    pub filters: Filters,
+    pub interval: TimeInterval,
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub first_bucket_ms: i64,
+    pub bucket_count: usize,
+}
+
+impl TimeseriesQuery {
+    pub fn validate(self) -> Result<TimeseriesWindow, ApiError> {
+        let filters = Query {
+            from: Some(self.from),
+            to: Some(self.to),
+            video_id: self.video_id,
+            viewer_id: self.viewer_id,
+            browser_name: self.browser_name,
+            os_name: self.os_name,
+            device_type: self.device_type,
+            ..Query::default()
+        }
+        .filters()?;
+        let from_ms = filters.from_ms.expect("required from");
+        let to_ms = filters.to_ms.expect("required to");
+        let width = self.interval.milliseconds();
+        let first_bucket_ms = from_ms.div_euclid(width) * width;
+        let count = (to_ms - 1).div_euclid(width) - from_ms.div_euclid(width) + 1;
+        if count > MAX_TIME_BUCKETS as i64 {
+            return Err(ApiError::bad(
+                "Time series supports at most 1000 buckets. Use a shorter date range or the day interval.",
+            ));
+        }
+        Ok(TimeseriesWindow {
+            filters,
+            interval: self.interval,
+            from_ms,
+            to_ms,
+            first_bucket_ms,
+            bucket_count: count as usize,
+        })
+    }
+}
+
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     from_ms: Option<i64>,

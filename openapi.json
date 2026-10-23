@@ -1480,6 +1480,159 @@
           }
         }
       }
+    },
+    "/v1/timeseries": {
+      "get": {
+        "operationId": "getTimeseries",
+        "summary": "Read hourly or daily metrics by view start",
+        "description": "Limited to the project resolved from the read token. Requires from, to and interval=hour|day. Returns all UTC calendar buckets intersecting [from, to), ordered oldest first, with zero metrics for empty buckets. At most 1000 buckets including partial boundary buckets; larger ranges return 400, never truncated data. Dates are normalized to milliseconds, as with the other read endpoints. Counts distinct view_id values with a retained view_started event. The first retained start, ordered by SDK sequence, occurrence time and ingestion order, determines all filters and the bucket. Playing time uses the final matching video_id/viewer_id view_ended value, otherwise the latest view_snapshot; missing values contribute zero. Whole cumulative playing time belongs to the start bucket, even if playback continued after it or after to. This is playing time for views started in each bucket, not time actually played during that interval and not concurrent viewers. Snapshots are never added together. Views and playing time across buckets equal getSummary with identical filters on the same retained data. unique_viewers counts distinct non-null supplied viewer_id values per bucket and cannot be summed for global unique viewers. Views without a retained start do not contribute. Missing final events can undercount playing time. Retention/deletion remove contributions. The entire response uses one ingestion watermark; later requests may change with new events. Unknown query parameters, event_name, limit, cursor and project overrides are rejected.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/timeseries_from"
+          },
+          {
+            "$ref": "#/components/parameters/timeseries_to"
+          },
+          {
+            "$ref": "#/components/parameters/interval"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete UTC start-cohort series, including empty buckets.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Timeseries"
+                },
+                "example": {
+                  "from": "2026-10-19T00:00:00.000Z",
+                  "to": "2026-10-21T00:00:00.000Z",
+                  "interval": "day",
+                  "timezone": "UTC",
+                  "buckets": [
+                    {
+                      "bucket_start": "2026-10-19T00:00:00.000Z",
+                      "views": 2,
+                      "unique_viewers": 1,
+                      "total_playing_time_ms": 15000
+                    },
+                    {
+                      "bucket_start": "2026-10-20T00:00:00.000Z",
+                      "views": 0,
+                      "unique_viewers": 0,
+                      "total_playing_time_ms": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1627,6 +1780,39 @@
           ]
         },
         "description": "Optional gzip. Both compressed and decompressed body sizes are bounded by COLLECTOR_MAX_BODY_BYTES, default 65536 bytes."
+      },
+      "timeseries_from": {
+        "name": "from",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": "Required inclusive RFC3339 bound with timezone, applied to the selected view start. Must have from < to after millisecond normalization. Together with interval, the range may intersect at most 1000 UTC buckets. Boundaries may be partial buckets.",
+        "required": true
+      },
+      "timeseries_to": {
+        "name": "to",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "description": "Required exclusive RFC3339 bound with timezone, applied to the selected view start. Must have from < to after millisecond normalization. Together with interval, the range may intersect at most 1000 UTC buckets. Boundaries may be partial buckets.",
+        "required": true
+      },
+      "interval": {
+        "name": "interval",
+        "in": "query",
+        "required": true,
+        "description": "UTC calendar bucket size. hour aligns to the UTC hour; day aligns to midnight UTC. At most 1000 buckets, including empty and partial boundary buckets. No pagination or automatic coarsening.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "hour",
+            "day"
+          ]
+        }
       }
     },
     "schemas": {
@@ -3876,6 +4062,77 @@
         ],
         "additionalProperties": false,
         "description": "Present only when the first accepted delivery of event_id used OTLP. Later duplicates do not replace original data or add transport context."
+      },
+      "TimeBucket": {
+        "type": "object",
+        "properties": {
+          "bucket_start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC interval start in RFC3339 with milliseconds and Z. May precede from in a partial first bucket; only starts inside [from, to) contribute."
+          },
+          "views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unique_viewers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "bucket_start",
+          "views",
+          "unique_viewers",
+          "total_playing_time_ms"
+        ],
+        "additionalProperties": false
+      },
+      "Timeseries": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive query bound normalized to UTC milliseconds."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive query bound normalized to UTC milliseconds."
+          },
+          "interval": {
+            "type": "string",
+            "enum": [
+              "hour",
+              "day"
+            ]
+          },
+          "timezone": {
+            "type": "string",
+            "const": "UTC"
+          },
+          "buckets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/TimeBucket"
+            }
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "interval",
+          "timezone",
+          "buckets"
+        ],
+        "additionalProperties": false
       }
     }
   },

@@ -172,6 +172,9 @@ impl Companion {
             };
             let coverage = if path == "/v1/summary" {
                 json!({"kind": "filtered_totals"})
+            } else if path == "/v1/timeseries" {
+                json!({"kind": "time_buckets", "has_more": false,
+                    "note": "All requested UTC buckets are included, including zeros. Metrics belong to views started in each bucket; playing time is not allocated by when it was played. Unique viewers must not be summed across buckets."})
             } else {
                 if !data["next_cursor"].is_null() {
                     let mut continuation = arguments.clone();

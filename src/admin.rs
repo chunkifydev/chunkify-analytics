@@ -91,7 +91,10 @@ mod live {
     use super::*;
     use std::{
         fs, io,
-        os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt},
+        os::unix::{
+            ffi::OsStrExt,
+            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
         path::PathBuf,
         time::Duration,
     };
@@ -107,11 +110,87 @@ mod live {
     const REPLY_LIMIT: u64 = 32 * 1024 * 1024;
     const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
+    fn socket_path(config: &Config, create: bool) -> Result<(PathBuf, Option<PathBuf>)> {
+        let directory = fs::canonicalize(&config.data_dir)?;
+        let path = directory.join("admin.sock");
+        // Use the smaller macOS limit on both platforms. Resolve aliases first
+        // so the server and CLI choose the same address for the same directory.
+        if path.as_os_str().as_bytes().len() < 104 {
+            return Ok((path, None));
+        }
+        // SAFETY: geteuid takes no pointers and only returns the process identity.
+        let uid = unsafe { libc::geteuid() };
+        let digest = ring::digest::digest(&ring::digest::SHA256, directory.as_os_str().as_bytes());
+        let hash: String = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        let locator = directory.join("admin.socket-id");
+        let runtime_for = |id: uuid::Uuid| {
+            PathBuf::from(format!(
+                "/tmp/ck-admin-{uid}-{}-{}",
+                &hash[..32],
+                id.simple()
+            ))
+        };
+        let runtime = if create {
+            // An unpredictable suffix prevents another local user from reserving
+            // our runtime path before startup. The private data directory holds
+            // the locator; the canonical-path hash keeps restored copies apart.
+            if let Ok(previous) = fs::read_to_string(&locator)
+                && let Ok(id) = uuid::Uuid::parse_str(&previous)
+            {
+                let stale = runtime_for(id);
+                if fs::symlink_metadata(&stale)
+                    .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o777 == 0o700)
+                {
+                    let socket = stale.join("s");
+                    if fs::symlink_metadata(&socket)
+                        .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
+                    {
+                        let _ = fs::remove_file(socket);
+                    }
+                    let _ = fs::remove_dir(stale);
+                }
+            }
+            let id = uuid::Uuid::new_v4();
+            let runtime = runtime_for(id);
+            fs::DirBuilder::new().mode(0o700).create(&runtime)?;
+            let temporary = directory.join(format!(".admin-{id}.tmp"));
+            let saved = (|| -> io::Result<()> {
+                use std::io::Write;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&temporary)?;
+                file.write_all(id.to_string().as_bytes())?;
+                drop(file);
+                fs::rename(&temporary, &locator)
+            })();
+            if let Err(error) = saved {
+                let _ = fs::remove_file(temporary);
+                let _ = fs::remove_dir(runtime);
+                return Err(error.into());
+            }
+            runtime
+        } else {
+            runtime_for(uuid::Uuid::parse_str(&fs::read_to_string(locator)?)?)
+        };
+        let metadata = fs::symlink_metadata(&runtime)?;
+        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
+            return Err("Unsafe local administration directory in /tmp; expected a private directory owned by the collector user.".into());
+        }
+        Ok((runtime.join("s"), Some(runtime)))
+    }
+
     // Remove only the socket we bound, including on startup failure. A crashed
     // collector leaves a socket that the next exclusive lock owner can replace.
     struct SocketFile {
         path: PathBuf,
         inode: u64,
+        runtime_directory: Option<PathBuf>,
     }
     impl Drop for SocketFile {
         fn drop(&mut self) {
@@ -119,6 +198,9 @@ mod live {
                 .is_ok_and(|m| m.file_type().is_socket() && m.ino() == self.inode)
             {
                 let _ = fs::remove_file(&self.path);
+                if let Some(directory) = &self.runtime_directory {
+                    let _ = fs::remove_dir(directory);
+                }
             }
         }
     }
@@ -135,7 +217,7 @@ mod live {
     impl Server {
         // Caller must hold the exclusive data-directory lock for this lifetime.
         pub fn bind(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Result<Self> {
-            let path = config.data_dir.join("admin.sock");
+            let (path, runtime_directory) = socket_path(&config, true)?;
             match fs::symlink_metadata(&path) {
                 Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(&path)?,
                 Ok(_) => return Err("admin.sock already exists and is not a socket; move it before starting the collector.".into()),
@@ -147,6 +229,7 @@ mod live {
             let socket = SocketFile {
                 path,
                 inode: metadata.ino(),
+                runtime_directory,
             };
             fs::set_permissions(&socket.path, fs::Permissions::from_mode(0o600))?;
             Ok(Self {
@@ -258,7 +341,7 @@ mod live {
         if bytes.len() as u64 > REQUEST_LIMIT {
             return Err("Administration request is too large".into());
         }
-        let path = config.data_dir.join("admin.sock");
+        let (path, _) = socket_path(config, false)?;
         let metadata = fs::symlink_metadata(&path).map_err(|_| "Data directory is busy and local administration is unavailable. Wait for startup/shutdown or stop the collector first.")?;
         if !metadata.file_type().is_socket() {
             return Err("admin.sock is not a socket".into());

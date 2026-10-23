@@ -24,6 +24,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal
 tokio-util = { version = "0.7", features = ["codec"] }
 uuid = { version = "1", features = ["v4"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 rmcp = { version = "3.5.1", default-features = false, features = ["client", "transport-child-process"] }
 

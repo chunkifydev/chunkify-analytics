@@ -89,9 +89,11 @@ One process owns `analytics.duckdb` and its write-ahead log. Keep the entire dat
 directory. Accepted events survive restarts, including an abrupt process stop.
 SIGINT and SIGTERM stop accepting new connections, finish active requests, and
 close the database. A second writer using the same database file fails at startup.
-The collector and administration commands hold an exclusive `collector.lock`
-file lock for their lifetime. Stop the collector before running administration
-commands. The OS releases the lock after a crash; leave the lock file in place.
+The collector and offline administration commands hold an exclusive
+`collector.lock` file lock for their lifetime. Live key commands use the running
+collector's private local connection. Project configuration and other offline
+administration still require stopping the collector. The OS releases the lock
+after a crash; leave the lock file in place.
 Startup upgrades schema versions 1–4 to version 5 without dropping events
 or changing existing keys. Existing data and credentials belong to the `default`
 project; historical events have `ingest_key_id: null`. Existing events receive no invented IP context. Stop the old
@@ -135,8 +137,11 @@ creation, renaming, settings changes and viewer deletion still require stopping
 the collector. On other operating systems, key administration remains offline.
 
 The CLI connects through a private `admin.sock` in the data directory, with mode
-`0600` and a peer-user check. No public HTTP administration route or admin token
-is added. Keep the data directory private and do not edit `keys.json` while the
+`0600` and a peer-user check. For paths that exceed the Unix socket length limit,
+it uses a randomly named private directory under `/tmp`. A private
+`admin.socket-id` file in the data directory lets the CLI find it automatically.
+`/tmp` must be writable in that case. No public HTTP administration route or admin
+token is added. Keep the data directory private and do not edit `keys.json` while the
 collector runs. A failed write leaves the active keys unchanged. If the file was
 replaced but its directory could not be synced, the command returns a `warning`;
 the new keys are active, but their survival after a system crash is uncertain.
@@ -336,18 +341,25 @@ before mounting it at `/data`.
 
 ### Container administration and backups
 
-Stop the server first. For example, rotate the ingest key with:
+Rotate a key inside the running container:
+
+```sh
+docker exec chunkify-analytics chunkify-analytics-collector rotate-key ingest
+```
+
+Use `rotate-key read` in the same position for the read token. Read and distribute
+the replacement credential as described below. Named key commands also work
+through `docker exec`.
+
+Project changes and viewer deletion require stopping the server first:
 
 ```sh
 docker stop --time 20 chunkify-analytics
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  chunkify-analytics-collector:local rotate-key ingest
+  chunkify-analytics-collector:local delete-viewer 'viewer-123'
 docker start chunkify-analytics
 ```
-
-Use `rotate-key read` or `delete-viewer 'viewer-123'` in the same position for the
-other commands. Read and distribute the replacement credential as described below.
 
 To back up the named volume, keep the server stopped until the archive is complete.
 Choose a new backup filename and keep its contents private:
@@ -709,7 +721,9 @@ that create or rotate project credentials return new secrets once on stdout.
 ## Retention and administration
 
 All commands use `COLLECTOR_DATA_DIR`. Administration requires local filesystem
-access to that directory and a stopped collector; there are no remote admin endpoints.
+access to that directory; there are no remote admin endpoints. Key commands and
+`project-list` work live on Linux and macOS. Other administration requires a
+stopped collector.
 Invalid commands or configuration return a nonzero exit status.
 
 ### Retention

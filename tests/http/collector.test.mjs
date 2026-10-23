@@ -1721,3 +1721,28 @@ test("failed live key persistence does not change active credentials", async (t)
   const rotated = await projectCommand(server, ["key-rotate", "default", "primary-read"]);
   assert.equal((await server.get("/v1/summary", rotated.secret)).views, 0);
 });
+
+
+test("live key administration supports a deeply nested data directory", async (t) => {
+  const server = await collector(t);
+  await server.stop();
+  const directory = join(server.directory, "nested-".repeat(24));
+  const settings = { COLLECTOR_DATA_DIR: directory };
+  const init = await server.command(["init"], settings);
+  assert.equal(init.code, 0, init.stderr);
+  await server.start(binary, settings);
+  const created = await server.command(["key-create", "default", "read", "Long path"], settings);
+  assert.equal(created.code, 0, created.stderr);
+  const token = JSON.parse(created.stdout);
+  assert.equal(token.restart_required, false);
+  assert.equal((await server.get("/v1/summary", token.secret)).views, 0);
+  const locator = join(directory, "admin.socket-id");
+  const previousSocket = await readFile(locator, "utf8");
+  assert.equal((await stat(locator)).mode & 0o777, 0o600);
+  await server.stop("SIGKILL");
+  await server.start(binary, settings);
+  assert.notEqual(await readFile(locator, "utf8"), previousSocket);
+  const revoked = await server.command(["key-revoke", "default", token.key_id], settings);
+  assert.equal(revoked.code, 0, revoked.stderr);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.secret}` } })).status, 401);
+});

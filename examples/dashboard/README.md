@@ -58,6 +58,8 @@ views, regardless of the current video page. Unique IDs cannot be added across
 videos or days. Aggregate filters select view starts; Events filters select the
 events' own occurrence time and context. The latest-event scan stops at 2,000
 records and asks for narrower filters if it cannot determine the latest ten.
+The full scan has a 20-second deadline. An Events failure leaves aggregate
+results visible and shows a retry message on the Events page.
 
 Reached-end means the final event reports `reason=ended`, not that the whole
 video was watched. Startup is attempt-to-first-playing, not first-frame timing.

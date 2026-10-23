@@ -36,7 +36,7 @@ function buildQuery(url) {
   return { project, query };
 }
 function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
-  async function upstream(route, project, query) {
+  async function upstream(route, project, query, deadline) {
     if (!Object.values(routes).includes(route)) throw new SafeError(400, 'Unknown read route.');
     const token = env[projects[project]];
     if (!token) throw new SafeError(503, 'Read token is not configured for this project.');
@@ -48,7 +48,7 @@ function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
     const target = new URL(route, base);
     target.search = query.toString();
     try {
-      const response = await fetchImpl(target, { method: 'GET', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'error', signal: AbortSignal.timeout(15000) });
+      const response = await fetchImpl(target, { method: 'GET', headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' }, redirect: 'error', signal: AbortSignal.any([deadline, AbortSignal.timeout(15000)]) });
       if (!response.ok) throw new SafeError(response.status === 400 ? 400 : 502, response.status === 400 ? 'Collector rejected the filters or cursor. Apply filters again.' : 'Collector read failed. Check backend configuration and collector availability.');
       const chunks = []; let bytes = 0;
       for await (const chunk of response.body) {
@@ -81,12 +81,14 @@ function createHandler({ env = process.env, fetchImpl = fetch } = {}) {
       }
       if (Object.hasOwn(routes, url.pathname)) {
         const { project, query } = buildQuery(url);
-        if (url.pathname !== '/api/events') return json(200, await upstream(routes[url.pathname], project, query));
+        // Bound the entire scan, not just each page, below the browser timeout.
+        const deadline = AbortSignal.timeout(20000);
+        if (url.pathname !== '/api/events') return json(200, await upstream(routes[url.pathname], project, query, deadline));
         query.set('limit', '10');
         let sample = []; let next = null; let pages = 0; let scanned = 0;
         do {
           if (next) query.set('cursor', next);
-          const page = await upstream('/v1/events', project, query);
+          const page = await upstream('/v1/events', project, query, deadline);
           if (!Array.isArray(page.events)) throw new SafeError(502, 'Invalid collector event page.');
           scanned += page.events.length;
           sample = sample.concat(page.events).slice(-10);

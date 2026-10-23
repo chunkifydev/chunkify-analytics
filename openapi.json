@@ -1781,6 +1781,143 @@
           }
         }
       }
+    },
+    "/v1/engagement": {
+      "get": {
+        "operationId": "getEngagement",
+        "summary": "Read average watch time and reached-end rate",
+        "description": "Limited to the project resolved from the read token. Filters select each view's earliest retained view_started by sequence, occurrence time, then ingestion order, exactly as summary. A view is one playback attempt, including failed, ongoing and start-only attempts. Measurements must match the first start's video_id/viewer_id. total_playing_time_ms uses the final view_ended when present, otherwise the latest view_snapshot, with missing values contributing zero. average_playing_time_ms divides that total by all selected attempts, not unique viewers or completed views. reached_end_views counts each view once only when the same winning event is view_ended with reason=ended. If multiple final events exist, the highest sequence, then occurrence time, then ingestion order wins. Snapshots with reason=ended do not count. reached_end_ratio divides by all selected attempts and is a fraction from 0 to 1. No views returns zero counts/totals and null average/ratio. Existing views with no measured time or observed end return zero. Later measurements outside the start-date window still contribute; orphan events do not. Lost final events/snapshots, ongoing attempts and retention/deletion can lower or change results. Reaching the end does not prove the whole video was watched, because viewers can seek. No watched-segment retention curve is provided. Do not average these averages or rates across groups without weighting by views. Unknown parameters, event_name, cursor and limit are rejected.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Engagement for the selected playback attempts.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Engagement"
+                },
+                "example": {
+                  "views": 4,
+                  "total_playing_time_ms": 120000,
+                  "average_playing_time_ms": 30000,
+                  "reached_end_views": 1,
+                  "reached_end_ratio": 0.25
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid private read bearer token.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -4394,6 +4531,52 @@
           }
         },
         "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
+      },
+      "Engagement": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "views",
+          "total_playing_time_ms",
+          "average_playing_time_ms",
+          "reached_end_views",
+          "reached_end_ratio"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Selected playback attempts with a retained start, including failed, ongoing and start-only attempts."
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Cumulative playing time summed once per selected view, as in summary."
+          },
+          "average_playing_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Total playing time divided by all selected attempts. Null with no views; zero when views exist with no measured time."
+          },
+          "reached_end_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Views whose winning final event has reason=ended. Counts each selected view at most once."
+          },
+          "reached_end_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Reached-end views divided by all selected attempts. Null without views. Multiply by 100 for percent. Does not imply the whole video was watched."
+          }
+        },
+        "description": "Observed watch time and end-of-media for the same start cohort as summary. Missing delivery can undercount both."
       }
     }
   },

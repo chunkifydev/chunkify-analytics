@@ -22,7 +22,7 @@ impl Store {
             .transpose()?;
         self.read(if per_video { "videos" } else { "summary" }, move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
-            let (sql, mut values) = view_cohort(project.clone(), through, &filters, false);
+            let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
             if !per_video {
                 let result = connection.query_row(&format!("{sql}
                     SELECT COUNT(*), COUNT(DISTINCT viewer_id), COALESCE(SUM(playing_time_ms), 0) FROM view_metrics"),
@@ -57,6 +57,43 @@ impl Store {
         }).await
     }
 
+    pub async fn engagement(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if query.event_name.is_some() || query.cursor.is_some() || query.limit.is_some() {
+            return Err(ApiError::bad("Unsupported engagement query parameter"));
+        }
+        let filters = query.filters()?;
+        self.read("engagement", move |connection| {
+            let through = watermark(connection, &project)?;
+            let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Engagement);
+            let (views, playing, reached_end) = connection.query_row(
+                &format!(
+                    "{sql}
+                SELECT COUNT(*), COALESCE(SUM(playing_time_ms), 0),
+                    COUNT(*) FILTER (WHERE measurement.reached_end)
+                FROM view_metrics"
+                ),
+                params_from_iter(values.iter()),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )?;
+            if !playing.is_finite() {
+                return Err(ApiError::internal());
+            }
+            Ok(json!({
+                "views": views, "total_playing_time_ms": playing,
+                "average_playing_time_ms": (views > 0).then(|| playing / views as f64),
+                "reached_end_views": reached_end,
+                "reached_end_ratio": (views > 0).then(|| reached_end as f64 / views as f64),
+            }))
+        })
+        .await
+    }
+
     pub async fn quality(&self, project: String, query: Query) -> Result<Value, ApiError> {
         if query.event_name.is_some() || query.cursor.is_some() || query.limit.is_some() {
             return Err(ApiError::bad("Unsupported quality query parameter"));
@@ -64,7 +101,7 @@ impl Store {
         let filters = query.filters()?;
         self.read("quality", move |connection| {
             let through = watermark(connection, &project)?;
-            let (sql, values) = view_cohort(project, through, &filters, true);
+            let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Quality);
             let (views, startup_samples, median, p95, buffering_samples, playing, buffering, affected) =
                 connection.query_row(&format!("{sql}, quality_samples AS (
                 SELECT *, measurement.startup_time_ms AS startup_time_ms,
@@ -115,7 +152,8 @@ impl Store {
         let window = query.validate()?;
         self.read("timeseries", move |connection| {
             let through = watermark(connection, &project)?;
-            let (sql, mut values) = view_cohort(project, through, &window.filters, false);
+            let (sql, mut values) =
+                view_cohort(project, through, &window.filters, CohortMetrics::Basic);
             let width = window.interval.milliseconds();
             values.extend([
                 SqlValue::BigInt(window.first_bucket_ms),
@@ -165,11 +203,17 @@ fn utc_timestamp(milliseconds: i64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+enum CohortMetrics {
+    Basic,
+    Quality,
+    Engagement,
+}
+
 fn view_cohort(
     project: String,
     through: i64,
     filters: &crate::query::Filters,
-    include_quality: bool,
+    metrics: CohortMetrics,
 ) -> (String, Vec<SqlValue>) {
     let (conditions, filter_values) = filters.sql();
     let mut values = vec![SqlValue::BigInt(through), SqlValue::Text(project.clone())];
@@ -180,8 +224,10 @@ fn view_cohort(
     // earliest start across identities, before applying any cohort filters.
     // Selecting a struct keeps all measurements from the same winning event,
     // including NULL values. Basic metrics avoid reading extra quality columns.
-    let (quality_fields, error_aggregate, quality_projection, error_events) = if include_quality {
-        (
+    let (measurement_fields, error_aggregate, measurement_projection, error_events) = match metrics
+    {
+        CohortMetrics::Basic => (String::new(), "", "", ""),
+        CohortMetrics::Quality => (
             format!(
                 ", startup_time_ms := {}, rebuffer_duration_ms := {}",
                 stored_number("startup_time_ms"),
@@ -190,9 +236,14 @@ fn view_cohort(
             ", bool_or(event_name = 'chunkify.video.playback_error' AND e_error_fatal = TRUE) AS has_fatal_error",
             ", measurement, has_fatal_error",
             ", 'chunkify.video.playback_error'",
-        )
-    } else {
-        (String::new(), "", "", "")
+        ),
+        CohortMetrics::Engagement => (
+            ", reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended')"
+                .into(),
+            "",
+            ", measurement",
+            "",
+        ),
     };
     let sql = format!("WITH per_identity AS (
         SELECT view_id, video_id, viewer_id,
@@ -205,7 +256,7 @@ fn view_cohort(
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS first_start,
             min((sequence, occurred_at_ms, ingest_id))
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS start_order,
-            arg_max(struct_pack(playing_time_ms := playing_time_ms{quality_fields}),
+            arg_max(struct_pack(playing_time_ms := playing_time_ms{measurement_fields}),
                 (event_name = 'chunkify.video.view_ended', sequence, occurred_at_ms, ingest_id))
                 FILTER (WHERE event_name IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended')) AS measurement
             {error_aggregate}
@@ -219,11 +270,11 @@ fn view_cohort(
             first_start.context_browser_name AS context_browser_name,
             first_start.context_os_name AS context_os_name,
             first_start.context_device_type AS context_device_type,
-            COALESCE(measurement.playing_time_ms, 0) AS playing_time_ms{quality_projection}
+            COALESCE(measurement.playing_time_ms, 0) AS playing_time_ms{measurement_projection}
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT occurred_at_ms, video_id, viewer_id, playing_time_ms{quality_projection} FROM started WHERE {conditions}
+        SELECT occurred_at_ms, video_id, viewer_id, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

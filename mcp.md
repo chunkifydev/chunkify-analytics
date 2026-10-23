@@ -118,8 +118,9 @@ for exact scope and remaining checks.
 
 | Tool | Purpose |
 | --- | --- |
-| `describe_api` | `overview` lists routes and dashboard guidance; `metrics` explains calculations. An operation ID such as `listEvents`, `getSummary`, `getQuality`, `getTimeseries`, `listVideoMetrics` or `ingestEvent` returns that HTTP operation and all referenced schemas. Ingestion documentation is available, but no ingestion tool is exposed. |
+| `describe_api` | `overview` lists routes and dashboard guidance; `metrics` explains calculations. An operation ID such as `listEvents`, `getSummary`, `getQuality`, `getEngagement`, `getTimeseries`, `listVideoMetrics` or `ingestEvent` returns that HTTP operation and all referenced schemas. Ingestion documentation is available, but no ingestion tool is exposed. |
 | `get_summary` | Total views, distinct supplied viewer IDs and cumulative playing time for the selected view starts. |
+| `get_engagement` | Average watch time per playback attempt and observed reached-end count/rate. Same optional cohort filters as summary. |
 | `get_quality` | Startup median/p95, weighted buffering and observed fatal-error rates with sample counts. Same optional cohort filters as summary. |
 | `get_timeseries` | Complete hourly/daily metrics by view start, with empty buckets. Requires `from`, `to`, and `interval`; at most 1000 UTC buckets. |
 | `list_video_metrics` | One page of per-video totals, ordered by video ID. |
@@ -147,6 +148,14 @@ buffering metrics; null means unavailable, not zero. Ratios are fractions, so
 multiply by 100 for percentages. Fatal-error rates count affected attempts, not
 error events, and describe observed delivery. Use `describe_api` with topic
 `getQuality` for exact selection and denominator rules.
+
+`get_engagement` returns `coverage.kind: "filtered_totals"`, without pagination.
+`average_playing_time_ms` divides playing time by all selected attempts;
+`reached_end_ratio` divides observed reached-end views by the same denominator.
+Display the ratio as a percentage. Null means no selected views; zero can include
+missing final delivery. Reaching the end does not prove the whole video was
+watched. For a video detail panel, add `video_id`; omit it for project totals.
+Use `describe_api` with topic `getEngagement` for the full contract.
 
 Failures have `isError: true` and a structured `error` containing `code`,
 `message` and an optional `http_status`. Empty data is a successful result.

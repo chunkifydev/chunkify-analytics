@@ -131,6 +131,18 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 "fatal_errors":{"affected_views":0,"ratio":0.0}
             })
         );
+        // A winning historical NULL measurement still contributes a zero
+        // attempt to engagement, with the same total and denominator as summary.
+        assert_eq!(
+            store
+                .engagement("default".into(), Query::default())
+                .await
+                .unwrap_or_else(|error| panic!("{}", error.1)),
+            json!({
+                "views":3,"total_playing_time_ms":2500.0,"average_playing_time_ms":2500.0/3.0,
+                "reached_end_views":0,"reached_end_ratio":0.0
+            })
+        );
         let first = store
             .summary(
                 "default".into(),

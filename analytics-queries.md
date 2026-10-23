@@ -167,3 +167,57 @@ This completes the planned first playback-quality summary. Grouped comparisons,
 quality trends and more engagement metrics can wait for actual dashboard needs.
 The next useful validation is a real player session displayed in a dashboard,
 using the new endpoint and its sample counts.
+
+## Third stage: average watch time and reached-end rate
+
+Add `GET /v1/engagement` and MCP `get_engagement`, authorized by the existing
+project read token. Accept the same optional start-cohort date, video, viewer,
+browser, OS and device filters as summary. Reject pagination, event-name and
+unknown parameters. Share the first-start selection, matching video/viewer
+identity and final-event/latest-snapshot precedence with the existing metrics.
+Use one ingestion watermark and the bounded read worker.
+
+Return five fields:
+
+- `views`: selected playback attempts, including failed, ongoing and start-only
+  attempts. Replays with another view ID count separately.
+- `total_playing_time_ms`: the same total as summary for unchanged data and filters.
+  Each view contributes its selected cumulative measurement once; missing values
+  contribute zero. Pauses, buffering and seeking do not count as playing time.
+- `average_playing_time_ms`: total playing time divided by all selected views.
+  This is average watch time per attempt, not per unique viewer or completed view.
+  Return null without views and zero when views exist but have no measured time.
+- `reached_end_views`: count selected views whose winning `view_ended` has
+  `reason: ended`. Snapshots, errors, missing/other reasons and other identities
+  cannot mark a view as reaching the end. If multiple final events exist, use the
+  same winner as playing time, ordered by sequence, occurrence time, ingestion
+  order. Count each view at most once.
+- `reached_end_ratio`: reached-end views divided by all selected attempts, a
+  fraction from 0 to 1. Return null without views; otherwise zero when none reached
+  the end. This is observed end-of-media, not watched coverage or a retention curve.
+
+All filters select the first retained start. Events after the date window can
+contribute to that start. Orphans are excluded. Missing final events or snapshots
+can undercount watch time and end detection; live/ongoing attempts can lower the
+reached-end rate. Retention/deletion remove contributions. Do not average rates or
+averages across groups without weighting their denominators. Reject non-finite
+aggregate totals with 500, consistently with quality summaries.
+
+No SDK, schema migration, grouped endpoint or retention-curve work is needed.
+Existing HTTP responses and MCP tools retain their behavior. Document the new
+operation in OpenAPI, README and MCP, and explain the complete dashboard workflow.
+
+### Third-stage acceptance checks
+
+- Exact totals, average and reached-end ratio for mixed completed, abandoned,
+  ongoing, failed and start-only attempts; empty and zero-valued cohorts.
+- Duplicates, reordered snapshots and conflicting final events do not inflate
+  metrics. Sequence/time/ingestion ties follow existing summary rules.
+- An ended reason on a snapshot cannot mark completion. Different identities,
+  orphan events and starts outside the filters do not contribute.
+- Every supported filter selects the first start, including context changes,
+  exclusive date bounds and later final events.
+- Native and OTLP ingestion match; overflow returns 500. Both database reader
+  modes, OpenAPI examples/responses and MCP discovery/parity/isolation pass.
+- Keep read tokens private and describe the distinction between the collector,
+  a customer's dashboard, and the local MCP companion.

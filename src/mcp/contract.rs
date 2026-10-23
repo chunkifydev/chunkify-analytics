@@ -30,14 +30,20 @@ impl Contract {
         &self.0["paths"][path]["get"]
     }
 
-    fn parameters(&self, path: &str) -> Map<String, Value> {
+    fn operation_parameters(&self, path: &str) -> impl Iterator<Item = &Value> {
         self.operation(path)["parameters"]
             .as_array()
             .expect("query parameters")
             .iter()
             .map(|parameter| {
                 let pointer = parameter["$ref"].as_str().expect("parameter reference");
-                let parameter = self.0.pointer(&pointer[1..]).expect("resolved parameter");
+                self.0.pointer(&pointer[1..]).expect("resolved parameter")
+            })
+    }
+
+    fn parameters(&self, path: &str) -> Map<String, Value> {
+        self.operation_parameters(path)
+            .map(|parameter| {
                 let name = parameter["name"].as_str().expect("parameter name");
                 let mut schema = parameter["schema"].clone();
                 schema["description"] = parameter["description"].clone();
@@ -56,16 +62,9 @@ impl Contract {
     }
 
     fn required_parameters(&self, path: &str) -> Vec<String> {
-        self.operation(path)["parameters"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|parameter| {
-                let reference = parameter["$ref"].as_str().unwrap();
-                let parameter = self.0.pointer(&reference[1..]).unwrap();
-                (parameter["required"] == true)
-                    .then(|| parameter["name"].as_str().unwrap().to_owned())
-            })
+        self.operation_parameters(path)
+            .filter(|parameter| parameter["required"] == true)
+            .map(|parameter| parameter["name"].as_str().unwrap().to_owned())
             .collect()
     }
 

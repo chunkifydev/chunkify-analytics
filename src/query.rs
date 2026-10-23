@@ -3,6 +3,14 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use duckdb::types::Value as SqlValue;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EventOrder {
+    #[default]
+    Asc,
+    Desc,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
@@ -16,6 +24,7 @@ pub struct Query {
     pub device_type: Option<String>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
+    pub order: Option<EventOrder>,
 }
 
 pub const MAX_TIME_BUCKETS: usize = 1000;

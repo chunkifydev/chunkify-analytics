@@ -399,12 +399,13 @@ pub fn decode(row: &Row<'_>) -> Result<(i64, Value), ApiError> {
     Ok((id, record))
 }
 
-pub fn page_sql(conditions: &str) -> String {
+pub fn page_sql(conditions: &str, descending: bool) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
     // Bound the wide rows before joining OTLP, and decode typed values directly
     // instead of serializing all columns to JSON inside DuckDB.
     format!("WITH page AS MATERIALIZED (SELECT ingest_id, {0} FROM events
-        WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id LIMIT ?)
-        SELECT page.*, event_otlp.payload FROM page LEFT JOIN event_otlp USING(project_id, event_id) ORDER BY page.ingest_id", *COLUMN_NAMES)
+        WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id {direction} LIMIT ?)
+        SELECT page.*, event_otlp.payload FROM page LEFT JOIN event_otlp USING(project_id, event_id) ORDER BY page.ingest_id {direction}", *COLUMN_NAMES)
 }
 
 fn migrate_v4(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
@@ -573,7 +574,7 @@ mod tests {
             "browser_context": {"schema_version": 1, "browser_name": "Firefox", "pixel_ratio": 1.5}})
     }
     fn read(connection: &Connection) -> Vec<(i64, Value)> {
-        let mut statement = connection.prepare(&page_sql("TRUE")).unwrap();
+        let mut statement = connection.prepare(&page_sql("TRUE", false)).unwrap();
         let mut rows = statement.query(params![0_i64, i64::MAX, 1000_i64]).unwrap();
         let mut result = Vec::new();
         while let Some(row) = rows.next().unwrap() {

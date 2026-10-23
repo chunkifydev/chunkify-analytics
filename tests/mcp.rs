@@ -437,6 +437,39 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
             "invalid_arguments"
         );
     }
+    let mut descending = call(
+        &client,
+        "list_events",
+        json!({"order":"desc", "limit":2}),
+        false,
+    )
+    .await;
+    assert_eq!(
+        descending["data"],
+        collector.get("/v1/events?order=desc&limit=2", token).await
+    );
+    let mut recent = descending["data"]["events"].as_array().unwrap().clone();
+    while descending["coverage"]["has_more"] == true {
+        descending = call(
+            &client,
+            "list_events",
+            json!({"order":"desc", "limit":2,
+            "cursor":descending["data"]["next_cursor"]}),
+            false,
+        )
+        .await;
+        recent.extend(descending["data"]["events"].as_array().unwrap().clone());
+    }
+    let mut expected = collector.get("/v1/events", token).await["events"]
+        .as_array()
+        .unwrap()
+        .clone();
+    expected.reverse();
+    assert_eq!(recent, expected);
+    assert_eq!(
+        call(&client, "list_events", json!({"order":"invalid"}), true).await["error"]["code"],
+        "invalid_arguments"
+    );
     for (tool, key) in [("list_events", "events"), ("list_video_metrics", "videos")] {
         let first = call(&client, tool, json!({"limit":1}), false).await;
         assert_eq!(first["coverage"]["has_more"], true);

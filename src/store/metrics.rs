@@ -9,6 +9,7 @@ impl Store {
         per_video: bool,
     ) -> Result<Value, ApiError> {
         if query.event_name.is_some()
+            || query.order.is_some()
             || (!per_video && (query.cursor.is_some() || query.limit.is_some()))
         {
             return Err(ApiError::bad("Unsupported summary query parameter"));
@@ -58,7 +59,11 @@ impl Store {
     }
 
     pub async fn engagement(&self, project: String, query: Query) -> Result<Value, ApiError> {
-        if query.event_name.is_some() || query.cursor.is_some() || query.limit.is_some() {
+        if query.event_name.is_some()
+            || query.cursor.is_some()
+            || query.limit.is_some()
+            || query.order.is_some()
+        {
             return Err(ApiError::bad("Unsupported engagement query parameter"));
         }
         let filters = query.filters()?;
@@ -95,7 +100,11 @@ impl Store {
     }
 
     pub async fn quality(&self, project: String, query: Query) -> Result<Value, ApiError> {
-        if query.event_name.is_some() || query.cursor.is_some() || query.limit.is_some() {
+        if query.event_name.is_some()
+            || query.cursor.is_some()
+            || query.limit.is_some()
+            || query.order.is_some()
+        {
             return Err(ApiError::bad("Unsupported quality query parameter"));
         }
         let filters = query.filters()?;

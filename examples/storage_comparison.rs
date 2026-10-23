@@ -284,7 +284,7 @@ fn read_page(
     fields: &[Field],
 ) -> Result<Vec<(i64, Value)>> {
     if variant == "production" {
-        let mut statement = connection.prepare(&storage::page_sql("TRUE"))?;
+        let mut statement = connection.prepare(&storage::page_sql("TRUE", false))?;
         let mut rows = statement.query(params![after, i64::MAX, limit])?;
         let mut result = Vec::new();
         while let Some(row) = rows.next()? {

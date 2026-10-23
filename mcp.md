@@ -130,7 +130,9 @@ The query tools accept the HTTP endpoint's filters. `tools/list` advertises the
 exact schema derived from OpenAPI. Unknown arguments, including URL, token and
 project overrides, are rejected. Query results contain `data`, the unchanged
 HTTP response, and `coverage`. Pages include `data.next_cursor`; use it with the
-same filters to continue. `coverage.has_more` identifies incomplete traversal.
+same filters and event order to continue. `coverage.has_more` identifies incomplete traversal.
+For the newest events, call `list_events` with `{"order":"desc","limit":10}`.
+The default event order remains oldest first.
 A first video page is not a top-videos ranking. Use `get_summary` for totals;
 adding per-video or per-bucket unique viewers can count the same viewer more than once.
 

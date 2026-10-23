@@ -150,6 +150,19 @@ test("documented native requests, read responses, filters and pagination match t
     received.push(...page.events);
   }
   assert.deepEqual(received.map(record => record.event), events);
+  let descending = await server.get(`/v1/events?${filters}&limit=2&order=desc`);
+  const descCursor = descending.next_cursor;
+  const reversed = [...descending.events];
+  while (descending.next_cursor) {
+    descending = await server.get(`/v1/events?${filters}&limit=3&order=desc&cursor=${encodeURIComponent(descending.next_cursor)}`);
+    reversed.push(...descending.events);
+  }
+  assert.deepEqual(reversed.map(record => record.event), events.toReversed());
+  await server.get(`/v1/events?${filters}&cursor=${encodeURIComponent(descCursor)}`, 400);
+  await server.get(`/v1/events?${filters}&order=desc&cursor=${encodeURIComponent(firstCursor)}`, 400);
+  for (const query of ['order=sideways', 'order=asc&order=desc']) await server.get(`/v1/events?${query}`, 400);
+  for (const route of ['summary', 'videos', 'quality', 'engagement']) await server.get(`/v1/${route}?order=desc`, 400);
+
   assert.equal(received[0].event_context.browser_name, "Chrome");
   assert.equal(received[0].event_context.client_ip, "127.0.0.1");
   await server.get(`/v1/events?${filters.replace("Chrome", "Firefox")}&cursor=${encodeURIComponent(firstCursor)}`, 400);

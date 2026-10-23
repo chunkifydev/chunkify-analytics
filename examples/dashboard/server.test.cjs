@@ -50,45 +50,6 @@ test('error responses never include upstream error bodies or exception details',
   const handler = createHandler({ env: {}, fetchImpl: () => { throw new Error(); } });
   assert.equal((await request(handler, '/api/summary')).status, 503);
 });
-test('recent sample follows event cursors with identical filters and preserves untrusted text', async () => {
-  const calls = [];
-  const raw = '<img src=x onerror=alert(1)>';
-  const { handler } = setup(async url => {
-    calls.push(url);
-    return Response.json({ events: [{ event: { video_id: raw, sequence: calls.length } }], next_cursor: calls.length === 1 ? 'next-event-page' : null });
-  });
-  const result = await request(handler, '/api/events?project=live&video_id=exact');
-  assert.equal(result.body.coverage.complete, true);
-  assert.equal(result.body.coverage.scanned, 2);
-  assert.equal(result.body.events[0].event.sequence, 2);
-  assert.equal(result.body.events[0].event.video_id, raw);
-  assert.equal(calls[1].searchParams.get('cursor'), 'next-event-page');
-  assert.equal(calls[1].searchParams.get('video_id'), 'exact');
-});
-
-test('returns only the newest ten received records across pages, independent of occurrence order', async () => {
-  let page = 0;
-  const { handler } = setup(async () => {
-    page++;
-    const ids = page === 1 ? Array.from({length:8}, (_, i) => i + 1) : Array.from({length:9}, (_, i) => i + 9);
-    return Response.json({ events: ids.map(id => ({ event: { event_id: `event-${id}`, occurred_at: id % 2 ? '2026-10-20T10:00:00Z' : '2026-10-19T10:00:00Z' } })), next_cursor: page === 1 ? 'page-two' : null });
-  });
-  const result = await request(handler, '/api/events?project=live');
-  assert.equal(result.status, 200);
-  assert.deepEqual(result.body.events.map(record => record.event.event_id), Array.from({length:10}, (_, i) => `event-${17-i}`));
-  assert.equal(result.body.coverage.complete, true);
-  assert.equal(result.body.coverage.scanned, 17);
-});
-
-test('does not label an incomplete bounded scan as the newest events', async () => {
-  let pages = 0;
-  const { handler } = setup(async () => Response.json({ events: [{event:{event_id:`event-${++pages}`}}], next_cursor: `page-${pages+1}` }));
-  const result = await request(handler, '/api/events?project=live');
-  assert.equal(pages, 200);
-  assert.deepEqual(result.body.events, []);
-  assert.equal(result.body.coverage.complete, false);
-});
-
 test('new metric routes preserve the same cohort filters and keep interval on the timeline', async () => {
   const calls = []; const payload = { views: 7, value: null };
   const { handler } = setup(async url => { calls.push(url); return Response.json(payload); });
@@ -131,4 +92,26 @@ test('small event pages fit ten large accepted events under the response cap', a
   const result = await request(handler, '/api/events');
   assert.equal(result.status, 200);
   assert.equal(result.body.events.length, 10);
+});
+
+
+test('latest events use one bounded descending request even when older pages exist', async () => {
+  const calls = [];
+  const raw = '<img src=x onerror=alert(1)>';
+  const events = Array.from({ length: 10 }, (_, i) => ({ event: { event_id: `event-${816-i}`, video_id: raw } }));
+  const { handler } = setup(async url => {
+    calls.push(url);
+    assert.equal(url.searchParams.get('order'), 'desc');
+    assert.equal(url.searchParams.get('limit'), '10');
+    assert.equal(url.searchParams.get('video_id'), 'exact');
+    assert.equal(url.searchParams.get('browser_name'), 'Chrome');
+    assert.equal(url.searchParams.has('cursor'), false);
+    return Response.json({ events, next_cursor: 'older-records' });
+  });
+  const result = await request(handler, '/api/events?project=live&video_id=exact&browser_name=Chrome');
+  assert.equal(result.status, 200);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(result.body.events, events);
+  assert.equal(result.body.coverage.complete, true);
+  assert.equal(result.body.coverage.has_more, true);
 });

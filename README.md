@@ -743,8 +743,10 @@ Follow `next_cursor` until it is null. Keep the same project and filters when fo
 cursor. Invalid cursors, changed filters, unknown parameters, and invalid ranges
 return 400. Treat cursors as opaque.
 
-Events are ordered by their server ingestion sequence, oldest first. Videos are
-ordered by `video_id`. A pagination sequence is limited to events already committed
+Events are ordered by their server ingestion sequence, oldest first by default.
+Use `/v1/events?order=desc&limit=10` for the newest ten received events in one
+request. `order` accepts `asc` or `desc` only on this route. Keep the same order
+with each cursor; changing it returns 400. Videos are ordered by `video_id`. A pagination sequence is limited to events already committed
 at its first page, so later arrivals do not shift pages or change video totals
 within that sequence. Start without a cursor to refresh. This is not an indefinite
 export snapshot; retention and deletion can remove records between requests.

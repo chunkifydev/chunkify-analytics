@@ -11,7 +11,7 @@ dashboard to an existing collector.
 ## Run
 
 Use Node 24 and a collector version with the summary, quality, engagement and
-UTC timeseries routes. From the repository root, set the collector URL and one
+UTC timeseries routes, plus `order=desc` on `/v1/events`. From the repository root, set the collector URL and one
 or more private read tokens in your shell or a private environment file:
 
 ```sh
@@ -60,10 +60,10 @@ Chart data is available as a table on Overview. Unavailable measurements stay
 unavailable; they are not converted to zero. Summary totals cover all matching
 views, regardless of the current video page. Unique IDs cannot be added across
 videos or days. Aggregate filters select view starts; Events filters select the
-events' own occurrence time and context. The latest-event scan stops at 2,000
-records and asks for narrower filters if it cannot determine the latest ten.
-The full scan has a 20-second deadline. An Events failure leaves aggregate
-results visible and shows a retry message on the Events page.
+events' own occurrence time and context. The latest ten events come from one
+`/v1/events?order=desc&limit=10` request, without scanning older pages.
+An Events failure leaves aggregate results visible and shows a retry message
+on the Events page.
 
 Reached-end means the final event reports `reason=ended`, not that the whole
 video was watched. Startup is attempt-to-first-playing, not first-frame timing.
@@ -110,7 +110,7 @@ node --test examples/dashboard/*.test.*
 ```
 
 Backend tests cover project isolation, exact filter forwarding for every metric,
-pagination, bounded latest-event scans, error redaction and local-origin checks.
+pagination, a single bounded newest-events request, error redaction and local-origin checks.
 Fixture tests check rendition totals, cumulative snapshots and unavailable native
 measurements.
 For MCP parity, call `get_summary`, `get_quality`, `get_engagement` and

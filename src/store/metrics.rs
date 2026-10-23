@@ -181,6 +181,9 @@ impl Store {
             })).collect();
             for row in rows {
                 let (index, views, viewers, playing) = row?;
+                if !playing.is_finite() {
+                    return Err(ApiError::internal());
+                }
                 let bucket = buckets
                     .get_mut(index as usize)
                     .ok_or_else(ApiError::internal)?;

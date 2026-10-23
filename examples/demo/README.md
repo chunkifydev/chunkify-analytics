@@ -14,6 +14,12 @@ dependencies, so recipients need neither Rust nor `npm install`.
 4. Keep the terminal open. The launcher opens the dashboard when setup finishes.
 5. Press Ctrl+C in the terminal to stop the demo. Its data is kept.
 
+This development bundle is not notarized. macOS may block a downloaded launcher
+or executable. After verifying the sender and file, follow your organization's
+policy and Apple's normal Privacy & Security approval flow. Do not disable
+Gatekeeper. Local execution is verified; a downloaded/notarized distribution
+flow is not part of this temporary demo.
+
 The first launch creates separate **Demo data** and **Player test** projects and
 loads 268 synthetic views across nine videos. Subsequent launches reuse the
 projects, keys and database. Interrupted sample loading resumes using the same

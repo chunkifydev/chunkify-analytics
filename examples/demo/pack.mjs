@@ -1,5 +1,5 @@
 // Create a clean, OS-specific demo bundle. Never copy a data directory or credentials.
-import { chmod, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import path from 'node:path';
@@ -18,15 +18,29 @@ try {
   await mkdir(path.join(bundle, 'bin'), { recursive: true });
   await copyFile(binary, path.join(bundle, 'bin/chunkify-analytics-collector'));
   await chmod(path.join(bundle, 'bin/chunkify-analytics-collector'), 0o755);
-  await cp(path.join(root, 'examples/dashboard'), path.join(bundle, 'examples/dashboard'), { recursive: true, filter: source => !/\.test\.[cm]?js$/.test(source) });
-  await cp(path.join(root, 'examples/demo'), path.join(bundle, 'examples/demo'), { recursive: true, filter: source => !/\.test\.mjs$/.test(source) && !source.endsWith('/pack.mjs') });
+  // Explicit files only: custom --data-dir paths or local files can live anywhere.
+  const sourceFiles = [
+    'examples/dashboard/server.cjs', 'examples/dashboard/seed-events.mjs',
+    'examples/dashboard/public/index.html', 'examples/dashboard/public/app.js',
+    'examples/dashboard/public/event-details.js', 'examples/dashboard/public/style.css',
+    'examples/demo/start.mjs', 'examples/demo/server.mjs', 'examples/demo/README.md',
+    'examples/demo/public/player.html', 'examples/demo/public/player.js', 'examples/demo/public/player.css',
+  ];
+  for (const file of sourceFiles) {
+    await mkdir(path.dirname(path.join(bundle, file)), { recursive: true });
+    await copyFile(path.join(root, file), path.join(bundle, file));
+  }
   // The fixture generator uses the installed SDK; it has no runtime dependencies.
   const sdk = path.join(root, 'node_modules/@chunkify/analytics');
   const metadata = JSON.parse(await readFile(path.join(sdk, 'package.json'), 'utf8'));
   if (Object.keys(metadata.dependencies || {}).length) throw new Error('Update the bundle packer for the SDK runtime dependencies before packaging.');
   const sdkDestination = path.join(bundle, 'node_modules/@chunkify/analytics');
   await mkdir(sdkDestination, { recursive: true });
-  for (const file of ['dist', 'package.json', 'LICENSE']) await cp(path.join(sdk, file), path.join(sdkDestination, file), { recursive: true });
+  await mkdir(path.join(sdkDestination, 'dist'));
+  for (const name of ['browser-context', 'chunkify', 'core', 'datadog', 'event-types', 'hlsjs', 'http', 'index', 'mapper', 'monitor', 'options', 'otlp', 'player', 'posthog', 'shaka', 'videojs']) {
+    await copyFile(path.join(sdk, 'dist', name + '.js'), path.join(sdkDestination, 'dist', name + '.js'));
+  }
+  for (const file of ['package.json', 'LICENSE']) await copyFile(path.join(sdk, file), path.join(sdkDestination, file));
   await copyFile(path.join(root, 'LICENSE'), path.join(bundle, 'LICENSE'));
   await copyFile(path.join(root, 'examples/demo/README.md'), path.join(bundle, 'README.md'));
   await writeFile(path.join(bundle, 'package.json'), JSON.stringify({ name: 'chunkify-analytics-demo', private: true, type: 'module', scripts: { demo: 'node examples/demo/start.mjs' }, engines: { node: '>=24 <25' } }, null, 2) + '\n');

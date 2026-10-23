@@ -124,7 +124,38 @@ to the ID when omitted. `key-create` and `key-rotate` return `key_id` and `secre
 Save these secrets when the command returns: newly created project credentials
 are stored as SHA-256 hashes and cannot be retrieved later. `project-list` returns
 project IDs, names, settings and key IDs/names/permissions, without secrets or
-hashes. Restart after administration; there is no live configuration reload.
+hashes.
+
+On Linux and macOS, `project-list`, `key-create`, `key-rotate`, `key-revoke` and
+`rotate-key` also work while the collector is running. Keep `COLLECTOR_DATA_DIR`
+pointed at the same directory and run the CLI as the collector's operating-system
+user. Successful live changes return `restart_required: false` and take effect
+before the command returns. Already authenticated requests may finish. Project
+creation, renaming, settings changes and viewer deletion still require stopping
+the collector. On other operating systems, key administration remains offline.
+
+The CLI connects through a private `admin.sock` in the data directory, with mode
+`0600` and a peer-user check. No public HTTP administration route or admin token
+is added. Keep the data directory private and do not edit `keys.json` while the
+collector runs. A failed write leaves the active keys unchanged. If the file was
+replaced but its directory could not be synced, the command returns a `warning`;
+the new keys are active, but their survival after a system crash is uncertain.
+If a command loses its connection or times out, check `project-list` before
+retrying. A named secret whose response was lost cannot be recovered; rotate or
+revoke that key.
+
+For Docker, run the same commands inside the running container:
+
+```sh
+docker exec chunkify-analytics chunkify-analytics-collector project-list
+docker exec chunkify-analytics chunkify-analytics-collector key-create live ingest "Website v2"
+docker exec chunkify-analytics chunkify-analytics-collector key-revoke live OLD_KEY_ID
+```
+
+For a transition without interrupting delivery, create a second key, deploy it
+to clients, then revoke the old key once those clients have switched. `key-rotate`
+replaces the secret immediately and retains its key ID; it has no overlap period.
+These commands do not reset project quotas or change stored events.
 
 The initial `default` project's plaintext `ingest_key` and `read_token` exports
 remain in the private `keys.json` file for the existing init/rotate-key workflow.
@@ -723,7 +754,7 @@ reduction in the size of the DuckDB file.
 
 ### Rotate a credential
 
-Stop the collector and run one of:
+With `COLLECTOR_DATA_DIR` set, run one of:
 
 ```sh
 ./target/debug/chunkify-analytics-collector rotate-key ingest
@@ -737,8 +768,9 @@ does not print credential values or modify event data.
 
 Read the new value from `keys.json`. For an ingest-key rotation, update the
 browser adapter's `X-Chunkify-Ingest-Key`. For a read-token rotation, update the
-dashboard backend's bearer token. Restart the collector. The old selected
-credential is no longer accepted, with no overlap period. Pages still using the
+dashboard backend's bearer token. A running collector applies the change
+immediately on Linux and macOS; if stopped, start it to use the new key. The old
+selected credential is no longer accepted, with no overlap period. Pages still using the
 old ingest key will fail to deliver events until they load the new configuration.
 
 ### Backup and restore

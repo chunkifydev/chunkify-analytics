@@ -132,16 +132,17 @@ Stop the collector, keep `COLLECTOR_DATA_DIR` set, then run:
 to the ID when omitted. `key-create` and `key-rotate` return `key_id` and `secret`.
 Save these secrets when the command returns: newly created project credentials
 are stored as SHA-256 hashes and cannot be retrieved later. `project-list` returns
-project IDs, names, settings and key IDs/names/permissions, without secrets or
-hashes.
+project IDs, names, settings, effective retention in `effective_retention_seconds`,
+and key IDs/names/permissions, without secrets or hashes.
 
-On Linux and macOS, `project-list`, `key-create`, `key-rotate`, `key-revoke` and
-`rotate-key` also work while the collector is running. Keep `COLLECTOR_DATA_DIR`
+On Linux and macOS, `project-list`, `project-retention`, `key-create`, `key-rotate`,
+`key-revoke` and `rotate-key` also work while the collector is running. Keep `COLLECTOR_DATA_DIR`
 pointed at the same directory and run the CLI as the collector's operating-system
 user. Successful live changes return `restart_required: false` and take effect
 before the command returns. Already authenticated requests may finish. Project
-creation, renaming, settings changes and viewer deletion still require stopping
-the collector. On other operating systems, key administration remains offline.
+creation, renaming, full `project-configure` changes and viewer deletion still
+require stopping the collector. Use `project-retention` for a live retention-only
+change. On other operating systems, administration remains offline.
 
 The CLI connects through a private `admin.sock` in the data directory, with mode
 `0600` and a peer-user check. For paths that exceed the Unix socket length limit,
@@ -149,9 +150,9 @@ it uses a randomly named private directory under `/tmp`. A private
 `admin.socket-id` file in the data directory lets the CLI find it automatically.
 `/tmp` must be writable in that case. No public HTTP administration route or admin
 token is added. Keep the data directory private and do not edit `keys.json` while the
-collector runs. A failed write leaves the active keys unchanged. If the file was
+collector runs. A failed write leaves the active keys and retention policy unchanged. If the file was
 replaced but its directory could not be synced, the command returns a `warning`;
-the new keys are active, but their survival after a system crash is uncertain.
+the new configuration is active, but its survival after a system crash is uncertain.
 If a command loses its connection or times out, check `project-list` before
 retrying. A named secret whose response was lost cannot be recovered; rotate or
 revoke that key.
@@ -197,7 +198,8 @@ queue budget and durable payload budget evenly across the configured projects
 inherits `COLLECTOR_ALLOWED_ORIGINS`. Keys within a project share these limits.
 The installation caps still apply, so these are ceilings, not throughput or latency
 guarantees. Read queries, writer scheduling and retained database storage are
-shared; retention is installation-wide in this first implementation.
+shared. Each project inherits the installation retention default unless it has
+an override. See [retention](#retention) for live changes.
 
 To override one project's limits, save a JSON file and run
 `project-configure live /path/to/settings.json`, then restart:
@@ -207,12 +209,14 @@ To override one project's limits, save a JSON file and run
   "allowed_origins": ["https://player.example"],
   "ingest_per_second": 100,
   "queue_bytes": 4194304,
-  "spool_bytes": 16777216
+  "spool_bytes": 16777216,
+  "retention_seconds": 604800
 }
 ```
 
 The command replaces that project's overrides. Omitted/null values inherit the
-default; `allowed_origins: []` disables browser origins for that project. Queue
+default; `retention_seconds: 0` disables expiration for that project, and
+`allowed_origins: []` disables browser origins for that project. Queue
 limits accept 4096–268435456 bytes and are capped by the installation limit.
 `spool_bytes` applies only with the experimental durable queue and bounds pending
 serialized payloads, not retained DuckDB storage. Restarting with lower limits
@@ -459,8 +463,8 @@ containers must be recreated to pick up edits to an environment file.
 | `COLLECTOR_DATA_DIR` | `./data` | Directory for keys, database, and write-ahead log, relative to the working directory. |
 | `COLLECTOR_BIND` | `127.0.0.1:4174` | Listening IP address and port. Use `0.0.0.0:4174` behind an ingress when needed. |
 | `COLLECTOR_ALLOWED_ORIGINS` | Empty | Comma-separated exact website origins, without paths or trailing slashes. Empty denies requests with an Origin header. Server requests without Origin still require the ingest key. |
-| `COLLECTOR_RETENTION_SECONDS` | `2592000` | Retention by server receipt time, in seconds. Default is 30 days. `0` disables expiration. Must be a non-negative whole number no larger than `9223372036854775`. |
-| `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. Ignored when retention is disabled. |
+| `COLLECTOR_RETENTION_SECONDS` | `2592000` | Default retention by server receipt time, in seconds. Default is 30 days. Projects may override it; `0` disables expiration for inheriting projects. Must be a non-negative whole number no larger than `9223372036854775`. |
+| `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. The timer stays active for live project changes; disabled policies delete nothing. |
 | `COLLECTOR_STORE_IP` | `true` | Store collector-derived request IP context. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
 | `COLLECTOR_TRUSTED_PROXIES` | Empty | Comma-separated literal IPv4/IPv6 addresses or CIDRs allowed to supply `X-Forwarded-For`. Empty trusts no proxies. No hostnames, ports, or wildcards. Use IPv4 CIDRs for IPv4-mapped addresses. |
 
@@ -910,15 +914,16 @@ that create or rotate project credentials return new secrets once on stdout.
 ## Retention and administration
 
 All commands use `COLLECTOR_DATA_DIR`. Administration requires local filesystem
-access to that directory; there are no remote admin endpoints. Key commands and
-`project-list` work live on Linux and macOS. Other administration requires a
-stopped collector.
+access to that directory; there are no remote admin endpoints. Key commands,
+`project-list` and `project-retention` work live on Linux and macOS. Other
+administration requires a stopped collector.
 Invalid commands or configuration return a nonzero exit status.
 
 ### Retention
 
-By default, the collector removes events received more than 30 days ago. It runs
-a sweep before accepting requests at startup and then once an hour. Expired
+By default, the collector removes events received more than 30 days ago. Each
+project can override that duration. The collector runs a sweep before accepting
+requests at startup and then once an hour. Expired
 events can remain until the next successful sweep. A failed scheduled sweep logs
 an error and retries at the next interval; a failed startup sweep prevents startup.
 
@@ -928,9 +933,53 @@ future client timestamp does not extend storage. Expiration removes the canonica
 event, its OTLP log/context, and its request context in one transaction.
 Summaries use only retained events, so expiration also removes their contributions.
 
-For 60 days, set `COLLECTOR_RETENTION_SECONDS=5184000`. For indefinite storage,
-set `COLLECTOR_RETENTION_SECONDS=0`. Restart the collector after changing settings.
-Disabling retention preserves remaining events; it does not recover deleted ones.
+`COLLECTOR_RETENTION_SECONDS` sets the installation default, initially 2592000
+seconds, or 30 days. `0` disables expiration for projects inheriting that default.
+Changing this environment variable or the sweep interval requires a restart.
+
+To change one project without restarting on Linux or macOS, run the CLI as the
+collector user with the same `COLLECTOR_DATA_DIR`:
+
+```sh
+# Keep the live project's events for seven days:
+./target/debug/chunkify-analytics-collector project-retention live 604800
+# Keep its events indefinitely:
+./target/debug/chunkify-analytics-collector project-retention live 0
+# Restore the installation default:
+./target/debug/chunkify-analytics-collector project-retention live inherit
+./target/debug/chunkify-analytics-collector project-list
+```
+
+Docker uses the same command inside the running container:
+
+```sh
+docker exec chunkify-analytics chunkify-analytics-collector project-retention live 604800
+```
+
+The command changes only retention, preserving origins, quotas and credentials.
+It saves the override in the project configuration and returns `project_id`,
+`retention_seconds` (null when inheriting), `effective_retention_seconds` and
+`restart_required`. Live success returns `restart_required: false`; offline
+changes take effect when the collector starts. Values must be non-negative whole
+seconds up to 9223372036854775, or `inherit`. The JSON settings field accepts
+`null` or omission for inheritance through the existing offline `project-configure`
+command. That command replaces all overrides, so retain any settings you need.
+
+Changes apply to existing and new events. Shortening retention makes older records
+eligible for the next scheduled cleanup; it does not trigger an immediate sweep.
+An in-progress sweep finishes before a live change is confirmed. Sweeps queued
+behind other database work read the latest policy when they execute. Extending or
+disabling retention preserves remaining events but cannot recover deleted ones.
+A positive project override still expires events when the installation default is
+`0`. The running server's default determines inheritance for live commands.
+
+The administrator chooses the policy and the collector performs deletion.
+Automatic synchronization with Chunkify customer/project policies, historical
+summaries and S3 archives are future work tracked in
+[issue #381](https://github.com/chunkifydev/chunkify/issues/381). Current dashboard
+history is limited to retained events; changing retention does not create an
+archive or permanent totals.
+
 Duplicate delivery does not refresh an existing event's receipt time. After an
 event expires or is deleted, receiving its ID again creates a new stored event.
 
@@ -1008,10 +1057,13 @@ run `init` on restored data. Check `/healthz` and the authenticated event and
 summary endpoints before sending traffic to the restored installation.
 
 Restoring also restores the keys and events from the backup date. Changes after
-that date are absent. Reapply later viewer deletions and key rotations as needed.
+that date are absent. Reapply later viewer deletions, key rotations and project
+retention changes as needed.
 Startup retention still applies, so an older backup can lose expired events
 when it starts. To inspect it without expiration, explicitly disable retention
-on the restored copy before starting it.
+on the restored copy before starting it. Set the installation default to `0` and
+use offline `project-retention <project> 0` for every project with an explicit
+positive override; the installation default alone does not disable overrides.
 
 ## Development
 

@@ -88,7 +88,7 @@ impl Config {
             .unwrap_or_else(|_| "2592000".into())
             .parse::<u64>()
             .map_err(|_| "COLLECTOR_RETENTION_SECONDS must be a non-negative whole number")?;
-        if retention_seconds > (i64::MAX / 1000) as u64 {
+        if retention_seconds > crate::retention::MAX_SECONDS {
             return Err("COLLECTOR_RETENTION_SECONDS is too large".into());
         }
         let retention_interval_seconds = env::var("COLLECTOR_RETENTION_INTERVAL_SECONDS")

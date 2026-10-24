@@ -45,14 +45,19 @@ below retain the existing defaults; no Rust defaults or API contract changed.
 | `COLLECTOR_CHECKPOINT_THRESHOLD_MIB` | `16` | Keep the existing checkpoint trigger. Larger thresholds did not establish reliable high-rate capacity and can lengthen individual pauses. |
 | `COLLECTOR_INGEST_PER_SECOND` | `100` initially | An adjustable admission policy, not the maximum processing capability or a certified operating rate. Raise it after testing the intended workload. |
 | `COLLECTOR_MAX_BODY_BYTES` / `COLLECTOR_MAX_OTLP_RECORDS` | `65536` / `100` | Bound request size and OTLP records. A whole request must also fit the prepared-batch and project byte budgets. |
-| `COLLECTOR_RETENTION_SECONDS` / `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `2592000` / `3600` | Retain 30 days by receipt time and sweep hourly. Choose retention for the actual event volume and disk budget. |
+| `COLLECTOR_RETENTION_SECONDS` / `COLLECTOR_RETENTION_INTERVAL_SECONDS` | `2592000` / `3600` | Default to 30 days by receipt time and sweep hourly. Projects may override retention. Choose durations for the actual event volume and disk budget. |
 
 The [configuration reference](README.md#configuration) documents accepted ranges.
 Administrators may override supported tuning settings within those bounds.
 The queue byte limit is not a process memory limit: DuckDB, parsed requests,
 response buffers and the operating system consume additional memory. Set process
 or container resource limits separately and monitor disk space and memory.
-Retention also does not impose a hard database-size ceiling.
+Retention also does not impose a hard database-size ceiling. Use
+`project-retention <id> <seconds|inherit>` to change one project's duration live
+on Linux/macOS. `0` disables that project's expiration, and `inherit` restores the
+installation default. Changes affect existing data at the next sweep and persist
+across restart. The command preserves the project's other settings. Full
+[retention semantics](README.md#retention) include rollback/restore considerations.
 
 A single request may contain many OTLP events, so requests/s and events/s differ.
 Project rate and queue allowances inherit a share of the global limits, including

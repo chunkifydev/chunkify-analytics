@@ -22,12 +22,17 @@ type Reply = std::result::Result<Value, String>;
 fn live_command(command: &str) -> bool {
     matches!(
         command,
-        "project-list" | "key-create" | "key-rotate" | "key-revoke" | "rotate-key"
+        "project-list"
+            | "project-retention"
+            | "key-create"
+            | "key-rotate"
+            | "key-revoke"
+            | "rotate-key"
     )
 }
 
-// Validation and persistence finish before swapping the in-memory credentials.
-// A failed write leaves both the active credentials and cached keys unchanged.
+// Validation and persistence finish before updating the active configuration.
+// Retention updates wait for any current sweep before saving and acknowledging.
 fn execute(
     config: &Config,
     keys: &mut Keys,
@@ -39,10 +44,42 @@ fn execute(
     }
     let mut next = keys.clone();
     let mut output = projects::apply_command(&mut next, &request.command, &request.args)?;
+    if request.command == "project-list" {
+        for project in output.as_array_mut().expect("project list") {
+            project["effective_retention_seconds"] = project["settings"]["retention_seconds"]
+                .as_u64()
+                .unwrap_or(config.retention_seconds)
+                .into();
+        }
+    }
+    if request.command == "project-retention" {
+        output["effective_retention_seconds"] = output["retention_seconds"]
+            .as_u64()
+            .unwrap_or(config.retention_seconds)
+            .into();
+    }
     if request.command != "project-list" {
+        let mut retention = if request.command == "project-retention" {
+            registry
+                .map(|registry| {
+                    registry
+                        .retention
+                        .write()
+                        .map_err(|_| "Retention policy lock failed")
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let warning = config.save_keys(&next)?;
+        if let Some(policy) = retention.as_mut() {
+            **policy =
+                crate::retention::Policy::new(config.retention_seconds, &projects::projects(&next));
+        }
         if let Some(registry) = registry {
-            registry.replace_keys(&next);
+            if request.command != "project-retention" {
+                registry.replace_keys(&next);
+            }
             output["restart_required"] = false.into();
         }
         *keys = next;

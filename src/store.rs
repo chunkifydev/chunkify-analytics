@@ -170,18 +170,23 @@ impl Store {
         }
     }
 
-    pub async fn purge_expired(&self, retention_seconds: u64) -> Result<usize, ApiError> {
-        if retention_seconds == 0 {
-            return Ok(0);
-        }
+    pub async fn purge_expired(
+        &self,
+        projects: std::sync::Arc<crate::projects::Registry>,
+    ) -> Result<usize, ApiError> {
         self.call("retention", move |connection| {
-            let cutoff = chrono::Utc::now().timestamp_millis() - (retention_seconds * 1000) as i64;
-            let tx = connection.transaction()?;
-            tx.execute("DELETE FROM event_otlp WHERE (project_id, event_id) IN (SELECT project_id, event_id FROM events WHERE received_at_ms < ?)", [cutoff])?;
-            let removed = tx.execute("DELETE FROM events WHERE received_at_ms < ?", [cutoff])?;
-            tx.commit()?;
-            Ok(removed)
-        }).await
+            // Read the current policy when the writer runs this job, and hold it
+            // through commit so a successful live update cannot race a stale sweep.
+            let policy = projects
+                .retention
+                .read()
+                .map_err(|_| ApiError::internal())?;
+            if !policy.enabled() {
+                return Ok(0);
+            }
+            Ok(policy.purge(connection, chrono::Utc::now().timestamp_millis())?)
+        })
+        .await
     }
 
     pub async fn delete_viewer(

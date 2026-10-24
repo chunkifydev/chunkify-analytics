@@ -4,6 +4,12 @@ Checked on 2026-10-19 against DuckDB's current 1.5 documentation and the local
 benchmark reports. This note proposes a validation baseline; it does not change
 the application, benchmark configuration or supported capacity.
 
+This is a historical sizing note. For the later measurements, the current
+10,000 requests/s goal and the selected operating mode, see
+[performance status](README.md#performance-status) and
+[recommended configuration](configuration.md). The proposed next steps below
+reflect the state of the investigation on October 19.
+
 ## Conclusion
 
 Treat sustained 3,000 ingestion requests/s with concurrent dashboard queries on

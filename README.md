@@ -14,7 +14,8 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 2. OTLP/HTTP JSON ingestion, including batched logs and gzip. Implemented.
 3. Retention, viewer deletion, key rotation, and backup/restore procedures. Implemented.
 4. Docker packaging, container lifecycle tests, and measured capacity guidance.
-   Implemented. See the [initial capacity report](capacity.md) and the subsequent
+   Implemented. Start with the [current performance status](#performance-status).
+   Earlier experiments are recorded in the [initial capacity report](capacity.md),
    [write batching measurements](batching.md) and
    [checkpoint investigation](checkpointing.md). The
    [local retest](local-retest-2026-10-19.md) records results after reducing host
@@ -50,6 +51,50 @@ validation and final release checks remain pending. The
 optional administrator tuning; experimental execution modes remain opt-in.
 
 This is a development version.
+
+## Performance status
+
+Reviewed on 2026-10-24 against the recorded October 19-20 benchmarks.
+**Sustained 10,000 ingestion requests/s remains a goal, not a validated capacity.**
+The results below use one native event per request with concurrent dashboard reads.
+
+| Workload and mode | Container resources | Accepted requests/s | Outcome |
+| --- | --- | --- | --- |
+| 1,000/s for 3 minutes, direct, two repeats | 2 CPUs / 2 GiB | 999.51 and 999.44 | Passed the tested delivery and latency checks. All 180,000 scheduled requests succeeded in each run. |
+| 3,000/s for 30 seconds, experimental queued mode, shared/separate reader comparison | 2 CPUs / 2 GiB | 2,996.32 and 2,995.81 | Passed the short checks. All 90,000 scheduled requests succeeded in each run. |
+| 10,000/s for 60 seconds, experimental queued pipeline, two repeats | 4 CPUs / 4 GiB | 9,872.81 and 9,792.63 | No HTTP failures, but 4,728 and 10,065 scheduled requests were never sent. Dashboard latency failed. |
+| 10,000/s for 2 minutes, experimental queued pipeline | 6 CPUs / 4 GiB | 9,688.59 | Failed. 18,035 HTTP 503 responses, 13,574 unsent requests and dashboard latency above target. |
+| 5,000/s for 10 minutes, experimental queued pipeline | 6 CPUs / 4 GiB | 4,973.55 | All 2,992,035 sent requests succeeded, but 7,965 scheduled requests were never sent and dashboard latency failed. |
+
+Rates use each report's elapsed-time accounting, including completion of outstanding
+requests. Dividing the ten-minute run's accepted count by its fixed 600-second
+offering window gives 4,986.73/s instead. This denominator difference also explains
+why the passing 1,000/s and 3,000/s runs report slightly lower averages.
+
+In the ten-minute run, successful ingestion response p95 was 32 ms. Dashboard p95 was 1.17-1.35 seconds across summary, video and event queries,
+above our 500 ms target. The queue drained, and full API verification after a
+graceful restart recovered all 3,192,035 acknowledged events, including the
+200,000-event preload. No acknowledged event was missing. Unsent requests never
+reached the collector; omissions can reflect generator scheduling delays or its
+in-flight limit during response stalls. They still prevent a full-delivery pass.
+
+These experiments ran on a shared M2 Mac through Docker Desktop with one project
+and local HTTP. Queued mode acknowledges the durable queue before DuckDB replay;
+its response time does not measure when data becomes queryable. High-rate runs
+used larger batch/queue budgets and experimental execution modes. The older
+direct-mode pass also used a larger request queue than the default. These results
+do not establish a sustained rate for the [recommended direct configuration](configuration.md).
+Later changes, including the new analytics queries and live project retention,
+have functional checks but no new capacity run. Requests/s also does not translate
+directly into concurrent viewers; OTLP can carry multiple events per request.
+
+The next capacity decision needs a focused test of the current recommended profile
+with representative projects, retained data and reads. The default 100 requests/s
+admission limit is configurable and is not a measured processing ceiling.
+See [configuration evidence and remaining validation](configuration.md#evidence-behind-the-choice),
+the [direct-mode passes](postcall.md) and the [short queued comparison](read-worker.md).
+The October 20 summaries and raw evidence remain outside the repository; their
+filenames and scope are recorded in the configuration notes.
 
 ## Try the local demo
 
@@ -1123,6 +1168,9 @@ deduplication, and summary after replacement. The dedicated CI container job run
 Test resources use unique names and are removed afterward. To test another prebuilt
 image, set `COLLECTOR_IMAGE` when running the Node test directly.
 
+See [performance status](#performance-status) for the latest recorded results and
+the distinction between measured configurations and the recommended profile.
+
 Run capacity measurements separately; throughput is not a CI pass/fail gate:
 
 ```sh
@@ -1413,6 +1461,11 @@ to enable durable ingestion in both. Do not combine this with
 
 ## Longer stability runs
 
+The instructions below describe the repository's bounded runner, which accepts
+runs up to 300 seconds and one million events. The October 20 10,000/s probes and
+ten-minute run used separate local experimental runners with explicit higher
+budgets. The commands below do not reproduce those experiments unchanged.
+
 The benchmark defaults to a 200,000-event ceiling and a 512 MiB data-directory
 ceiling. Explicit overrides allow `COLLECTOR_LOAD_MAX_EVENTS=1000000` and
 `COLLECTOR_LOAD_MAX_DATA_MIB=3072` for a five-minute, 3,000-request/s run with a
@@ -1451,6 +1504,11 @@ Report version 6 also distinguishes completed queue drains from interrupted wait
 `after_drain_wait` preserves the last sample, `drain_wait_ms` records elapsed wait
 time in either case, and `drain_ms` is null when the wait stops before observing
 an empty queue. Graceful shutdown and restart verification remain separate checks.
+
+### Historical October 19 results
+
+These reports preserve the earlier tests and the next steps identified at that
+time. Later October 20 results are summarized in [performance status](#performance-status).
 
 The [five-minute stability attempt](stability.md) stopped after 101 seconds when
 the generator exceeded its memory guard. All acknowledged events survived

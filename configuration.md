@@ -4,6 +4,9 @@ Decision recorded on 2026-10-21 from the local experiments and administrator
 acceptance. This selects the first-release operating mode and its starting
 settings. The collector is still a development version; sustained capacity and
 final release checks remain open in [issue #381](https://github.com/chunkifydev/chunkify/issues/381).
+The performance documentation was checked on 2026-10-24 against the recorded
+October 19-20 results. See the [README performance summary](README.md#performance-status).
+No new load test was run for that documentation check.
 
 ## Start here
 
@@ -92,29 +95,64 @@ queue entries before disabling queued mode; startup refuses to skip pending data
   with direct ingestion and one DuckDB thread, including real browser playback,
   two projects, credential management, replacement, backup/restore and upgrade.
   It used tiny fixtures at two CPUs / 1 GiB and did not measure capacity.
+- On October 19, [two direct-mode runs](postcall.md) delivered all 180,000 requests
+  scheduled at 1,000/s over three minutes on two CPUs / 2 GiB. They passed the
+  tested latency gates with a 1,024-request queue, above the default 256. The
+  [queued reader comparison](read-worker.md) also passed two 30-second 3,000/s
+  runs. These earlier passes cover their specific configurations and durations.
 - October 20 thread/replay comparisons at four CPUs / 4 GiB reached about
   9,793 and 9,873 accepted single-event requests/s in two 60-second queued runs
   without HTTP failures. Both omitted scheduled requests and exceeded the 500 ms
   dashboard p95 target. Larger admission queues did not eliminate omissions.
+- A two-minute queued run offering 10,000/s at six CPUs / 4 GiB accepted
+  1,168,391 requests, reported 9,688.59 accepted/s and returned 18,035 HTTP 503s.
+  The generator omitted 13,574 scheduled requests. Ingestion p95 was 114 ms,
+  but dashboard p95 was 792-1,145 ms. Increasing CPU alone did not meet the goal.
 - The ten-minute queued run at six CPUs / 4 GiB accepted all 2,992,035 requests
-  that reached it, about 4,987/s over the offered window. The generator omitted
-  7,965 requests; dashboard p95 was 1.17-1.35 seconds. All 3,192,035 acknowledged
-  events including preload survived graceful restart and API verification. This
-  supports the implementation's integrity in that run, not a stable 5,000/s claim.
+  that reached it, 4,986.73/s over the fixed offering window or 4,973.55/s using
+  the report's elapsed-time accounting. The generator omitted 7,965 requests.
+  Successful ingestion p95 was 32 ms; dashboard p95 was 1.17-1.35 seconds.
+  All 3,192,035 acknowledged events including preload survived graceful restart
+  and API verification. Data integrity passed; full delivery and dashboard
+  latency failed. This does not establish a stable 5,000/s operating rate.
 - Raising the checkpoint trigger from 64 to 256 MiB in a matched two-minute
   queued comparison increased the maximum observed writer commit from 1.79 to
   3.69 seconds and did not pass the capacity gates. Increasing CPU quota from
   four to six removed measured CPU throttling but also failed the gates.
 
 The October 20 experiments used a shared M2 Mac, Docker Desktop, one project and
-local HTTP. The local reports `thread-tuning-summary.md`,
+local HTTP, with one event per native request and a 200,000-event OTLP preload.
+The tests ran summary, video and event-page reads concurrently. The latest
+hourly/daily, quality and engagement endpoints were added later and were not in
+that load mix. Expired-data deletion and multi-project load also remain unmeasured.
+The local reports `thread-tuning-summary.md`,
 `soak5000-ten-minute-summary.md`, `checkpoint-frequency-summary.md` and
 `query-cpu-comparison.md` remain under
 `/Users/ftatilon/Dev/benchmarks/chunkify-analytics/2026-10-20`; large raw evidence
 stays outside the repository. The retained production image used by the soak and
 administrator checks is `sha256:38dff245041d410fe55b0c04b4528b285b40674216b4f8223cdc4b63b62a953b`.
+The corresponding raw reports are `threads-one-worker.json`,
+`isolated-soak5000-ten-minute.json` and `isolated-query-cpu6.json`. Each records
+counts, latency, settings and verification. These runs used local experimental
+runners; the repository runner caps duration at 300 seconds and events at one
+million, so its documented commands do not reproduce the ten-minute run unchanged.
 The high-rate results used substantially larger batch/queue budgets and enabled
 experimental modes. They are not measurements of the recommended direct profile.
+
+Our latency targets are ingestion p95 at most 250 ms and dashboard p95 at most
+500 ms, with no dashboard errors and scheduling lag p95 at most 20 ms.
+Full delivery additionally requires every scheduled request to be sent and
+accepted. We also check completed verification and queue drain in queued mode.
+Exploratory reports also expose looser probe gates; those do not replace full
+delivery. An unsent request is not an acknowledged event lost from storage, but
+omissions cannot simply be dismissed as a generator problem. Server stalls can
+keep requests in flight until the generator reaches its concurrency cap.
+
+The profiles show write/commit pauses and query work under a growing dataset.
+Larger buffers and checkpoints did not establish sustained capacity. The CPU
+comparison removed throttling without meeting the gates, so buying more CPU
+alone is not a demonstrated solution. The exact remaining bottleneck still needs
+a controlled measurement of the chosen profile.
 
 DuckDB also documents that excessive parallelism can slow workloads and recommends
 checking memory per thread and storage speed. Our one-thread choice is a starting

@@ -404,7 +404,7 @@ mod live {
             receive::<Reply>(&mut stream, REPLY_LIMIT).await?
         };
         timeout(Duration::from_secs(15), exchange).await
-            .map_err(|_| "Administration timed out; the change may have been applied. Check project-list before retrying.")?
+            .map_err(|_| "Administration timed out; the change may have been applied. Check project list before retrying.")?
             .map_err(Into::into)
     }
 }

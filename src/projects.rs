@@ -444,7 +444,7 @@ pub fn apply_command(
                 if id == DEFAULT_PROJECT && key_id == "primary-read" { keys.read_token = secret.clone(); }
                 output = serde_json::json!({"project_id": id, "key_id": key_id, "secret": secret, "restart_required": true});
             }
-            _ => return Err("Expected project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | project-retention <id> <seconds|inherit> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
+            _ => return Err("Expected project list | project create <id> [name] | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <ingest|read> <name> | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
         }
     validate(&list)?;
     keys.projects = Some(list);

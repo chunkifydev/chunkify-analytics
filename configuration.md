@@ -53,7 +53,7 @@ The queue byte limit is not a process memory limit: DuckDB, parsed requests,
 response buffers and the operating system consume additional memory. Set process
 or container resource limits separately and monitor disk space and memory.
 Retention also does not impose a hard database-size ceiling. Use
-`project-retention <id> <seconds|inherit>` to change one project's duration live
+`project retention <id> <seconds|inherit>` to change one project's duration live
 on Linux/macOS. `0` disables that project's expiration, and `inherit` restores the
 installation default. Changes affect existing data at the next sweep and persist
 across restart. The command preserves the project's other settings. Full

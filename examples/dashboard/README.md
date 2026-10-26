@@ -74,7 +74,7 @@ Separate API calls may observe different ingestion watermarks during live traffi
 ## Optional synthetic data
 
 Use a **separate demo project**. Stop the collector to create it with
-`project-create demo "Dashboard demo"`, save the returned credentials privately,
+`project create demo "Dashboard demo"`, save the returned credentials privately,
 and restart the collector. See the root README for native and Docker commands.
 Set that project's read token as `CHUNKIFY_DEMO_READ_TOKEN` above.
 

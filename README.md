@@ -123,31 +123,31 @@ There is no additional tenant/account layer in this version.
 Stop the collector, keep `COLLECTOR_DATA_DIR` set, then run:
 
 ```sh
-./target/debug/chunkify-analytics project-create live "Production website"
-./target/debug/chunkify-analytics project-create staging "Staging website"
-./target/debug/chunkify-analytics project-list
-./target/debug/chunkify-analytics project-rename live "Customer A — Production"
-./target/debug/chunkify-analytics key-create live ingest "Website"
-./target/debug/chunkify-analytics key-create live read "Dashboard backend"
-# Use the safe key ID from project-list or key-create:
-./target/debug/chunkify-analytics key-rotate live KEY_ID
-./target/debug/chunkify-analytics key-revoke live KEY_ID
+./target/debug/chunkify-analytics project create live --name "Production website"
+./target/debug/chunkify-analytics project create staging --name "Staging website"
+./target/debug/chunkify-analytics project list
+./target/debug/chunkify-analytics project rename live "Customer A — Production"
+./target/debug/chunkify-analytics key create live ingest "Website"
+./target/debug/chunkify-analytics key create live read "Dashboard backend"
+# Use the safe key ID from project list or key create:
+./target/debug/chunkify-analytics key rotate live KEY_ID
+./target/debug/chunkify-analytics key revoke live KEY_ID
 ```
 
-`project-create <id> [name]` returns `ingest_key` and `read_token`. The name defaults
-to the ID when omitted. `key-create` and `key-rotate` return `key_id` and `secret`.
+`project create <id> [--name <name>]` returns `ingest_key` and `read_token`. The name defaults
+to the ID when omitted. `key create` and `key rotate` return `key_id` and `secret`.
 Save these secrets when the command returns: newly created project credentials
-are stored as SHA-256 hashes and cannot be retrieved later. `project-list` returns
+are stored as SHA-256 hashes and cannot be retrieved later. `project list` returns
 project IDs, names, settings, effective retention in `effective_retention_seconds`,
 and key IDs/names/permissions, without secrets or hashes.
 
-On Linux and macOS, `project-list`, `project-retention`, `key-create`, `key-rotate`,
-`key-revoke` and `rotate-key` also work while the collector is running. Keep `COLLECTOR_DATA_DIR`
+On Linux and macOS, `project list`, `project retention`, `key create`, `key rotate`,
+`key revoke` and `key rotate-primary` also work while the collector is running. Keep `COLLECTOR_DATA_DIR`
 pointed at the same directory and run the CLI as the collector's operating-system
 user. Successful live changes return `restart_required: false` and take effect
 before the command returns. Already authenticated requests may finish. Project
-creation, renaming, full `project-configure` changes and viewer deletion still
-require stopping the collector. Use `project-retention` for a live retention-only
+creation, renaming, full `project configure` changes and viewer deletion still
+require stopping the collector. Use `project retention` for a live retention-only
 change. On other operating systems, administration remains offline.
 
 The CLI connects through a private `admin.sock` in the data directory, with mode
@@ -159,25 +159,25 @@ token is added. Keep the data directory private and do not edit `keys.json` whil
 collector runs. A failed write leaves the active keys and retention policy unchanged. If the file was
 replaced but its directory could not be synced, the command returns a `warning`;
 the new configuration is active, but its survival after a system crash is uncertain.
-If a command loses its connection or times out, check `project-list` before
+If a command loses its connection or times out, check `project list` before
 retrying. A named secret whose response was lost cannot be recovered; rotate or
 revoke that key.
 
 For Docker, run the same commands inside the running container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics project-list
-docker exec chunkify-analytics chunkify-analytics key-create live ingest "Website v2"
-docker exec chunkify-analytics chunkify-analytics key-revoke live OLD_KEY_ID
+docker exec chunkify-analytics chunkify-analytics project list
+docker exec chunkify-analytics chunkify-analytics key create live ingest "Website v2"
+docker exec chunkify-analytics chunkify-analytics key revoke live OLD_KEY_ID
 ```
 
 For a transition without interrupting delivery, create a second key, deploy it
-to clients, then revoke the old key once those clients have switched. `key-rotate`
+to clients, then revoke the old key once those clients have switched. `key rotate`
 replaces the secret immediately and retains its key ID; it has no overlap period.
 These commands do not reset project quotas or change stored events.
 
 The initial `default` project's plaintext `ingest_key` and `read_token` exports
-remain in the private `keys.json` file for the existing init/rotate-key workflow.
+remain in the private `keys.json` file for the existing init/key rotate-primary workflow.
 Once a `projects` registry is saved, its hashes are authoritative; a revoked
 primary credential is not re-enabled by the legacy export. Rotating an existing
 default primary key updates that export too. Back up the entire file.
@@ -208,7 +208,7 @@ shared. Each project inherits the installation retention default unless it has
 an override. See [retention](#retention) for live changes.
 
 To override one project's limits, save a JSON file and run
-`project-configure live /path/to/settings.json`, then restart:
+`project configure live /path/to/settings.json`, then restart:
 
 ```json
 {
@@ -361,10 +361,10 @@ before mounting it at `/data`.
 Rotate a key inside the running container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics rotate-key ingest
+docker exec chunkify-analytics chunkify-analytics key rotate-primary ingest
 ```
 
-Use `rotate-key read` in the same position for the read token. Read and distribute
+Use `key rotate-primary read` in the same position for the read token. Read and distribute
 the replacement credential as described below. Named key commands also work
 through `docker exec`.
 
@@ -374,7 +374,7 @@ Project changes and viewer deletion require stopping the server first:
 docker stop --time 20 chunkify-analytics
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  chunkify-analytics:local delete-viewer 'viewer-123'
+  chunkify-analytics:local viewer delete 'viewer-123'
 docker start chunkify-analytics
 ```
 
@@ -452,6 +452,27 @@ sends one log per request. A gateway can batch logs and gzip its requests.
 The ingest key is visible to browsers. CORS limits which websites browsers may
 submit from; it does not prove that a request came from a trusted viewer.
 Serve public traffic through your HTTPS ingress. Internal HTTP is supported.
+
+## Command-line interface
+
+Use `chunkify-analytics --help` for all commands, or add `--help` after any
+subcommand, such as `project create --help`. `--version` prints the release.
+
+```sh
+chunkify-analytics init --data-dir ./data
+chunkify-analytics serve --bind 127.0.0.1:4174
+chunkify-analytics project list
+chunkify-analytics project create live --name "Production"
+chunkify-analytics key create live read "Dashboard"
+chunkify-analytics viewer delete viewer-123 --project live
+chunkify-analytics config check
+```
+
+`--data-dir` is global and overrides `COLLECTOR_DATA_DIR`. `serve --bind`
+overrides `COLLECTOR_BIND`. `config check` validates settings without opening
+or creating a database. Commands use the `project`, `key`, and `viewer`
+subcommand groups. `key rotate-primary ingest` or `key rotate-primary read`
+rotates a default-project primary credential.
 
 ## Configuration
 
@@ -921,7 +942,7 @@ that create or rotate project credentials return new secrets once on stdout.
 
 All commands use `COLLECTOR_DATA_DIR`. Administration requires local filesystem
 access to that directory; there are no remote admin endpoints. Key commands,
-`project-list` and `project-retention` work live on Linux and macOS. Other
+`project list` and `project retention` work live on Linux and macOS. Other
 administration requires a stopped collector.
 Invalid commands or configuration return a nonzero exit status.
 
@@ -948,18 +969,18 @@ collector user with the same `COLLECTOR_DATA_DIR`:
 
 ```sh
 # Keep the live project's events for seven days:
-./target/debug/chunkify-analytics project-retention live 604800
+./target/debug/chunkify-analytics project retention live 604800
 # Keep its events indefinitely:
-./target/debug/chunkify-analytics project-retention live 0
+./target/debug/chunkify-analytics project retention live 0
 # Restore the installation default:
-./target/debug/chunkify-analytics project-retention live inherit
-./target/debug/chunkify-analytics project-list
+./target/debug/chunkify-analytics project retention live inherit
+./target/debug/chunkify-analytics project list
 ```
 
 Docker uses the same command inside the running container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics project-retention live 604800
+docker exec chunkify-analytics chunkify-analytics project retention live 604800
 ```
 
 The command changes only retention, preserving origins, quotas and credentials.
@@ -968,7 +989,7 @@ It saves the override in the project configuration and returns `project_id`,
 `restart_required`. Live success returns `restart_required: false`; offline
 changes take effect when the collector starts. Values must be non-negative whole
 seconds up to 9223372036854775, or `inherit`. The JSON settings field accepts
-`null` or omission for inheritance through the existing offline `project-configure`
+`null` or omission for inheritance through the existing offline `project configure`
 command. That command replaces all overrides, so retain any settings you need.
 
 Changes apply to existing and new events. Shortening retention makes older records
@@ -994,11 +1015,11 @@ event expires or is deleted, receiving its ID again creates a new stored event.
 Stop the collector, then run:
 
 ```sh
-./target/debug/chunkify-analytics delete-viewer 'viewer-123'
+./target/debug/chunkify-analytics viewer delete 'viewer-123'
 ```
 
 The one-argument form targets the `default` project. To target another project,
-use `delete-viewer live viewer-123`. The command matches the exact supplied
+use `viewer delete viewer-123 --project live`. The command matches the exact supplied
 `viewer_id` within that project, across all videos and both ingestion formats. It removes the matching events, OTLP context, and request
 context atomically, then prints a count such as `{"deleted_events":42}`.
 Other viewers and anonymous
@@ -1015,8 +1036,8 @@ reduction in the size of the DuckDB file.
 With `COLLECTOR_DATA_DIR` set, run one of:
 
 ```sh
-./target/debug/chunkify-analytics rotate-key ingest
-./target/debug/chunkify-analytics rotate-key read
+./target/debug/chunkify-analytics key rotate-primary ingest
+./target/debug/chunkify-analytics key rotate-primary read
 ```
 
 These legacy commands rotate the `default` project’s primary credential.
@@ -1068,7 +1089,7 @@ retention changes as needed.
 Startup retention still applies, so an older backup can lose expired events
 when it starts. To inspect it without expiration, explicitly disable retention
 on the restored copy before starting it. Set the installation default to `0` and
-use offline `project-retention <project> 0` for every project with an explicit
+use offline `project retention <project> 0` for every project with an explicit
 positive override; the installation default alone does not disable overrides.
 
 ## Development

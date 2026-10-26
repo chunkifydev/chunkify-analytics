@@ -6,6 +6,7 @@
 .DS_Store
 .env
 .env.*
+/collector.toml
 /demo-data/
 /demo-data.setup-*/
 /bin/

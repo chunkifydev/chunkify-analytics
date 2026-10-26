@@ -22,7 +22,7 @@ mod writer;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = cli::Cli::parse();
-    let settings = settings::Settings::load(cli.env_file.as_deref())?;
+    let settings = settings::Settings::load(cli.env_file.as_deref(), cli.config.as_deref())?;
     if matches!(cli.command, cli::Command::Mcp) {
         return mcp::run(&settings).await;
     }

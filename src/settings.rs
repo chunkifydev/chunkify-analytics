@@ -1,4 +1,5 @@
 //! Resolve file-backed settings without mutating the process environment.
+mod file;
 use std::{collections::HashMap, env, ffi::OsString, path::Path};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -9,15 +10,18 @@ pub struct Settings {
 }
 
 impl Settings {
-    pub fn load(env_file: Option<&Path>) -> Result<Self> {
-        let mut settings = Self::default();
+    pub fn load(env_file: Option<&Path>, config_file: Option<&Path>) -> Result<Self> {
+        let mut settings = file::load(config_file)?;
         let file = env_file.unwrap_or_else(|| Path::new(".env"));
         match dotenvy::from_path_iter(file) {
             Ok(entries) => {
+                let mut declared = std::collections::HashSet::new();
                 for entry in entries {
                     let (name, value) = entry
                         .map_err(|_| format!("Invalid environment file: {}", file.display()))?;
-                    settings.values.entry(name).or_insert_with(|| value.into());
+                    if declared.insert(name.clone()) {
+                        settings.values.insert(name, value.into());
+                    }
                 }
             }
             Err(dotenvy::Error::Io(error))

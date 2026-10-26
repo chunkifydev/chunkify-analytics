@@ -835,3 +835,27 @@ async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
     assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
+    let collector = Collector::start();
+    let file = collector.directory.join("mcp.toml");
+    std::fs::write(
+        &file,
+        format!(
+            "[server]\nbind = 'invalid'\n[mcp]\ncollector_url = '{}'\nread_token = '{}'\n",
+            collector.url,
+            collector.keys["read_token"].as_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut command = clean_command();
+    command.args(["--config", file.to_str().unwrap(), "mcp"]);
+    let transport = TokioChildProcess::new(tokio::process::Command::from(command)).unwrap();
+    let client = ClientConfig::default()
+        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+        .await
+        .unwrap();
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
+    client.cancel().await.unwrap();
+}

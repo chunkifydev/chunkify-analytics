@@ -19,6 +19,12 @@ website origin, retention and IP policy to suit the installation. Configure prox
 trust only for the administrator's actual ingress. Credentials remain in the
 persistent data directory, with read tokens kept on the dashboard backend.
 
+Use `collector.toml` for structured configuration, starting with
+[collector.toml.example](collector.toml.example). Select an explicit file with
+`--config <path>`. Relative TOML data paths resolve beside that file. The
+precedence is CLI flags, process environment, `.env`, TOML, then defaults.
+`config check` validates the merged server settings without opening DuckDB.
+
 Only the server administrator configures these settings. Environment changes take
 effect when the process starts. Recreate a Docker container to apply changes to
 its environment file, keeping the same data volume; `docker restart` alone keeps

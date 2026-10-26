@@ -476,6 +476,30 @@ rotates a default-project primary credential.
 
 ## Configuration
 
+Use [collector.toml.example](collector.toml.example) as a starting point for
+`collector.toml`. The executable loads that filename from its working directory
+when present, or selects a different file with `--config <path>`. Relative
+`data_dir` paths in TOML are resolved beside that configuration file. Explicit
+CLI and environment paths remain relative to the working directory.
+
+```sh
+chunkify-analytics --config /etc/chunkify/collector.toml config check
+chunkify-analytics --config /etc/chunkify/collector.toml serve
+```
+
+Precedence is **CLI flags > process environment > .env > TOML > defaults**.
+All runtime settings have TOML equivalents in the example, including optional
+MCP companion connection settings. Unknown fields, wrong types and invalid
+values fail startup. Missing default files are allowed; explicit file paths
+must exist. Help and version do not load configuration. `config check` validates
+server settings without creating state or printing credentials.
+
+With Docker, mount the TOML file read-only and pass its container path using
+`--config`. The image sets `COLLECTOR_DATA_DIR=/data` and
+`COLLECTOR_BIND=0.0.0.0:4174`; these environment values override TOML.
+Project settings and generated credential state remain in the private
+`keys.json` registry, separate from installation configuration.
+
 The collector and MCP companion load `.env` from the current working directory.
 `--env-file <path>` selects a different file instead. A missing default `.env`
 is allowed; a missing explicitly selected file or malformed file fails startup.

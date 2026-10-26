@@ -1,5 +1,10 @@
 use serde::{Deserialize, Serialize};
-use std::{env, fs, io::Write, net::SocketAddr, path::PathBuf};
+use std::{
+    env, fs,
+    io::Write,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -55,7 +60,12 @@ impl Config {
         }
     }
 
+    #[cfg(test)]
     pub fn load() -> Result<Self> {
+        Self::load_with(None, None)
+    }
+
+    pub fn load_with(data_dir: Option<&Path>, bind: Option<SocketAddr>) -> Result<Self> {
         let allowed_origins: Vec<String> = env::var("COLLECTOR_ALLOWED_ORIGINS")
             .unwrap_or_default()
             .split(',')
@@ -137,12 +147,17 @@ impl Config {
                 .unwrap_or_else(|_| "true".into())
                 .parse()
                 .map_err(|_| "COLLECTOR_STORE_IP must be true or false")?,
-            data_dir: env::var_os("COLLECTOR_DATA_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| "data".into()),
-            bind: env::var("COLLECTOR_BIND")
-                .unwrap_or_else(|_| "127.0.0.1:4174".into())
-                .parse()?,
+            data_dir: data_dir.map(Path::to_path_buf).unwrap_or_else(|| {
+                env::var_os("COLLECTOR_DATA_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| "data".into())
+            }),
+            bind: match bind {
+                Some(bind) => bind,
+                None => env::var("COLLECTOR_BIND")
+                    .unwrap_or_else(|_| "127.0.0.1:4174".into())
+                    .parse()?,
+            },
             allowed_origins,
             max_body_bytes,
             max_otlp_records,

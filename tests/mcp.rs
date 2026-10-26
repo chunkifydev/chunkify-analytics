@@ -107,8 +107,14 @@ impl Collector {
         command(&["init"]);
         let keys =
             serde_json::from_slice(&std::fs::read(directory.join("keys.json")).unwrap()).unwrap();
-        let live =
-            serde_json::from_slice(&command(&["project-create", "live", "Live website"])).unwrap();
+        let live = serde_json::from_slice(&command(&[
+            "project",
+            "create",
+            "live",
+            "--name",
+            "Live website",
+        ]))
+        .unwrap();
         let mut child = clean_command()
             .arg("serve")
             .env("COLLECTOR_DATA_DIR", &directory)

@@ -102,7 +102,7 @@ reworking our event deduplication, not just changing a storage path.
 
 The installation defaults to 30-day retention based on receipt time. Projects
 can override that duration, disable expiry or inherit the default. Administrators
-can change an override live on Linux/macOS through `project-retention`. The
+can change an override live on Linux/macOS through `project retention`. The
 collector deletes events and their original OTLP context together. It does not retain
 a separate historical aggregate after expiration.
 Sources: [configuration](src/config.rs), [storage and summary queries](src/store.rs),

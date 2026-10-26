@@ -720,12 +720,12 @@ test("offline viewer deletion removes both transports across videos and preserve
   for (const event of [...first, ...other]) await server.send(event);
   for (const event of [...second, ...anonymous]) await server.sendOtlp(event);
   const original = (await server.get("/v1/events")).events;
-  const busy = await server.command(["delete-viewer", viewerId]);
+  const busy = await server.command(["viewer", "delete", viewerId]);
   assert.notEqual(busy.code, 0);
   assert.match(busy.stderr, /Stop the collector/);
   assert.deepEqual((await server.get("/v1/events")).events, original);
   await server.stop("SIGKILL");
-  const deleted = await server.command(["delete-viewer", viewerId]);
+  const deleted = await server.command(["viewer", "delete", viewerId]);
   assert.equal(deleted.code, 0, deleted.stderr);
   assert.deepEqual(JSON.parse(deleted.stdout), { deleted_events: 6 });
   await server.start();
@@ -737,7 +737,7 @@ test("offline viewer deletion removes both transports across videos and preserve
     { video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500 },
   ]);
   await server.stop();
-  const repeated = await server.command(["delete-viewer", viewerId]);
+  const repeated = await server.command(["viewer", "delete", viewerId]);
   assert.equal(repeated.code, 0, repeated.stderr);
   assert.deepEqual(JSON.parse(repeated.stdout), { deleted_events: 0 });
   await server.start();
@@ -752,15 +752,15 @@ test("offline key rotation replaces each credential independently without exposi
   const event = sdkEvents()[0];
   await server.send(event);
   const original = await server.get("/v1/events");
-  const busy = await server.command(["project-rename", "default", "Renamed"]);
+  const busy = await server.command(["project", "rename", "default", "Renamed"]);
   assert.notEqual(busy.code, 0);
   assert.match(busy.stderr, /Stop the collector/);
   await server.reloadKeys();
   assert.deepEqual(server.keys, originalKeys);
   await server.stop();
-  const invalid = await server.command(["rotate-key", "unknown"]);
+  const invalid = await server.command(["key", "rotate-primary", "unknown"]);
   assert.notEqual(invalid.code, 0);
-  const ingest = await server.command(["rotate-key", "ingest"]);
+  const ingest = await server.command(["key", "rotate-primary", "ingest"]);
   assert.equal(ingest.code, 0, ingest.stderr);
   await server.reloadKeys();
   assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
@@ -783,7 +783,7 @@ test("offline key rotation replaces each credential independently without exposi
   const rotatedIngest = server.keys.ingest_key;
   await server.sendOtlp(sdkEvents("after-ingest-rotation")[0]);
   await server.stop("SIGKILL");
-  const read = await server.command(["rotate-key", "read"]);
+  const read = await server.command(["key", "rotate-primary", "read"]);
   assert.equal(read.code, 0, read.stderr);
   await server.reloadKeys();
   assert.notEqual(server.keys.read_token, originalKeys.read_token);
@@ -815,7 +815,7 @@ test("a stopped data-directory backup restores events, OTLP context, summaries a
   await server.stop();
   await cp(server.directory, join(backups, "snapshot"), { recursive: true, force: false, errorOnExist: true });
   // Changes made after the backup must not appear in the restored installation.
-  const rotation = await server.command(["rotate-key", "ingest"]);
+  const rotation = await server.command(["key", "rotate-primary", "ingest"]);
   assert.equal(rotation.code, 0, rotation.stderr);
   await server.reloadKeys();
   assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
@@ -1364,7 +1364,7 @@ test("durable queue preserves OTLP context and deletes a viewer after pending re
   assert.ok(rows[0].otlp);
   await server.sendOtlp(events[1]);
   await server.stop("SIGKILL");
-  const deleted = await server.command(["delete-viewer", "queued-viewer"], { COLLECTOR_BATCH_DELAY_MS: "10" });
+  const deleted = await server.command(["viewer", "delete", "queued-viewer"], { COLLECTOR_BATCH_DELAY_MS: "10" });
   assert.equal(deleted.code, 0, deleted.stderr);
   await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
   assert.equal((await server.get("/v1/events")).events.length, 0);
@@ -1433,9 +1433,9 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
     COLLECTOR_INSERT_MODE: mode === "row" ? "row" : "bulk",
     COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(mode === "durable"), COLLECTOR_BATCH_DELAY_MS: "100" });
   await server.stop();
-  const live = await projectCommand(server, ["project-create", "live", "Production website"]);
-  const second = await projectCommand(server, ["key-create", "live", "ingest", "Mobile app"]);
-  const list = await projectCommand(server, ["project-list"]);
+  const live = await projectCommand(server, ["project", "create", "live", "--name", "Production website"]);
+  const second = await projectCommand(server, ["key", "create", "live", "ingest", "Mobile app"]);
+  const list = await projectCommand(server, ["project", "list"]);
   const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "ingest").id;
   assert.equal(list.find(p => p.id === "live").name, "Production website");
   assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.secret)));
@@ -1488,14 +1488,14 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
   assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.ingest_key}` } })).status, 401);
   assert.equal((await projectPost(server, live.read_token, events[0])).status, 401);
   await server.stop();
-  await projectCommand(server, ["project-rename", "live", "Customer A — Live"]);
-  await projectCommand(server, ["delete-viewer", "default", "shared-viewer"]);
+  await projectCommand(server, ["project", "rename", "live", "Customer A — Live"]);
+  await projectCommand(server, ["viewer", "delete", "shared-viewer", "--project", "default"]);
   await server.start();
   assert.equal((await server.get("/v1/events")).events.length, 0);
   assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
   await server.stop();
-  assert.equal((await projectCommand(server, ["project-list"])).find(p => p.id === "live").name, "Customer A — Live");
-  await projectCommand(server, ["delete-viewer", "live", "shared-viewer"]);
+  assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").name, "Customer A — Live");
+  await projectCommand(server, ["viewer", "delete", "shared-viewer", "--project", "live"]);
   await server.start();
   assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
 });
@@ -1503,16 +1503,16 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
 test("project credentials rotate and revoke independently without changing ownership", async (t) => {
   const server = await collector(t);
   await server.stop();
-  const live = await projectCommand(server, ["project-create", "live"]);
-  const extra = await projectCommand(server, ["key-create", "live", "ingest", "Website"]);
-  const extraRead = await projectCommand(server, ["key-create", "live", "read", "Dashboard"]);
+  const live = await projectCommand(server, ["project", "create", "live"]);
+  const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Website"]);
+  const extraRead = await projectCommand(server, ["key", "create", "live", "read", "Dashboard"]);
   const events = sdkEvents();
   await server.start();
   assert.equal((await projectPost(server, extra.secret, events[0])).status, 201);
   await server.stop();
-  const rotated = await projectCommand(server, ["key-rotate", "live", extra.key_id]);
+  const rotated = await projectCommand(server, ["key", "rotate", "live", extra.key_id]);
   assert.equal(rotated.key_id, extra.key_id);
-  await projectCommand(server, ["key-revoke", "live", extraRead.key_id]);
+  await projectCommand(server, ["key", "revoke", "live", extraRead.key_id]);
   await server.start();
   assert.equal((await projectPost(server, extra.secret, events[1])).status, 401);
   assert.equal((await projectPost(server, rotated.secret, events[1])).status, 201);
@@ -1520,7 +1520,7 @@ test("project credentials rotate and revoke independently without changing owner
   assert.ok((await server.get("/v1/events", live.read_token)).events.every(r => r.ingest_key_id === extra.key_id));
   assert.equal((await server.get("/v1/events")).events.length, 0);
   await server.stop();
-  await projectCommand(server, ["key-revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
   await server.start();
   assert.equal((await projectPost(server, server.keys.ingest_key, events[0])).status, 401, "legacy root export is not an auth fallback");
   assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0])).status, 201);
@@ -1529,10 +1529,10 @@ test("project credentials rotate and revoke independently without changing owner
 test("project retention updates live, preserves other settings, and persists across restart", async (t) => {
   const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
   await server.stop();
-  const live = await projectCommand(server, ["project-create", "live"]);
+  const live = await projectCommand(server, ["project", "create", "live"]);
   const settings = join(server.directory, "live-settings.json");
   await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], retention_seconds: 60 }));
-  await projectCommand(server, ["project-configure", "live", settings]);
+  await projectCommand(server, ["project", "configure", "live", settings]);
   await server.start();
   const url = server.url;
   const events = sdkEvents("shared-video");
@@ -1542,7 +1542,7 @@ test("project retention updates live, preserves other settings, and persists acr
     await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
   }
   await delay(1200);
-  const result = await projectCommand(server, ["project-retention", "live", "1"]);
+  const result = await projectCommand(server, ["project", "retention", "live", "1"]);
   assert.deepEqual(result, { project_id: "live", retention_seconds: 1, effective_retention_seconds: 1, restart_required: false });
   const deadline = Date.now() + 7000;
   while ((await server.get("/v1/events", live.read_token)).events.length && Date.now() < deadline) await delay(100);
@@ -1550,26 +1550,26 @@ test("project retention updates live, preserves other settings, and persists acr
   assert.equal((await server.get("/v1/summary", live.read_token)).total_playing_time_ms, 0);
   assert.equal((await server.get("/v1/events")).events.length, events.length);
   assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 1200);
-  const listed = (await projectCommand(server, ["project-list"])).find(p => p.id === "live");
+  const listed = (await projectCommand(server, ["project", "list"])).find(p => p.id === "live");
   assert.deepEqual(listed.settings.allowed_origins, ["https://live.example"]);
   assert.equal(listed.effective_retention_seconds, 1);
   assert.equal(server.url, url, "retention change must not restart the HTTP server");
   // A retry after expiration is new data. Disable expiry before resending it.
-  await projectCommand(server, ["project-retention", "live", "0"]);
+  await projectCommand(server, ["project", "retention", "live", "0"]);
   for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
   await delay(2200);
   assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
   await server.stop("SIGKILL");
   await server.start();
-  assert.equal((await projectCommand(server, ["project-list"])).find(p => p.id === "live").effective_retention_seconds, 0);
+  assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").effective_retention_seconds, 0);
   assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
   // The running server's default is authoritative, even if the CLI has a different environment.
-  const inherited = await server.command(["project-retention", "live", "inherit"], { COLLECTOR_RETENTION_SECONDS: "1" });
+  const inherited = await server.command(["project", "retention", "live", "inherit"], { COLLECTOR_RETENTION_SECONDS: "1" });
   assert.equal(inherited.code, 0, inherited.stderr);
   assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 0);
   assert.equal(JSON.parse(inherited.stdout).retention_seconds, null);
   // Enabling a policy after startup with all expiry disabled must start expiring data.
-  await projectCommand(server, ["project-retention", "default", "1"]);
+  await projectCommand(server, ["project", "retention", "default", "1"]);
   const secondDeadline = Date.now() + 7000;
   while ((await server.get("/v1/events")).events.length && Date.now() < secondDeadline) await delay(100);
   assert.equal((await server.get("/v1/events")).events.length, 0);
@@ -1580,14 +1580,14 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0" });
   await server.stop();
   const projects = [];
-  for (const id of ["short", "long", "keep"]) projects.push(await projectCommand(server, ["project-create", id]));
+  for (const id of ["short", "long", "keep"]) projects.push(await projectCommand(server, ["project", "create", id]));
   await server.start();
   const event = sdkEvents()[0];
   await server.send(event);
   for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.ingest_key } });
   await server.stop();
   for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
-    assert.equal((await projectCommand(server, ["project-retention", id, seconds])).restart_required, true);
+    assert.equal((await projectCommand(server, ["project", "retention", id, seconds])).restart_required, true);
   }
   await delay(1200);
   await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
@@ -1595,7 +1595,7 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   for (const project of projects) assert.equal((await server.get("/v1/events", project.read_token)).events.length, project.project_id === "short" ? 0 : 1);
   await server.stop();
   // Removing an override makes existing data eligible under the inherited policy at startup.
-  await projectCommand(server, ["project-retention", "long", "inherit"]);
+  await projectCommand(server, ["project", "retention", "long", "inherit"]);
   await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
   assert.equal((await server.get("/v1/events", projects[1].read_token)).events.length, 0);
   assert.equal((await server.get("/v1/events", projects[2].read_token)).events.length, 1);
@@ -1607,23 +1607,23 @@ test("invalid or unpersisted project retention changes preserve policy and data"
   const file = join(server.directory, "keys.json");
   const before = await readFile(file, "utf8");
   for (const value of ["-1", "1.5", "abc", "9223372036854776", "18446744073709551616"]) {
-    assert.notEqual((await server.command(["project-retention", "default", value])).code, 0);
+    assert.notEqual((await server.command(["project", "retention", "default", value])).code, 0);
     assert.equal(await readFile(file, "utf8"), before);
   }
-  assert.notEqual((await server.command(["project-retention", "missing", "1"])).code, 0);
+  assert.notEqual((await server.command(["project", "retention", "missing", "1"])).code, 0);
   await chmod(server.directory, 0o500);
   try {
-    assert.notEqual((await server.command(["project-retention", "default", "1"])).code, 0);
+    assert.notEqual((await server.command(["project", "retention", "default", "1"])).code, 0);
     assert.equal(await readFile(file, "utf8"), before);
   } finally { await chmod(server.directory, 0o700); }
   await delay(2200);
-  assert.equal((await projectCommand(server, ["project-list"]))[0].effective_retention_seconds, 0);
+  assert.equal((await projectCommand(server, ["project", "list"]))[0].effective_retention_seconds, 0);
   assert.equal((await server.get("/v1/events")).events.length, 1);
   await server.stop();
   const settings = join(server.directory, "settings.json");
   for (const retention_seconds of [-1, 1.5, "1", 9223372036854776]) {
     await writeFile(settings, JSON.stringify({ retention_seconds }));
-    assert.notEqual((await server.command(["project-configure", "default", settings])).code, 0);
+    assert.notEqual((await server.command(["project", "configure", "default", settings])).code, 0);
     assert.equal(await readFile(file, "utf8"), before);
   }
 });
@@ -1631,11 +1631,11 @@ test("invalid or unpersisted project retention changes preserve policy and data"
 test("project origin policies and rate quotas apply across all of its keys", async (t) => {
   const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1000" });
   await server.stop();
-  const live = await projectCommand(server, ["project-create", "live"]);
-  const extra = await projectCommand(server, ["key-create", "live", "ingest", "Another integration"]);
+  const live = await projectCommand(server, ["project", "create", "live"]);
+  const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Another integration"]);
   const settings = join(server.directory, "live-settings.json");
   await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 1 }));
-  await projectCommand(server, ["project-configure", "live", settings]);
+  await projectCommand(server, ["project", "configure", "live", settings]);
   await server.start();
   const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
     origin: "https://live.example", "access-control-request-method": "POST", "access-control-request-headers": "x-chunkify-ingest-key,content-type" } });
@@ -1653,7 +1653,7 @@ test("a busy project leaves admission slots for another project", async (t) => {
   const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_QUEUE_MAX_REQUESTS: "4",
     COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
   await server.stop();
-  const live = await projectCommand(server, ["project-create", "live"]);
+  const live = await projectCommand(server, ["project", "create", "live"]);
   await server.start();
   const busy = Array.from({ length: 4 }, () => projectPost(server, live.ingest_key, sdkEvents()[0]));
   const other = projectPost(server, server.keys.ingest_key, sdkEvents()[0]);
@@ -1668,10 +1668,10 @@ test("durable project quotas and pending counters stay isolated through crash re
   const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_BATCH_DELAY_MS: "1000",
     COLLECTOR_SPOOL_MAX_BYTES: "16384", COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
   await server.stop();
-  const live = await projectCommand(server, ["project-create", "live"]);
+  const live = await projectCommand(server, ["project", "create", "live"]);
   const settings = join(server.directory, "live-settings.json");
   await writeFile(settings, JSON.stringify({ spool_bytes: 4096 }));
-  await projectCommand(server, ["project-configure", "live", settings]);
+  await projectCommand(server, ["project", "configure", "live", settings]);
   await server.start();
   const accepted = [];
   let overloaded = false;
@@ -1700,19 +1700,19 @@ test("project administration rejects invalid changes without overwriting credent
   const server = await collector(t);
   await server.stop();
   const keyFile = join(server.directory, "keys.json");
-  for (const args of [["project-create", "bad/id"], ["project-create", "live", "   "],
-    ["project-create", "default"], ["project-rename", "missing", "New name"], ["key-create", "default", "admin", "Wrong kind"]]) {
+  for (const args of [["project", "create", "bad/id"], ["project", "create", "live", "--name", "   "],
+    ["project", "create", "default"], ["project", "rename", "missing", "New name"], ["key", "create", "default", "admin", "Wrong kind"]]) {
     const before = await readFile(keyFile, "utf8");
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
   }
-  await projectCommand(server, ["key-revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
   const keys = JSON.parse(await readFile(keyFile, "utf8"));
   keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "ingest",
     hash: index.toString(16).padStart(64, "0") }));
   await writeFile(keyFile, JSON.stringify(keys));
   const before = await readFile(keyFile, "utf8");
-  const result = await server.command(["rotate-key", "ingest"]);
+  const result = await server.command(["key", "rotate-primary", "ingest"]);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /64 keys/);
   assert.equal(await readFile(keyFile, "utf8"), before, "failed legacy rotation must not break the registry");
@@ -1722,11 +1722,11 @@ test("project administration rejects invalid changes without overwriting credent
 test("live keys update ingestion and read access immediately and survive a crash", async (t) => {
   const server = await collector(t);
   await server.stop();
-  const other = await projectCommand(server, ["project-create", "other"]);
+  const other = await projectCommand(server, ["project", "create", "other"]);
   await server.start();
   const originalUrl = server.url;
-  const first = await projectCommand(server, ["key-create", "default", "ingest", "Website"]);
-  const read = await projectCommand(server, ["key-create", "default", "read", "Dashboard"]);
+  const first = await projectCommand(server, ["key", "create", "default", "ingest", "Website"]);
+  const read = await projectCommand(server, ["key", "create", "default", "read", "Dashboard"]);
   assert.equal(first.restart_required, false);
   assert.equal(read.restart_required, false);
   const events = sdkEvents("live-keys");
@@ -1735,7 +1735,7 @@ test("live keys update ingestion and read access immediately and survive a crash
   assert.equal((await server.get("/v1/events", other.read_token)).events.length, 0);
   assert.equal((await projectPost(server, read.secret, events[1])).status, 401);
 
-  const rotated = await projectCommand(server, ["key-rotate", "default", first.key_id]);
+  const rotated = await projectCommand(server, ["key", "rotate", "default", first.key_id]);
   assert.equal(rotated.restart_required, false);
   assert.equal(rotated.key_id, first.key_id);
   assert.equal((await projectPost(server, first.secret, events[1])).status, 401);
@@ -1744,10 +1744,10 @@ test("live keys update ingestion and read access immediately and survive a crash
   const stored = (await server.get("/v1/events", read.secret)).events;
   assert.ok(stored.every(row => row.ingest_key_id === first.key_id && row.project_id === "default"));
   assert.deepEqual(stored.map(row => row.event), events);
-  await projectCommand(server, ["key-revoke", "default", read.key_id]);
+  await projectCommand(server, ["key", "revoke", "default", read.key_id]);
   assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.secret}` } })).status, 401);
   assert.equal((await projectPost(server, other.ingest_key, sdkEvents("other")[0])).status, 201);
-  const listed = await projectCommand(server, ["project-list"]);
+  const listed = await projectCommand(server, ["project", "list"]);
   assert.ok(listed.find(project => project.id === "default").keys.some(key => key.id === first.key_id));
   for (const secret of [first.secret, rotated.secret, read.secret, other.ingest_key, other.read_token]) {
     assert.ok(!JSON.stringify(listed).includes(secret));
@@ -1769,27 +1769,27 @@ test("live keys update ingestion and read access immediately and survive a crash
 test("live administration serializes concurrent commands and rejects invalid changes", async (t) => {
   const server = await collector(t);
   const created = await Promise.all(Array.from({ length: 5 }, (_, index) =>
-    projectCommand(server, ["key-create", "default", "read", `Dashboard ${index}`])));
-  const listed = await projectCommand(server, ["project-list"]);
+    projectCommand(server, ["key", "create", "default", "read", `Dashboard ${index}`])));
+  const listed = await projectCommand(server, ["project", "list"]);
   assert.equal(listed[0].keys.length, 7);
   await Promise.all(created.map(key => server.get("/v1/summary", key.secret)));
   const keyFile = join(server.directory, "keys.json");
   const before = await readFile(keyFile, "utf8");
-  for (const args of [["key-create", "default", "admin", "Invalid"], ["key-create", "default", "read", ""],
-    ["key-revoke", "default", "unknown"], ["key-rotate", "unknown", "primary-ingest"],
-    ["project-create", "other"], ["project-configure", "default", "missing.json"]]) {
+  for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "read", ""],
+    ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-ingest"],
+    ["project", "create", "other"], ["project", "configure", "default", "missing.json"]]) {
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
   }
-  await Promise.all(created.map(key => projectCommand(server, ["key-revoke", "default", key.key_id])));
-  assert.equal((await projectCommand(server, ["project-list"]))[0].keys.length, 2);
+  await Promise.all(created.map(key => projectCommand(server, ["key", "revoke", "default", key.key_id])));
+  assert.equal((await projectCommand(server, ["project", "list"]))[0].keys.length, 2);
 });
 
 test("live primary rotation and revocation keep legacy exports consistent", async (t) => {
   const server = await collector(t);
   const original = { ...server.keys };
   for (const kind of ["ingest", "read"]) {
-    const result = await server.command(["rotate-key", kind]);
+    const result = await server.command(["key", "rotate-primary", kind]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /new key is active/);
     await server.reloadKeys();
@@ -1799,9 +1799,9 @@ test("live primary rotation and revocation keep legacy exports consistent", asyn
   assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.read_token}` } })).status, 401);
   await server.send(sdkEvents()[0]);
   assert.equal((await server.get("/v1/summary")).views, 1);
-  await projectCommand(server, ["key-revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
   assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0])).status, 401);
-  const restored = await server.command(["rotate-key", "ingest"]);
+  const restored = await server.command(["key", "rotate-primary", "ingest"]);
   assert.equal(restored.code, 0, restored.stderr);
   await server.reloadKeys();
   await server.send(sdkEvents()[0]);
@@ -1815,12 +1815,12 @@ test("failed live key persistence does not change active credentials", async (t)
   // read its existing database. Restore permissions before shutdown/cleanup.
   await chmod(server.directory, 0o500);
   try {
-    const result = await server.command(["key-rotate", "default", "primary-read"]);
+    const result = await server.command(["key", "rotate", "default", "primary-read"]);
     assert.notEqual(result.code, 0);
     assert.equal(await readFile(join(server.directory, "keys.json"), "utf8"), before);
     assert.equal((await server.get("/v1/summary")).views, 0);
   } finally { await chmod(server.directory, 0o700); }
-  const rotated = await projectCommand(server, ["key-rotate", "default", "primary-read"]);
+  const rotated = await projectCommand(server, ["key", "rotate", "default", "primary-read"]);
   assert.equal((await server.get("/v1/summary", rotated.secret)).views, 0);
 });
 
@@ -1833,7 +1833,7 @@ test("live key administration supports a deeply nested data directory", async (t
   const init = await server.command(["init"], settings);
   assert.equal(init.code, 0, init.stderr);
   await server.start(binary, settings);
-  const created = await server.command(["key-create", "default", "read", "Long path"], settings);
+  const created = await server.command(["key", "create", "default", "read", "Long path"], settings);
   assert.equal(created.code, 0, created.stderr);
   const token = JSON.parse(created.stdout);
   assert.equal(token.restart_required, false);
@@ -1844,7 +1844,7 @@ test("live key administration supports a deeply nested data directory", async (t
   await server.stop("SIGKILL");
   await server.start(binary, settings);
   assert.notEqual(await readFile(locator, "utf8"), previousSocket);
-  const revoked = await server.command(["key-revoke", "default", token.key_id], settings);
+  const revoked = await server.command(["key", "revoke", "default", token.key_id], settings);
   assert.equal(revoked.code, 0, revoked.stderr);
   assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.secret}` } })).status, 401);
 });

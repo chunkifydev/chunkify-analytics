@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    env, fs,
+    fs,
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -62,11 +62,16 @@ impl Config {
 
     #[cfg(test)]
     pub fn load() -> Result<Self> {
-        Self::load_with(None, None)
+        Self::load_with(&crate::settings::Settings::load(None)?, None, None)
     }
 
-    pub fn load_with(data_dir: Option<&Path>, bind: Option<SocketAddr>) -> Result<Self> {
-        let allowed_origins: Vec<String> = env::var("COLLECTOR_ALLOWED_ORIGINS")
+    pub fn load_with(
+        settings: &crate::settings::Settings,
+        data_dir: Option<&Path>,
+        bind: Option<SocketAddr>,
+    ) -> Result<Self> {
+        let allowed_origins: Vec<String> = settings
+            .var("COLLECTOR_ALLOWED_ORIGINS")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
@@ -76,46 +81,53 @@ impl Config {
         for origin in &allowed_origins {
             validate_origin(origin)?;
         }
-        let max_body_bytes = env::var("COLLECTOR_MAX_BODY_BYTES")
+        let max_body_bytes = settings
+            .var("COLLECTOR_MAX_BODY_BYTES")
             .unwrap_or_else(|_| "65536".into())
             .parse()?;
         if max_body_bytes == 0 {
             return Err("COLLECTOR_MAX_BODY_BYTES must be positive".into());
         }
-        let max_otlp_records = env::var("COLLECTOR_MAX_OTLP_RECORDS")
+        let max_otlp_records = settings
+            .var("COLLECTOR_MAX_OTLP_RECORDS")
             .unwrap_or_else(|_| "100".into())
             .parse()?;
         if max_otlp_records == 0 {
             return Err("COLLECTOR_MAX_OTLP_RECORDS must be positive".into());
         }
-        let ingest_per_second = env::var("COLLECTOR_INGEST_PER_SECOND")
+        let ingest_per_second = settings
+            .var("COLLECTOR_INGEST_PER_SECOND")
             .unwrap_or_else(|_| "100".into())
             .parse()?;
         if ingest_per_second == 0 {
             return Err("COLLECTOR_INGEST_PER_SECOND must be positive".into());
         }
-        let retention_seconds = env::var("COLLECTOR_RETENTION_SECONDS")
+        let retention_seconds = settings
+            .var("COLLECTOR_RETENTION_SECONDS")
             .unwrap_or_else(|_| "2592000".into())
             .parse::<u64>()
             .map_err(|_| "COLLECTOR_RETENTION_SECONDS must be a non-negative whole number")?;
         if retention_seconds > crate::retention::MAX_SECONDS {
             return Err("COLLECTOR_RETENTION_SECONDS is too large".into());
         }
-        let retention_interval_seconds = env::var("COLLECTOR_RETENTION_INTERVAL_SECONDS")
+        let retention_interval_seconds = settings
+            .var("COLLECTOR_RETENTION_INTERVAL_SECONDS")
             .unwrap_or_else(|_| "3600".into())
             .parse::<u64>()
             .map_err(|_| "COLLECTOR_RETENTION_INTERVAL_SECONDS must be a positive whole number")?;
         if !(1..=86400).contains(&retention_interval_seconds) {
             return Err("COLLECTOR_RETENTION_INTERVAL_SECONDS must be between 1 and 86400".into());
         }
-        let checkpoint_threshold_mib = env::var("COLLECTOR_CHECKPOINT_THRESHOLD_MIB")
+        let checkpoint_threshold_mib = settings
+            .var("COLLECTOR_CHECKPOINT_THRESHOLD_MIB")
             .unwrap_or_else(|_| "16".into())
             .parse::<u32>()
             .map_err(|_| "COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024")?;
         if !(1..=1024).contains(&checkpoint_threshold_mib) {
             return Err("COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024".into());
         }
-        let duckdb_threads = env::var("COLLECTOR_DUCKDB_THREADS")
+        let duckdb_threads = settings
+            .var("COLLECTOR_DUCKDB_THREADS")
             .ok()
             .map(|value| -> Result<usize> {
                 let count = value
@@ -130,31 +142,38 @@ impl Config {
         Ok(Self {
             checkpoint_threshold_mib,
             duckdb_threads,
-            batch: crate::writer::BatchConfig::load()?,
-            spool: crate::spool::SpoolConfig::load()?,
-            separate_reads: env::var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
+            batch: crate::writer::BatchConfig::load(settings)?,
+            spool: crate::spool::SpoolConfig::load(settings)?,
+            separate_reads: settings
+                .var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
                 .unwrap_or_else(|_| "false".into())
                 .parse()
                 .map_err(|_| "COLLECTOR_EXPERIMENTAL_READ_WORKER must be true or false")?,
-            profile: env::var("COLLECTOR_PROFILE")
+            profile: settings
+                .var("COLLECTOR_PROFILE")
                 .unwrap_or_else(|_| "false".into())
                 .parse()
                 .map_err(|_| "COLLECTOR_PROFILE must be true or false")?,
             trusted_proxies: crate::context::trusted_proxies(
-                &env::var("COLLECTOR_TRUSTED_PROXIES").unwrap_or_default(),
+                &settings
+                    .var("COLLECTOR_TRUSTED_PROXIES")
+                    .unwrap_or_default(),
             )?,
-            store_ip: env::var("COLLECTOR_STORE_IP")
+            store_ip: settings
+                .var("COLLECTOR_STORE_IP")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
                 .map_err(|_| "COLLECTOR_STORE_IP must be true or false")?,
             data_dir: data_dir.map(Path::to_path_buf).unwrap_or_else(|| {
-                env::var_os("COLLECTOR_DATA_DIR")
+                settings
+                    .var_os("COLLECTOR_DATA_DIR")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| "data".into())
             }),
             bind: match bind {
                 Some(bind) => bind,
-                None => env::var("COLLECTOR_BIND")
+                None => settings
+                    .var("COLLECTOR_BIND")
                     .unwrap_or_else(|_| "127.0.0.1:4174".into())
                     .parse()?,
             },

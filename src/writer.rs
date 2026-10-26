@@ -9,7 +9,6 @@ use duckdb::{
 };
 use std::{
     collections::HashSet,
-    env,
     mem::size_of,
     sync::{Arc, mpsc},
     thread,
@@ -28,14 +27,16 @@ pub struct BatchConfig {
 }
 
 impl BatchConfig {
-    pub fn load() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(settings: &crate::settings::Settings) -> Result<Self, Box<dyn std::error::Error>> {
         fn number(
+            settings: &crate::settings::Settings,
             name: &str,
             default: usize,
             min: usize,
             max: usize,
         ) -> Result<usize, Box<dyn std::error::Error>> {
-            let value = env::var(name)
+            let value = settings
+                .var(name)
                 .unwrap_or_else(|_| default.to_string())
                 .parse::<usize>()
                 .map_err(|_| format!("{name} must be between {min} and {max}"))?;
@@ -44,9 +45,10 @@ impl BatchConfig {
             }
             Ok(value)
         }
-        let max_bytes = number("COLLECTOR_BATCH_MAX_BYTES", 1048576, 1, 67108864)?;
+        let max_bytes = number(settings, "COLLECTOR_BATCH_MAX_BYTES", 1048576, 1, 67108864)?;
         Ok(Self {
-            bulk: match env::var("COLLECTOR_INSERT_MODE")
+            bulk: match settings
+                .var("COLLECTOR_INSERT_MODE")
                 .as_deref()
                 .unwrap_or("bulk")
             {
@@ -54,11 +56,19 @@ impl BatchConfig {
                 "row" => false,
                 _ => return Err("COLLECTOR_INSERT_MODE must be bulk or row".into()),
             },
-            max_events: number("COLLECTOR_BATCH_MAX_EVENTS", 100, 1, 10000)?,
+            max_events: number(settings, "COLLECTOR_BATCH_MAX_EVENTS", 100, 1, 10000)?,
             max_bytes,
-            delay: Duration::from_millis(number("COLLECTOR_BATCH_DELAY_MS", 10, 0, 1000)? as u64),
-            queue_bytes: number("COLLECTOR_QUEUE_MAX_BYTES", 16777216, max_bytes, 268435456)?,
-            queue_requests: number("COLLECTOR_QUEUE_MAX_REQUESTS", 256, 1, 4096)?,
+            delay: Duration::from_millis(
+                number(settings, "COLLECTOR_BATCH_DELAY_MS", 10, 0, 1000)? as u64,
+            ),
+            queue_bytes: number(
+                settings,
+                "COLLECTOR_QUEUE_MAX_BYTES",
+                16777216,
+                max_bytes,
+                268435456,
+            )?,
+            queue_requests: number(settings, "COLLECTOR_QUEUE_MAX_REQUESTS", 256, 1, 4096)?,
         })
     }
 }

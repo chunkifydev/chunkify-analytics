@@ -476,6 +476,19 @@ rotates a default-project primary credential.
 
 ## Configuration
 
+The collector and MCP companion load `.env` from the current working directory.
+`--env-file <path>` selects a different file instead. A missing default `.env`
+is allowed; a missing explicitly selected file or malformed file fails startup.
+Parent directories are not searched. The process environment overrides file
+values, and explicit CLI flags override both. All existing `COLLECTOR_*` and
+`CHUNKIFY_MCP_*` settings work in the file. Values are merged without modifying
+the process environment.
+
+```sh
+chunkify-analytics --env-file production.env serve
+chunkify-analytics --env-file production.env config check
+```
+
 Start with the [recommended mode, settings and tuning policy](configuration.md).
 [collector.env.example](collector.env.example) selects one DuckDB thread and
 keeps experimental modes disabled. The tables below show built-in defaults;

@@ -11,7 +11,6 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    env,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -31,20 +30,25 @@ pub struct SpoolConfig {
     pub prepare_ahead: bool,
 }
 impl SpoolConfig {
-    pub fn load() -> std::result::Result<Option<Self>, Box<dyn std::error::Error>> {
-        let enabled: bool = env::var("COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE")
+    pub fn load(
+        settings: &crate::settings::Settings,
+    ) -> std::result::Result<Option<Self>, Box<dyn std::error::Error>> {
+        let enabled: bool = settings
+            .var("COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE")
             .unwrap_or_else(|_| "false".into())
             .parse()?;
         if !enabled {
             return Ok(None);
         }
-        let max_bytes = env::var("COLLECTOR_SPOOL_MAX_BYTES")
+        let max_bytes = settings
+            .var("COLLECTOR_SPOOL_MAX_BYTES")
             .unwrap_or_else(|_| "67108864".into())
             .parse()?;
         if !(4096..=268435456).contains(&max_bytes) {
             return Err("COLLECTOR_SPOOL_MAX_BYTES must be between 4096 and 268435456".into());
         }
-        let prepare_ahead = env::var("COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE")
+        let prepare_ahead = settings
+            .var("COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE")
             .unwrap_or_else(|_| "false".into())
             .parse()
             .map_err(|_| "COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE must be true or false")?;

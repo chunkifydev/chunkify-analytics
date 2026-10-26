@@ -18,6 +18,11 @@ collector URL, credential or project. Only GET requests to fixed read routes are
 allowed, and HTTP redirects are disabled. Tokens never appear in tool results,
 examples or logs. The administrator chooses the collector and AI client.
 
+The companion also reads these settings from `.env` in its working directory,
+or from `chunkify-analytics --env-file /path/to/mcp.env mcp`. Existing process
+environment variables take precedence. Collector-only settings are not validated
+by the companion and it still does not require a data directory.
+
 ## Dashboard workflow
 
 The assistant discovers the read operations, schemas, examples and metric

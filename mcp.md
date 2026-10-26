@@ -1,31 +1,53 @@
-# MCP companion
+# MCP server
 
-## Design decision
+## Embedded HTTP endpoint
 
-The first release uses a local stdio companion, selected with the administrator
-on 2026-10-19. The AI client launches `chunkify-analytics mcp` and sets
-`CHUNKIFY_MCP_COLLECTOR_URL` and `CHUNKIFY_MCP_READ_TOKEN` in its environment.
-This command uses the collector's HTTP read API. It never opens the database or
-requires the server's data directory. The existing binary also packages the
-companion, so deployments do not need a second language runtime.
+`chunkify-analytics serve` exposes `/mcp` on the same address as the HTTP API.
+The MCP endpoint runs in the collector process and calls the same project-scoped
+store methods as the REST API. It opens no second database connection or process
+and makes no loopback HTTP requests.
 
-The official Rust MCP SDK handles protocol negotiation and stdio. The companion
-supports SDK clients using the 2025-11-25 lifecycle and the 2026-07-28 discovery
-lifecycle. No hosted MCP endpoint or OAuth server is added in this release.
+Configure an HTTP-capable MCP client with:
 
-The configured token selects one project. Tool arguments cannot change the
-collector URL, credential or project. Only GET requests to fixed read routes are
-allowed, and HTTP redirects are disabled. Tokens never appear in tool results,
-examples or logs. The administrator chooses the collector and AI client.
+- Transport: Streamable HTTP.
+- URL: `http://127.0.0.1:4174/mcp`, or the collector's deployed HTTPS URL.
+- Request header: `Authorization: Bearer <private-project-read-token>`.
 
-The companion also reads these settings from `.env` in its working directory,
-or from `chunkify-analytics --env-file /path/to/mcp.env mcp`. Existing process
-environment variables take precedence. Collector-only settings are not validated
-by the companion and it still does not require a data directory.
+The official Rust MCP SDK handles the 2025-11-25 initialization lifecycle and
+2026-07-28 discovery lifecycle. HTTP requests are stateless: every request is
+authenticated against the current project credentials. Rotation or revocation
+applies to the next request, including an already-connected client's tool list.
+An ingest key cannot access MCP. Tool arguments cannot change the project.
+No OAuth server or account login flow is provided; clients must support a
+configured bearer token.
 
-A TOML file can provide `[mcp].collector_url` and `[mcp].read_token` as well.
-Use `chunkify-analytics --config /path/to/collector.toml mcp`; environment and
-`.env` values take priority. Keep files containing read tokens private.
+MCP is enabled by default. Set `COLLECTOR_MCP_ENABLED=false`, or configure TOML:
+
+```toml
+[mcp]
+enabled = true
+allowed_hosts = ["localhost", "127.0.0.1", "[::1]", "analytics.example.com"]
+```
+
+`COLLECTOR_MCP_ALLOWED_HOSTS` accepts the same allowlist as comma-separated
+hostnames or `host:port` authorities. Defaults allow loopback hosts. Add the
+HTTP hostname used by the client when deploying behind an ingress. Wildcards
+and empty allowlists are rejected. Requests with an `Origin` header must match
+the authenticated project's allowed origins; requests without that header are
+accepted. HTTP clients connect directly to this endpoint without running `mcp`.
+
+## Optional stdio adapter
+
+For clients that require standard input/output, the same executable provides
+`chunkify-analytics mcp`. The client launches and stops this small adapter.
+Set `CHUNKIFY_MCP_COLLECTOR_URL` and `CHUNKIFY_MCP_READ_TOKEN`; it reads through
+the collector's HTTP REST API and never opens the database or requires its data
+directory. HTTP redirects and retries are disabled.
+
+The adapter reads connection settings from the process environment, `.env`, or
+`--env-file <path>`. TOML supports `[mcp].collector_url` and `[mcp].read_token`.
+CLI flags take priority over the environment, dotenv and TOML. Collector-only
+settings are not validated by the adapter. Keep token-bearing files private.
 
 ## Dashboard workflow
 
@@ -38,7 +60,7 @@ Metric calculations remain in the collector. Pagination returns the original
 continuation cursor without fetching subsequent pages automatically. Event
 properties are untrusted data, including strings that resemble instructions.
 
-## Connect a local AI coding tool
+## Connect a stdio-only client
 
 Build the binary with `cargo build --locked --release`. Start the collector with
 `serve`, on this machine or a server, and obtain a read token for the intended
@@ -148,7 +170,7 @@ adding per-video or per-bucket unique viewers can count the same viewer more tha
 `get_timeseries` requires a bounded date range and `interval: "hour"` or `"day"`.
 It returns all requested UTC buckets with `coverage.kind: "time_buckets"` and
 `coverage.has_more: false`; it is not a paginated tool. Empty buckets contain zeros.
-An over-1000-bucket range is rejected before the HTTP call. Playing time belongs
+An over-1000-bucket range is rejected before running a query. Playing time belongs
 entirely to the view's start bucket, including playback after the bucket or query
 window. Label charts accordingly; this does not measure activity per clock hour.
 The existing read token, filters, response-size limit and query deadline apply.
@@ -176,17 +198,18 @@ never copied into MCP errors. The companion does not retry or follow redirects.
 
 ### Limits
 
-Each call has a 15-second deadline. The companion permits at most four HTTP
-queries at once, returns at most 1 MiB of JSON per query and accepts pages of
+Each call has a 15-second deadline. The embedded endpoint shares a four-query
+limit across clients; each stdio adapter also permits four queries. Both
+transports return at most 1 MiB of JSON per query and accept pages of
 1–100 rows, defaulting to 10. Oversized responses return an explicit error asking
-for a smaller page; they are never silently truncated. Cancellation stops the
-companion's HTTP wait, but a database query already running on the collector can
-still finish. Contract discovery returns one operation or documentation topic
+for a smaller page; they are never silently truncated. Cancellation stops waiting
+for the result, but an active database query can still finish. Contract discovery returns one operation or documentation topic
 at a time, using the bundled OpenAPI document as its source of truth.
-Protocol frames are capped at 64 KiB before JSON parsing; a malformed or oversized
-frame closes the connection. Tool arguments are capped at 32 KiB. MCP results
+HTTP request bodies and stdio protocol frames are capped at 64 KiB before JSON
+parsing. Invalid HTTP requests receive an error; malformed or oversized stdio
+frames close that adapter's connection. Tool arguments are capped at 32 KiB. MCP results
 include both structured JSON and a text representation for client compatibility,
-so the encoded protocol response can be larger than the 1 MiB HTTP body limit.
+so the encoded protocol response can be larger than the 1 MiB query-data limit.
 Combined filters, excluding `limit` and `cursor`, must fit in 4 KiB of serialized
 JSON, leaving room for their encoded continuation. A returned cursor is checked
 against the next request's limits. If a stored identifier makes it too large,
@@ -204,6 +227,11 @@ continued. Narrow the query or use the HTTP API for such a dataset.
 
 ## Release verification
 
+The automated MCP tests cover both transports with the official Rust client,
+including HTTP/REST metric parity, pagination, overlapping project IDs, legacy
+and modern discovery, authentication, live rotation/revocation, host and origin
+validation, request limits and disabling the embedded endpoint.
+
 Run `cargo test --locked --test mcp` from this directory. The tests launch the
 actual binary with the official Rust SDK client and exercise both protocol
 lifecycles, discovery, live HTTP parity, two projects with overlapping IDs,
@@ -219,7 +247,8 @@ automated protocol tests.
 
 ### Implementation verification, 2026-10-19
 
-On macOS, Rust tests passed: nine existing tests and four MCP integration tests.
+The earlier stdio acceptance record on macOS reported nine existing Rust tests
+and four MCP integration tests.
 The HTTP/API suite passed 69 tests; two optional previous-binary upgrade tests
 were skipped because this run did not set `COLLECTOR_PREVIOUS_BINARY`.
 Formatting, Clippy across all targets, and Standards/Spec reviews passed.

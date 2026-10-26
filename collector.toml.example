@@ -37,6 +37,9 @@ read_worker = false
 spool_max_bytes = 67108864
 
 [mcp]
+enabled = true
+# Add the public HTTP hostname when exposing /mcp through an ingress.
+allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
 # Used only by the local stdio companion. Keep real tokens in a private file
 # or CHUNKIFY_MCP_READ_TOKEN in the environment.
 collector_url = "http://127.0.0.1:4174"

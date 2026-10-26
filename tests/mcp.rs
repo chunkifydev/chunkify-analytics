@@ -4,7 +4,10 @@ use rmcp::{
     ClientLifecycleMode, ClientServiceExt, RoleClient,
     model::*,
     service::{PeerRequestOptions, RunningService},
-    transport::TokioChildProcess,
+    transport::{
+        StreamableHttpClientTransport, TokioChildProcess,
+        streamable_http_client::StreamableHttpClientTransportConfig,
+    },
 };
 use serde_json::{Value, json};
 use std::{
@@ -61,6 +64,38 @@ async fn connect(url: &str, token: &str, modern: bool) -> Mcp {
     .unwrap()
 }
 
+async fn connect_http(url: &str, token: &str, modern: bool) -> Mcp {
+    let transport = StreamableHttpClientTransport::from_config(
+        StreamableHttpClientTransportConfig::with_uri(format!("{url}/mcp")).auth_header(token),
+    );
+    let mode = if modern {
+        ClientLifecycleMode::Discover {
+            preferred_versions: vec![ProtocolVersion::V_2026_07_28],
+        }
+    } else {
+        ClientLifecycleMode::Initialize
+    };
+    let mut config = ClientConfig::default();
+    if !modern {
+        config.protocol_version = ProtocolVersion::V_2025_11_25;
+    }
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        config.serve_with_lifecycle(transport, mode),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+}
+
+async fn connect_mode(url: &str, token: &str, modern: bool, http: bool) -> Mcp {
+    if http {
+        connect_http(url, token, modern).await
+    } else {
+        connect(url, token, modern).await
+    }
+}
+
 fn params(name: &str, arguments: Value) -> CallToolRequestParams {
     CallToolRequestParams::new(name.to_owned())
         .with_arguments(arguments.as_object().unwrap().clone())
@@ -88,6 +123,10 @@ struct Collector {
 
 impl Collector {
     fn start() -> Self {
+        Self::with_settings(&[])
+    }
+
+    fn with_settings(settings: &[(&str, &str)]) -> Self {
         let directory =
             std::env::temp_dir().join(format!("chunkify-mcp-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
@@ -120,6 +159,7 @@ impl Collector {
             .env("COLLECTOR_DATA_DIR", &directory)
             .env("COLLECTOR_BIND", "127.0.0.1:0")
             .env("COLLECTOR_RETENTION_SECONDS", "0")
+            .envs(settings.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -245,14 +285,24 @@ fn assert_refs(value: &Value, document: &Value) {
 
 #[tokio::test]
 async fn discovery_http_parity_pagination_and_project_isolation() {
+    exercise_project_queries(false).await;
+}
+
+#[tokio::test]
+async fn embedded_http_mcp_matches_api_and_isolates_projects() {
+    exercise_project_queries(true).await;
+}
+
+async fn exercise_project_queries(http: bool) {
     let collector = Collector::start();
     collector.seed().await;
     let token = collector.keys["read_token"].as_str().unwrap();
-    let client = connect(&collector.url, token, false).await;
-    let live = connect(
+    let client = connect_mode(&collector.url, token, false, http).await;
+    let live = connect_mode(
         &collector.url,
         collector.live["read_token"].as_str().unwrap(),
         true,
+        http,
     )
     .await;
     let tools = client.list_tools(None).await.unwrap().tools;
@@ -543,7 +593,11 @@ async fn discovery_http_parity_pagination_and_project_isolation() {
             .await
             .is_err()
     );
-    for wrong in ["bad-token", collector.keys["ingest_key"].as_str().unwrap()] {
+    for wrong in if http {
+        vec![]
+    } else {
+        vec!["bad-token", collector.keys["ingest_key"].as_str().unwrap()]
+    } {
         let unauthorized = connect(&collector.url, wrong, true).await;
         for tool in [
             "list_events",
@@ -858,4 +912,164 @@ async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
         .unwrap();
     assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
     client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn embedded_http_authentication_origins_hosts_and_message_limits() {
+    let collector =
+        Collector::with_settings(&[("COLLECTOR_ALLOWED_ORIGINS", "https://allowed.example")]);
+    let endpoint = format!("{}/mcp", collector.url);
+    let http = reqwest::Client::new();
+    let initialize = json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+        "protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"test", "version":"1"}
+    }});
+    for token in [
+        "",
+        "invalid",
+        collector.keys["ingest_key"].as_str().unwrap(),
+    ] {
+        let response = http
+            .post(&endpoint)
+            .bearer_auth(token)
+            .json(&initialize)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+        assert_eq!(response.headers()["www-authenticate"], "Bearer");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+    }
+    let token = collector.keys["read_token"].as_str().unwrap();
+    let request = || {
+        http.post(&endpoint)
+            .bearer_auth(token)
+            .header("accept", "application/json, text/event-stream")
+    };
+    assert_eq!(
+        request()
+            .header("origin", "https://evil.example")
+            .json(&initialize)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        request()
+            .header("host", "evil.example")
+            .json(&initialize)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        request()
+            .header("origin", "null")
+            .json(&initialize)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let response = request()
+        .header("origin", "https://allowed.example")
+        .json(&initialize)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<Value>().await.unwrap()["result"]["serverInfo"]["name"],
+        "chunkify-analytics"
+    );
+    assert!(
+        request()
+            .json(&json!({"padding":"x".repeat(70 * 1024)}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert_eq!(collector.get("/healthz", token).await["status"], "ok");
+}
+
+#[tokio::test]
+async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation() {
+    let collector = Collector::start();
+    let admin = |args: &[&str]| {
+        let output = clean_command()
+            .args(args)
+            .env("COLLECTOR_DATA_DIR", &collector.directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let created = admin(&["key", "create", "default", "read", "MCP"]);
+    let client = connect_http(&collector.url, created["secret"].as_str().unwrap(), true).await;
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
+    let rotated = admin(&[
+        "key",
+        "rotate",
+        "default",
+        created["key_id"].as_str().unwrap(),
+    ]);
+    assert!(client.list_tools(None).await.is_err());
+    client.cancel().await.unwrap();
+    let client = connect_http(&collector.url, rotated["secret"].as_str().unwrap(), false).await;
+    assert_eq!(
+        call(&client, "get_summary", json!({}), false).await["data"]["views"],
+        0
+    );
+    admin(&[
+        "key",
+        "revoke",
+        "default",
+        created["key_id"].as_str().unwrap(),
+    ]);
+    assert!(client.list_tools(None).await.is_err());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn embedded_http_can_be_disabled_and_supports_an_explicit_ingress_hostname() {
+    let disabled = Collector::with_settings(&[("COLLECTOR_MCP_ENABLED", "false")]);
+    let http = reqwest::Client::new();
+    assert_eq!(
+        http.post(format!("{}/mcp", disabled.url))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    let collector =
+        Collector::with_settings(&[("COLLECTOR_MCP_ALLOWED_HOSTS", "analytics.example")]);
+    let request = || {
+        http.post(format!("{}/mcp", collector.url))
+        .bearer_auth(collector.keys["read_token"].as_str().unwrap())
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+            "protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"test", "version":"1"}
+        }}))
+    };
+    assert_eq!(request().send().await.unwrap().status(), 403);
+    assert_eq!(
+        request()
+            .header("host", "analytics.example")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
 }

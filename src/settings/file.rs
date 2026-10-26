@@ -67,6 +67,8 @@ struct Experimental {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Mcp {
+    enabled: Option<bool>,
+    allowed_hosts: Option<Vec<String>>,
     collector_url: Option<String>,
     read_token: Option<String>,
 }
@@ -228,6 +230,16 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         settings
             .values
             .insert("COLLECTOR_SPOOL_MAX_BYTES".into(), value.to_string().into());
+    }
+    if let Some(value) = config.mcp.enabled {
+        settings
+            .values
+            .insert("COLLECTOR_MCP_ENABLED".into(), value.to_string().into());
+    }
+    if let Some(value) = config.mcp.allowed_hosts {
+        settings
+            .values
+            .insert("COLLECTOR_MCP_ALLOWED_HOSTS".into(), value.join(",").into());
     }
     if let Some(value) = config.mcp.collector_url {
         settings

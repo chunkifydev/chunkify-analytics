@@ -11,6 +11,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct Config {
     pub data_dir: PathBuf,
+    pub mcp_enabled: bool,
+    pub mcp_allowed_hosts: Vec<String>,
     pub bind: SocketAddr,
     pub allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
@@ -139,7 +141,30 @@ impl Config {
                 Ok(count)
             })
             .transpose()?;
+        let mcp_allowed_hosts: Vec<String> = settings
+            .var("COLLECTOR_MCP_ALLOWED_HOSTS")
+            .unwrap_or_else(|_| "localhost,127.0.0.1,[::1]".into())
+            .split(',')
+            .map(str::trim)
+            .filter(|host| !host.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if mcp_allowed_hosts.is_empty()
+            || mcp_allowed_hosts.iter().any(|host| {
+                host.contains('*')
+                    || host.contains('@')
+                    || host.parse::<axum::http::uri::Authority>().is_err()
+            })
+        {
+            return Err("COLLECTOR_MCP_ALLOWED_HOSTS must contain literal hostnames or host:port authorities".into());
+        }
         Ok(Self {
+            mcp_enabled: settings
+                .var("COLLECTOR_MCP_ENABLED")
+                .unwrap_or_else(|_| "true".into())
+                .parse()
+                .map_err(|_| "COLLECTOR_MCP_ENABLED must be true or false")?,
+            mcp_allowed_hosts,
             checkpoint_threshold_mib,
             duckdb_threads,
             batch: crate::writer::BatchConfig::load(settings)?,

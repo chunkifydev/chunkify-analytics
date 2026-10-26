@@ -193,3 +193,23 @@ fn toml_sample_is_complete_and_does_not_create_state_when_checked() {
     assert!(output.status.success(), "{output:?}");
     assert!(!fixture.0.join("data").exists());
 }
+
+#[test]
+fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
+    let fixture = Fixture::new();
+    for source in [
+        "[mcp]\nenabled = 'yes'",
+        "[mcp]\nallowed_hosts = []",
+        "[mcp]\nallowed_hosts = ['*']",
+        "[mcp]\nallowed_hosts = ['https://example.com/path']",
+    ] {
+        std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+        assert!(!fixture.run(&["config", "check"]).status.success());
+    }
+    std::fs::write(
+        fixture.0.join("collector.toml"),
+        "[mcp]\nenabled = false\nallowed_hosts = ['analytics.example.com:443']",
+    )
+    .unwrap();
+    assert!(fixture.run(&["config", "check"]).status.success());
+}

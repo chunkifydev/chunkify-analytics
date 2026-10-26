@@ -21,13 +21,13 @@ pub struct Cli {
 pub enum Command {
     /// Initialize a new data directory and credentials
     Init,
-    /// Run the analytics HTTP server
+    /// Run the analytics HTTP API and MCP endpoint
     Serve {
         /// Listening IP address and port
         #[arg(long)]
         bind: Option<SocketAddr>,
     },
-    /// Run the read-only MCP companion over standard input/output
+    /// Run an optional stdio adapter for clients without HTTP MCP support
     Mcp,
     /// Manage projects
     Project {

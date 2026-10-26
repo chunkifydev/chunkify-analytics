@@ -29,6 +29,7 @@ struct App {
     max_otlp_records: usize,
     store_ip: bool,
     trusted_proxies: Vec<ipnet::IpNet>,
+    mcp_enabled: bool,
     rate: Arc<Mutex<RateLimit>>,
 }
 
@@ -61,6 +62,11 @@ impl IntoResponse for ApiError {
         response
             .headers_mut()
             .insert("cache-control", HeaderValue::from_static("no-store"));
+        if self.0 == StatusCode::UNAUTHORIZED {
+            response
+                .headers_mut()
+                .insert("www-authenticate", HeaderValue::from_static("Bearer"));
+        }
         if self.0 == StatusCode::TOO_MANY_REQUESTS {
             response
                 .headers_mut()
@@ -78,9 +84,16 @@ pub fn router(store: Store, projects: Arc<Registry>, config: &Config) -> Router 
         max_otlp_records: config.max_otlp_records,
         store_ip: config.store_ip,
         trusted_proxies: config.trusted_proxies.clone(),
+        mcp_enabled: config.mcp_enabled,
         rate: Arc::new(Mutex::new(RateLimit::new(config.ingest_per_second))),
     };
+    let mcp = if config.mcp_enabled {
+        crate::mcp::router(app.store.clone(), config.mcp_allowed_hosts.clone())
+    } else {
+        Router::new()
+    };
     Router::new()
+        .merge(mcp)
         .route("/healthz", get(health))
         .route("/v1/ingestion", get(ingestion_status))
         .route("/v1/summary", get(summary))
@@ -139,6 +152,7 @@ async fn access(
     mut request: Request,
     next: Next,
 ) -> Result<Response, ApiError> {
+    let mcp = app.mcp_enabled && request.uri().path() == "/mcp";
     let ingest = matches!(request.uri().path(), "/v1/events" | "/v1/logs")
         && matches!(*request.method(), Method::POST | Method::OPTIONS);
     let resolved = if ingest && request.method() != Method::OPTIONS {
@@ -152,7 +166,7 @@ async fn access(
                 Permission::Ingest,
             )?,
         )
-    } else if !ingest && request.uri().path().starts_with("/v1/") {
+    } else if !ingest && (request.uri().path().starts_with("/v1/") || mcp) {
         let secret = request
             .headers()
             .get("authorization")
@@ -163,7 +177,7 @@ async fn access(
     } else {
         None
     };
-    let origin = if ingest {
+    let origin = if ingest || mcp {
         match request.headers().get("origin") {
             Some(origin)
                 if origin.to_str().is_ok_and(|s| {

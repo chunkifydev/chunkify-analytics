@@ -1,7 +1,7 @@
 # Chunkify analytics
 
 A Rust service that stores Chunkify playback events in an embedded DuckDB file.
-The executable is `chunkify-analytics`; it also provides the local MCP companion.
+The executable is `chunkify-analytics`; it also serves MCP over HTTP and includes an optional stdio adapter.
 The JavaScript SDK remains in [chunkify-player](https://github.com/chunkifydev/chunkify-player/tree/main/packages/analytics).
 See [repository extraction notes](MIGRATION.md) for history and the test SDK dependency.
 The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/issues/381).
@@ -38,7 +38,8 @@ The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/
 6. Isolated projects, named ingest/read keys, project origin policies and ingestion
    limits, with CLI administration. Implemented. Hosted account membership remains
    a separate follow-up.
-7. A local, read-only MCP companion for AI-assisted dashboard development. See
+7. A read-only MCP endpoint in the collector process, plus an optional stdio
+   adapter, for AI-assisted dashboard development. See
    [MCP setup and verification](mcp.md). MCP is required for the first release;
    the [Codex CLI dashboard walkthrough](mcp-walkthrough.md) passed on 2026-10-20.
 
@@ -557,6 +558,8 @@ containers must be recreated to pick up edits to an environment file.
 | Environment variable | Default | Meaning |
 | --- | --- | --- |
 | `COLLECTOR_INSERT_MODE` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same batching and durability rules. |
+| `COLLECTOR_MCP_ENABLED` | `true` | Serve the authenticated `/mcp` endpoint in the collector process. |
+| `COLLECTOR_MCP_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | Allowed HTTP hostnames or host:port authorities for MCP. Add the ingress hostname for remote clients. |
 | `COLLECTOR_PROFILE` | `false` | Emit one aggregate database timing report to stderr when the worker drains on graceful shutdown. Accepts only `true` or `false`. No event values or credentials are included. Intended for local performance diagnosis. |
 
 ### Limits and overload
@@ -643,7 +646,7 @@ views. Supply it for a video's detail panel. These two endpoints return summarie
 they do not return per-video tables or time buckets. A time-series bucket's playing
 time belongs to views started in that bucket, not when each second was played.
 
-An AI coding tool can use the [local MCP companion](mcp.md) with the collector URL
+An AI coding tool can use the [built-in MCP endpoint](mcp.md) at `/mcp` with the collector URL
 and a private project read token. It discovers the API, queries these same metrics
 and uses its coding tools to create a dashboard. The finished dashboard's backend
 calls the HTTP API directly; it does not need the AI assistant running. The
@@ -866,7 +869,7 @@ and playing time sum to the matching summary on unchanged data. Bucket unique
 viewers must not be summed, because a viewer may appear in several buckets.
 New snapshots, final events, deletion or retention can change later results.
 
-The MCP companion exposes the same operation as `get_timeseries`. See
+The MCP server exposes the same operation as `get_timeseries`. See
 [analytics query scope](analytics-queries.md) for the first stage and later work.
 
 ### Watch time and reaching the end
@@ -969,7 +972,7 @@ snapshot if no final event exists. Cumulative snapshots are never added together
 A final null value stays unknown. All filters select the first retained start;
 matching later measurements/errors contribute even after `to`. Start-only views
 have no startup/buffering sample. Views without a retained start are excluded.
-The MCP companion provides the same result through `get_quality`.
+The MCP server provides the same result through `get_quality`.
 
 The server stores receipt time separately for retention and operations.
 Server operational messages use stdout/stderr and contain no keys. CLI commands

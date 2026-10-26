@@ -18,7 +18,7 @@ use std::{
     time::Duration,
 };
 
-const BINARY: &str = env!("CARGO_BIN_EXE_chunkify-analytics-collector");
+const BINARY: &str = env!("CARGO_BIN_EXE_chunkify-analytics");
 type Mcp = RunningService<RoleClient, ClientConfig>;
 
 fn clean_command() -> Command {

@@ -86,7 +86,7 @@ jobs:
           context: .
           platforms: linux/amd64
           load: true
-          tags: chunkify-analytics-collector:test
+          tags: chunkify-analytics:test
           cache-from: type=gha,scope=collector-amd64
           cache-to: type=gha,scope=collector-amd64,mode=max
           # Invalidate the RUN layer without --no-cache, which prunes cache mounts.

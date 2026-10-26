@@ -18,7 +18,7 @@ test('shared archive excludes data and credentials even when stored under the ex
     const prefix = `chunkify-analytics-demo-${process.platform}-${process.arch}`;
     const archive = path.join(root, 'dist', prefix + '.tar.gz');
     const { stdout } = await exec('tar', ['-tzf', archive]);
-    assert.ok(stdout.includes(prefix + '/bin/chunkify-analytics-collector'));
+    assert.ok(stdout.includes(prefix + '/bin/chunkify-analytics'));
     assert.ok(stdout.includes(prefix + '/examples/demo/public/player.js'));
     assert.equal(stdout.includes(path.basename(canary)), false);
     assert.equal(stdout.includes(path.basename(dependencyCanary)), false);

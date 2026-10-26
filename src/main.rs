@@ -88,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         (Some(command @ ("project-list" | "project-create" | "project-rename" | "project-configure" | "project-retention" | "key-create" | "key-revoke" | "key-rotate")), args) => admin::command(&config, command, args).await,
         (Some("rotate-key"), [_]) => admin::command(&config, "rotate-key", &parameters).await,
-        _ => Err("Usage: chunkify-analytics-collector init | serve | mcp | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | project-retention <id> <seconds|inherit> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
+        _ => Err("Usage: chunkify-analytics init | serve | mcp | delete-viewer [project] <viewer_id> | rotate-key <ingest|read> | project-list | project-create <id> [name] | project-rename <id> <name> | project-configure <id> <settings.json> | project-retention <id> <seconds|inherit> | key-create <project> <ingest|read> <name> | key-rotate <project> <key-id> | key-revoke <project> <key-id>".into()),
     }
 }
 

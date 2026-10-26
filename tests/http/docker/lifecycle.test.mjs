@@ -51,7 +51,7 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
 test("docker exec manages live keys in a non-root read-only container", { timeout: 120000 }, async (t) => {
   const server = await containerCollector();
   t.after(() => server.close());
-  const command = async (...args) => JSON.parse(await docker(["exec", server.name, "chunkify-analytics-collector", ...args]));
+  const command = async (...args) => JSON.parse(await docker(["exec", server.name, "chunkify-analytics", ...args]));
   const token = await command("key-create", "default", "read", "Dashboard");
   assert.equal(token.restart_required, false);
   assert.equal(await docker(["exec", server.name, "stat", "-c", "%a", "/data/admin.sock"]), "600");

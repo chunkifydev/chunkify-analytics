@@ -12,9 +12,9 @@ ARG CI_BUILD_ID=local
 RUN --mount=type=cache,id=collector-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=collector-target-${TARGETARCH},target=/app/target \
     printf 'Cargo build check: %s\n' "$CI_BUILD_ID" \
-    && cargo clean --release --package chunkify-analytics-collector \
+    && cargo clean --release --package chunkify-analytics \
     && cargo build --locked --release --jobs "$BUILD_JOBS" \
-    && cp target/release/chunkify-analytics-collector /usr/local/bin/chunkify-analytics-collector
+    && cp target/release/chunkify-analytics /usr/local/bin/chunkify-analytics
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 # Snapshot repositories keep runtime package versions fixed alongside Cargo.lock.
@@ -29,7 +29,7 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && groupadd --gid 10001 collector \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin collector \
     && install -d -m 0700 -o 10001 -g 10001 /data
-COPY --from=build /usr/local/bin/chunkify-analytics-collector /usr/local/bin/
+COPY --from=build /usr/local/bin/chunkify-analytics /usr/local/bin/
 ENV COLLECTOR_DATA_DIR=/data COLLECTOR_BIND=0.0.0.0:4174
 USER 10001:10001
 WORKDIR /data
@@ -37,5 +37,5 @@ EXPOSE 4174
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --start-interval=1s --retries=3 \
     CMD curl --noproxy '*' --fail --silent --show-error --max-time 2 "http://${COLLECTOR_BIND}/healthz" > /dev/null || exit 1
-ENTRYPOINT ["/usr/local/bin/chunkify-analytics-collector"]
+ENTRYPOINT ["/usr/local/bin/chunkify-analytics"]
 CMD ["serve"]

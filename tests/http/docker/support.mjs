@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 
 const execute = promisify(execFile);
-export const image = process.env.COLLECTOR_IMAGE ?? "chunkify-analytics-collector:test";
+export const image = process.env.COLLECTOR_IMAGE ?? "chunkify-analytics:test";
 
 export async function docker(args) {
   const { stdout } = await execute("docker", args, { timeout: 60000, maxBuffer: 1024 * 1024 });

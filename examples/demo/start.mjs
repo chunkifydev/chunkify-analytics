@@ -12,7 +12,7 @@ import { createDemoHandler } from './server.mjs';
 
 const exec = promisify(execFile);
 export const root = fileURLToPath(new URL('../../', import.meta.url));
-const executable = process.platform === 'win32' ? 'chunkify-analytics-collector.exe' : 'chunkify-analytics-collector';
+const executable = process.platform === 'win32' ? 'chunkify-analytics.exe' : 'chunkify-analytics';
 export async function findCollector(explicit) {
   const candidates = explicit ? [path.resolve(explicit)] : ['bin', 'target/release', 'target/debug'].map(dir => path.join(root, dir, executable));
   for (const candidate of candidates) {

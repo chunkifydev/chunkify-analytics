@@ -73,14 +73,14 @@ cargo build --locked
 ```
 
 The first Rust build compiles embedded DuckDB and can take several minutes.
-Cargo writes the native collector to `target/debug/chunkify-analytics-collector`.
+Cargo writes the native collector to `target/debug/chunkify-analytics`.
 Build output and dependencies use more disk space than the small demo dataset.
 There is no separate DuckDB installation or database server to configure.
 
 ### 4. Start the complete demo
 
 ```sh
-npm run demo -- --collector target/debug/chunkify-analytics-collector
+npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
 Keep the terminal open. The launcher automatically:
@@ -98,7 +98,7 @@ The data is generated on your computer; no database download is needed.
 If port 8787 is already in use, select a free port:
 
 ```sh
-npm run demo -- --collector target/debug/chunkify-analytics-collector --port 0
+npm run demo -- --collector target/debug/chunkify-analytics --port 0
 ```
 
 `--no-open` prints the URLs without opening a browser. The collector uses its own
@@ -111,7 +111,7 @@ Press **Ctrl+C** in the terminal to stop the dashboard and collector. To start
 again, run:
 
 ```sh
-npm run demo -- --collector target/debug/chunkify-analytics-collector
+npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
 Subsequent launches reuse your projects, keys and database without adding the
@@ -123,11 +123,11 @@ After pulling source updates, refresh dependencies and rebuild:
 git pull --ff-only
 npm ci
 cargo build --locked
-npm run demo -- --collector target/debug/chunkify-analytics-collector
+npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
 If you intentionally use an existing collector executable, pass
-`npm run demo -- --collector /absolute/path/to/chunkify-analytics-collector`.
+`npm run demo -- --collector /absolute/path/to/chunkify-analytics`.
 The source commands above select `target/debug` explicitly. Without `--collector`,
 the launcher checks `bin/`, `target/release/`, then
 `target/debug/`; keep any executable in those earlier locations up to date too.
@@ -206,7 +206,7 @@ With dependencies installed and a native executable built for the recipient's
 OS and architecture:
 
 ```sh
-npm run demo:pack -- --collector /absolute/path/to/chunkify-analytics-collector
+npm run demo:pack -- --collector /absolute/path/to/chunkify-analytics
 ```
 
 The archive appears in `dist/chunkify-analytics-demo-<platform>-<architecture>.tar.gz`.

@@ -14,7 +14,7 @@ import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics-collector");
+const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
 // Capture the public adapter's actual HTTP output for tests of gateway batching.
 async function otlpRequests(events, options) {

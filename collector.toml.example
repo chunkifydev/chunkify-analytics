@@ -1,0 +1,43 @@
+# Copy to collector.toml. Omitted settings keep their built-in defaults.
+# Precedence: CLI flags > process environment > .env > TOML > defaults.
+# Relative TOML data paths are resolved beside this file.
+data_dir = "./data"
+profile = false
+
+[server]
+bind = "127.0.0.1:4174"
+allowed_origins = ["https://player.example.com"]
+trusted_proxies = []
+store_ip = true
+max_body_bytes = 65536
+max_otlp_records = 100
+ingest_per_second = 100
+
+[retention]
+seconds = 2592000
+interval_seconds = 3600
+
+[batch]
+max_events = 100
+max_bytes = 1048576
+delay_ms = 10
+queue_max_bytes = 16777216
+queue_max_requests = 256
+insert_mode = "bulk"
+
+[duckdb]
+# Recommended starting value; omit threads to let DuckDB choose automatically.
+threads = 1
+checkpoint_threshold_mib = 16
+
+[experimental]
+durable_queue = false
+replay_pipeline = false
+read_worker = false
+spool_max_bytes = 67108864
+
+[mcp]
+# Used only by the local stdio companion. Keep real tokens in a private file
+# or CHUNKIFY_MCP_READ_TOKEN in the environment.
+collector_url = "http://127.0.0.1:4174"
+# read_token = "..."

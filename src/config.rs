@@ -62,7 +62,7 @@ impl Config {
 
     #[cfg(test)]
     pub fn load() -> Result<Self> {
-        Self::load_with(&crate::settings::Settings::load(None)?, None, None)
+        Self::load_with(&crate::settings::Settings::load(None, None)?, None, None)
     }
 
     pub fn load_with(

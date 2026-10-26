@@ -107,3 +107,89 @@ fn dotenv_does_not_search_parent_directories() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
 }
+
+#[test]
+fn toml_dotenv_environment_and_cli_are_merged_in_priority_order() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("collector.toml"),
+        "data_dir = 'toml-data'\n[retention]\nseconds = 0\n",
+    )
+    .unwrap();
+    assert!(fixture.run(&["init"]).status.success());
+    assert!(fixture.0.join("toml-data/keys.json").is_file());
+    std::fs::write(fixture.0.join(".env"), "COLLECTOR_DATA_DIR=dotenv-data\n").unwrap();
+    assert!(fixture.run(&["init"]).status.success());
+    assert!(fixture.0.join("dotenv-data/keys.json").is_file());
+    let output = fixture
+        .command()
+        .args(["init"])
+        .env("COLLECTOR_DATA_DIR", "environment-data")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(fixture.0.join("environment-data/keys.json").is_file());
+    let output = fixture
+        .command()
+        .args(["init", "--data-dir", "cli-data"])
+        .env("COLLECTOR_DATA_DIR", "unused")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(fixture.0.join("cli-data/keys.json").is_file());
+    assert!(!fixture.0.join("unused").exists());
+}
+
+#[test]
+fn explicit_toml_replaces_default_and_resolves_data_relative_to_its_location() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join("collector.toml"), "unknown = true").unwrap();
+    std::fs::create_dir(fixture.0.join("settings")).unwrap();
+    std::fs::write(
+        fixture.0.join("settings/production.toml"),
+        "data_dir = './state'\n",
+    )
+    .unwrap();
+    let output = fixture.run(&["--config", "settings/production.toml", "init"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(fixture.0.join("settings/state/keys.json").is_file());
+    assert!(!fixture.0.join("state").exists());
+}
+
+#[test]
+fn unknown_fields_types_and_missing_files_fail_without_echoing_configuration() {
+    let fixture = Fixture::new();
+    assert!(
+        !fixture
+            .run(&["--config", "missing.toml", "config", "check"])
+            .status
+            .success()
+    );
+    for source in [
+        "unknown = 'private-test-secret'",
+        "[server]\nbnid = 'private-test-secret'",
+        "[retention]\nseconds = 'private-test-secret'",
+        "[mcp]\nread_token = 'private-test-secret",
+    ] {
+        std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert!(!output.status.success());
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(message.contains("Invalid TOML configuration"), "{message}");
+        assert!(!message.contains("private-test-secret"));
+    }
+    assert!(fixture.run(&["--help"]).status.success());
+}
+
+#[test]
+fn toml_sample_is_complete_and_does_not_create_state_when_checked() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("collector.toml"),
+        include_str!("../collector.toml.example"),
+    )
+    .unwrap();
+    let output = fixture.run(&["config", "check"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fixture.0.join("data").exists());
+}

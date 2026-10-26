@@ -23,6 +23,10 @@ or from `chunkify-analytics --env-file /path/to/mcp.env mcp`. Existing process
 environment variables take precedence. Collector-only settings are not validated
 by the companion and it still does not require a data directory.
 
+A TOML file can provide `[mcp].collector_url` and `[mcp].read_token` as well.
+Use `chunkify-analytics --config /path/to/collector.toml mcp`; environment and
+`.env` values take priority. Keep files containing read tokens private.
+
 ## Dashboard workflow
 
 The assistant discovers the read operations, schemas, examples and metric

@@ -18,3 +18,9 @@ Examples:
 For a breaking interface change, add `!` before the colon and explain the
 change in a `BREAKING CHANGE:` footer. Keep each commit focused on one logical
 change.
+
+Keep the README focused on installing and using the application. Put detailed
+references and contributor instructions in `docs/`. Keep reusable tests and
+benchmark tools in the repository, but write generated reports under ignored
+`target/` directories. Do not commit progress logs, one-off experiment outputs,
+or benchmark result files.

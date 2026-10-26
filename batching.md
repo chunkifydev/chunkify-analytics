@@ -185,8 +185,8 @@ after that drain, not immediate recovery under a continuous changing schedule.
 Build the current source, then run cases sequentially after builds and tests finish:
 
 ```sh
-docker build -t chunkify-analytics-collector:batched-queue services/analytics-collector
-COLLECTOR_IMAGE=chunkify-analytics-collector:batched-queue \
+docker build -t chunkify-analytics:batched-queue services/analytics-collector
+COLLECTOR_IMAGE=chunkify-analytics:batched-queue \
 COLLECTOR_LOAD_PROFILE=1 \
 COLLECTOR_LOAD_CASES=native-1000,native-2000 \
 COLLECTOR_LOAD_SECONDS=15 \
@@ -201,7 +201,7 @@ Use `COLLECTOR_LOAD_INSERT_MODE=row` or `bulk` and
 installed for that fixture. Other benchmark controls are in the README.
 
 The prior one-transaction-per-request image is preserved locally as
-`chunkify-analytics-collector:profile-cached`. Building the current tree under that
+`chunkify-analytics:profile-cached`. Building the current tree under that
 tag would replace the comparison executable. Image IDs in each raw report identify
 the tested builds; local source hashes describe the checkout, not a separately
 supplied old image. Builds used uncommitted source after `cc04fec`.

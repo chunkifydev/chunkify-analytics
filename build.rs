@@ -5,7 +5,7 @@ fn main() {
         // DuckDB archive. GNU linkers need the loader selected before that
         // archive is scanned so bundled extensions can register before main.
         println!(
-            "cargo:rustc-link-arg-bin=chunkify-analytics-collector=-Wl,--undefined=duckdb_register_static_extensions"
+            "cargo:rustc-link-arg-bin=chunkify-analytics=-Wl,--undefined=duckdb_register_static_extensions"
         );
     }
 }

@@ -1,7 +1,7 @@
 # Chunkify analytics
 
 A Rust service that stores Chunkify playback events in an embedded DuckDB file.
-The executable is `chunkify-analytics-collector`; it also provides the local MCP companion.
+The executable is `chunkify-analytics`; it also provides the local MCP companion.
 The JavaScript SDK remains in [chunkify-player](https://github.com/chunkifydev/chunkify-player/tree/main/packages/analytics).
 See [repository extraction notes](MIGRATION.md) for history and the test SDK dependency.
 The implementation follows [issue #381](https://github.com/chunkifydev/chunkify/issues/381).
@@ -87,8 +87,8 @@ cargo build --locked
 export COLLECTOR_DATA_DIR="$PWD/data"
 export COLLECTOR_ALLOWED_ORIGINS="http://127.0.0.1:4173"
 export COLLECTOR_DUCKDB_THREADS=1
-./target/debug/chunkify-analytics-collector init
-./target/debug/chunkify-analytics-collector serve
+./target/debug/chunkify-analytics init
+./target/debug/chunkify-analytics serve
 ```
 
 `init` creates `keys.json` in the data directory and refuses to overwrite existing
@@ -123,15 +123,15 @@ There is no additional tenant/account layer in this version.
 Stop the collector, keep `COLLECTOR_DATA_DIR` set, then run:
 
 ```sh
-./target/debug/chunkify-analytics-collector project-create live "Production website"
-./target/debug/chunkify-analytics-collector project-create staging "Staging website"
-./target/debug/chunkify-analytics-collector project-list
-./target/debug/chunkify-analytics-collector project-rename live "Customer A — Production"
-./target/debug/chunkify-analytics-collector key-create live ingest "Website"
-./target/debug/chunkify-analytics-collector key-create live read "Dashboard backend"
+./target/debug/chunkify-analytics project-create live "Production website"
+./target/debug/chunkify-analytics project-create staging "Staging website"
+./target/debug/chunkify-analytics project-list
+./target/debug/chunkify-analytics project-rename live "Customer A — Production"
+./target/debug/chunkify-analytics key-create live ingest "Website"
+./target/debug/chunkify-analytics key-create live read "Dashboard backend"
 # Use the safe key ID from project-list or key-create:
-./target/debug/chunkify-analytics-collector key-rotate live KEY_ID
-./target/debug/chunkify-analytics-collector key-revoke live KEY_ID
+./target/debug/chunkify-analytics key-rotate live KEY_ID
+./target/debug/chunkify-analytics key-revoke live KEY_ID
 ```
 
 `project-create <id> [name]` returns `ingest_key` and `read_token`. The name defaults
@@ -166,9 +166,9 @@ revoke that key.
 For Docker, run the same commands inside the running container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics-collector project-list
-docker exec chunkify-analytics chunkify-analytics-collector key-create live ingest "Website v2"
-docker exec chunkify-analytics chunkify-analytics-collector key-revoke live OLD_KEY_ID
+docker exec chunkify-analytics chunkify-analytics project-list
+docker exec chunkify-analytics chunkify-analytics key-create live ingest "Website v2"
+docker exec chunkify-analytics chunkify-analytics key-revoke live OLD_KEY_ID
 ```
 
 For a transition without interrupting delivery, create a second key, deploy it
@@ -287,16 +287,16 @@ cp collector.env.example .env
 This example uses the [recommended configuration](configuration.md). Then run:
 
 ```sh
-docker build -t chunkify-analytics-collector:local .
+docker build -t chunkify-analytics:local .
 docker volume create chunkify-analytics-data
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  chunkify-analytics-collector:local init
+  chunkify-analytics:local init
 docker run -d --name chunkify-analytics --restart unless-stopped \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
   -p 127.0.0.1:4174:4174 \
   --env-file .env \
-  chunkify-analytics-collector:local
+  chunkify-analytics:local
 ```
 
 The image runs as UID/GID `10001:10001`. A new named volume inherits the private
@@ -318,7 +318,7 @@ Read the generated credentials locally:
 ```sh
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data,readonly \
-  --entrypoint cat chunkify-analytics-collector:local /data/keys.json
+  --entrypoint cat chunkify-analytics:local /data/keys.json
 ```
 
 Keep this output private. Only `ingest_key` belongs in browser code.
@@ -361,7 +361,7 @@ before mounting it at `/data`.
 Rotate a key inside the running container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics-collector rotate-key ingest
+docker exec chunkify-analytics chunkify-analytics rotate-key ingest
 ```
 
 Use `rotate-key read` in the same position for the read token. Read and distribute
@@ -374,7 +374,7 @@ Project changes and viewer deletion require stopping the server first:
 docker stop --time 20 chunkify-analytics
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  chunkify-analytics-collector:local delete-viewer 'viewer-123'
+  chunkify-analytics:local delete-viewer 'viewer-123'
 docker start chunkify-analytics
 ```
 
@@ -386,7 +386,7 @@ docker stop --time 20 chunkify-analytics
 umask 077
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data,readonly \
-  --entrypoint tar chunkify-analytics-collector:local -C /data -czf - . \
+  --entrypoint tar chunkify-analytics:local -C /data -czf - . \
   > analytics-backup.tar.gz
 docker start chunkify-analytics
 ```
@@ -397,7 +397,7 @@ Restore to a new, unused named volume:
 docker volume create chunkify-analytics-restored
 docker run --rm -i \
   --mount type=volume,src=chunkify-analytics-restored,dst=/data \
-  --entrypoint tar chunkify-analytics-collector:local -C /data -xzpf - \
+  --entrypoint tar chunkify-analytics:local -C /data -xzpf - \
   < analytics-backup.tar.gz
 ```
 
@@ -948,18 +948,18 @@ collector user with the same `COLLECTOR_DATA_DIR`:
 
 ```sh
 # Keep the live project's events for seven days:
-./target/debug/chunkify-analytics-collector project-retention live 604800
+./target/debug/chunkify-analytics project-retention live 604800
 # Keep its events indefinitely:
-./target/debug/chunkify-analytics-collector project-retention live 0
+./target/debug/chunkify-analytics project-retention live 0
 # Restore the installation default:
-./target/debug/chunkify-analytics-collector project-retention live inherit
-./target/debug/chunkify-analytics-collector project-list
+./target/debug/chunkify-analytics project-retention live inherit
+./target/debug/chunkify-analytics project-list
 ```
 
 Docker uses the same command inside the running container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics-collector project-retention live 604800
+docker exec chunkify-analytics chunkify-analytics project-retention live 604800
 ```
 
 The command changes only retention, preserving origins, quotas and credentials.
@@ -994,7 +994,7 @@ event expires or is deleted, receiving its ID again creates a new stored event.
 Stop the collector, then run:
 
 ```sh
-./target/debug/chunkify-analytics-collector delete-viewer 'viewer-123'
+./target/debug/chunkify-analytics delete-viewer 'viewer-123'
 ```
 
 The one-argument form targets the `default` project. To target another project,
@@ -1015,8 +1015,8 @@ reduction in the size of the DuckDB file.
 With `COLLECTOR_DATA_DIR` set, run one of:
 
 ```sh
-./target/debug/chunkify-analytics-collector rotate-key ingest
-./target/debug/chunkify-analytics-collector rotate-key read
+./target/debug/chunkify-analytics rotate-key ingest
+./target/debug/chunkify-analytics rotate-key read
 ```
 
 These legacy commands rotate the `default` project’s primary credential.
@@ -1053,7 +1053,7 @@ To restore, stop the collector and copy the backup into a new directory:
 ```sh
 cp -a /srv/backups/analytics-backup /srv/analytics-restored
 export COLLECTOR_DATA_DIR=/srv/analytics-restored
-./target/debug/chunkify-analytics-collector serve
+./target/debug/chunkify-analytics serve
 ```
 
 The restore destination must not already exist. Use the same collector version,
@@ -1181,7 +1181,7 @@ minutes. Other running containers are counted in the report and left running.
 | `COLLECTOR_LOAD_CHECKPOINT_THRESHOLD_MIB` | server default | Override the automatic checkpoint threshold; 1..1024 MiB |
 | `COLLECTOR_LOAD_BATCH_MAX_EVENTS`, `COLLECTOR_LOAD_BATCH_MAX_BYTES`, `COLLECTOR_LOAD_BATCH_DELAY_MS`, `COLLECTOR_LOAD_QUEUE_MAX_BYTES`, `COLLECTOR_LOAD_QUEUE_MAX_REQUESTS` | server defaults | Override the corresponding write-batching settings; effective overrides are recorded in the report |
 | `COLLECTOR_LOAD_REPORT` | stdout | Output JSON path, saved after each completed case |
-| `COLLECTOR_IMAGE` | `chunkify-analytics-collector:test` | Existing local image name |
+| `COLLECTOR_IMAGE` | `chunkify-analytics:test` | Existing local image name |
 
 For a longer measurement around a candidate rate, using the existing image:
 
@@ -1546,7 +1546,7 @@ From the repository root:
 ```sh
 npm ci
 cargo build --locked
-npm run demo -- --collector target/debug/chunkify-analytics-collector
+npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
 The first build compiles DuckDB and can take several minutes. The launch command
@@ -1554,7 +1554,7 @@ selects that freshly built collector, creates projects and keys, generates **816
 events for 268 views across nine videos**, and opens the dashboard automatically.
 Keep the terminal open. No manual database setup, token entry or seed command is needed.
 
-If port 8787 is occupied, use `npm run demo -- --collector target/debug/chunkify-analytics-collector --port 0` to select a free port.
+If port 8787 is occupied, use `npm run demo -- --collector target/debug/chunkify-analytics --port 0` to select a free port.
 
 ### 4. Explore and send real events
 
@@ -1574,7 +1574,7 @@ The collector and database run locally. The dashboard uses manual refresh.
 ### 5. Stop and run it again
 
 Press **Ctrl+C** to stop the dashboard and collector. Your private `demo-data/`
-directory is kept and ignored by Git. Next time, run `npm run demo -- --collector target/debug/chunkify-analytics-collector` again; the
+directory is kept and ignored by Git. Next time, run `npm run demo -- --collector target/debug/chunkify-analytics` again; the
 sample data and your player events are preserved without duplicate seeding.
 
 After pulling source updates, run `npm ci` and `cargo build --locked` again before

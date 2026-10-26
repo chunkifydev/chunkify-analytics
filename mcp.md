@@ -3,7 +3,7 @@
 ## Design decision
 
 The first release uses a local stdio companion, selected with the administrator
-on 2026-10-19. The AI client launches `chunkify-analytics-collector mcp` and sets
+on 2026-10-19. The AI client launches `chunkify-analytics mcp` and sets
 `CHUNKIFY_MCP_COLLECTOR_URL` and `CHUNKIFY_MCP_READ_TOKEN` in its environment.
 This command uses the collector's HTTP read API. It never opens the database or
 requires the server's data directory. The existing binary also packages the
@@ -44,7 +44,7 @@ the client's private local settings, replacing the path, URL and token:
 {
   "mcpServers": {
     "chunkify-analytics": {
-      "command": "/absolute/path/to/chunkify-analytics-collector",
+      "command": "/absolute/path/to/chunkify-analytics",
       "args": ["mcp"],
       "env": {
         "CHUNKIFY_MCP_COLLECTOR_URL": "http://127.0.0.1:4174",
@@ -74,7 +74,7 @@ environment used to launch Claude Code, register the local process:
 
 ```sh
 claude mcp add --transport stdio --scope local chunkify-analytics \
-  -- /absolute/path/to/chunkify-analytics-collector mcp
+  -- /absolute/path/to/chunkify-analytics mcp
 ```
 
 Then start Claude Code from that environment and use `/mcp` to check the
@@ -97,7 +97,7 @@ these environment variables from the shell that launches Codex:
 
 ```toml
 [mcp_servers.chunkify-analytics]
-command = "/absolute/path/to/chunkify-analytics-collector"
+command = "/absolute/path/to/chunkify-analytics"
 args = ["mcp"]
 env_vars = ["CHUNKIFY_MCP_COLLECTOR_URL", "CHUNKIFY_MCP_READ_TOKEN"]
 required = true

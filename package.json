@@ -12,7 +12,7 @@
     "test": "npm run test:collector && cargo test --locked",
     "test:collector": "cargo build --locked && node --test tests/http/*.test.mjs",
     "check:collector:openapi": "node --test tests/http/openapi-schema.test.mjs",
-    "build:collector:docker": "docker build -t chunkify-analytics-collector:test .",
+    "build:collector:docker": "docker build -t chunkify-analytics:test .",
     "test:collector:docker": "npm run build:collector:docker && node --test tests/http/docker/*.test.mjs",
     "benchmark:collector": "npm run build:collector:docker && node tests/http/docker/load.mjs",
     "demo": "node examples/demo/start.mjs",

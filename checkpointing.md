@@ -143,8 +143,8 @@ requirements. Testing a representative retained dataset remains necessary.
 Build the image before starting a measurement:
 
 ```sh
-docker build -t chunkify-analytics-collector:checkpoint-profile services/analytics-collector
-COLLECTOR_IMAGE=chunkify-analytics-collector:checkpoint-profile \
+docker build -t chunkify-analytics:checkpoint-profile services/analytics-collector
+COLLECTOR_IMAGE=chunkify-analytics:checkpoint-profile \
 COLLECTOR_LOAD_PROFILE=1 \
 COLLECTOR_LOAD_CASES=native-500 \
 COLLECTOR_LOAD_SECONDS=180 \

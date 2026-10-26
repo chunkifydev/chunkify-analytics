@@ -109,8 +109,8 @@ test verifies abrupt-stop durability and duplicate accounting.
 
 ## Reproducing the comparison
 
-The local image tags are `chunkify-analytics-collector:profile-baseline` and
-`chunkify-analytics-collector:profile-cached`. Their immutable IDs are in each
+The local image tags are `chunkify-analytics:profile-baseline` and
+`chunkify-analytics:profile-cached`. Their immutable IDs are in each
 raw report. These builds were made with uncommitted source after `cc04fec`;
 the report also records optimized source-file hashes and the baseline store hash.
 The [small variant patch](performance-prepared-statements.patch) contains the
@@ -123,7 +123,7 @@ to its recorded image. The images have not been published.
 Run the same command once per image, sequentially, after builds/tests finish:
 
 ```sh
-COLLECTOR_IMAGE=chunkify-analytics-collector:profile-cached \
+COLLECTOR_IMAGE=chunkify-analytics:profile-cached \
 COLLECTOR_LOAD_PROFILE=1 \
 COLLECTOR_LOAD_CASES=native-800,otlp-batch10 \
 COLLECTOR_LOAD_SECONDS=15 \

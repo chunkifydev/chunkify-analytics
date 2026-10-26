@@ -16,8 +16,8 @@ const staging = await mkdtemp(path.join(output, '.demo-pack-'));
 try {
   const bundle = path.join(staging, name);
   await mkdir(path.join(bundle, 'bin'), { recursive: true });
-  await copyFile(binary, path.join(bundle, 'bin/chunkify-analytics-collector'));
-  await chmod(path.join(bundle, 'bin/chunkify-analytics-collector'), 0o755);
+  await copyFile(binary, path.join(bundle, 'bin/chunkify-analytics'));
+  await chmod(path.join(bundle, 'bin/chunkify-analytics'), 0o755);
   // Explicit files only: custom --data-dir paths or local files can live anywhere.
   const sourceFiles = [
     'examples/dashboard/server.cjs', 'examples/dashboard/seed-events.mjs',

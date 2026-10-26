@@ -6,7 +6,7 @@ profile = false
 
 [server]
 bind = "127.0.0.1:4174"
-allowed_origins = ["https://player.example.com"]
+allowed_origins = ["http://localhost:3000"]
 trusted_proxies = []
 store_ip = true
 max_body_bytes = 65536

@@ -74,7 +74,7 @@ Separate API calls may observe different ingestion watermarks during live traffi
 ## Optional synthetic data
 
 Use a **separate demo project**. Stop the collector to create it with
-`project create demo "Dashboard demo"`, save the returned credentials privately,
+`project create demo --name "Dashboard demo"`, save the returned credentials privately,
 and restart the collector. See the root README for native and Docker commands.
 Set that project's read token as `CHUNKIFY_DEMO_READ_TOKEN` above.
 
@@ -116,4 +116,4 @@ measurements.
 For MCP parity, call `get_summary`, `get_quality`, `get_engagement` and
 `get_timeseries` with the same read token and filters. Compare their `data` with
 the dashboard's `/api/…` JSON; only display units and rounding differ in the UI.
-The MCP connection instructions are in [mcp.md](../../mcp.md).
+The MCP connection instructions are in [mcp.md](../../docs/mcp.md).

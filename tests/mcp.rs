@@ -811,3 +811,27 @@ fn startup_does_not_echo_secrets_and_protocol_frames_are_bounded() {
             .contains("private-token-value")
     );
 }
+
+#[tokio::test]
+async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
+    let collector = Collector::start();
+    let file = collector.directory.join("mcp.env");
+    std::fs::write(
+        &file,
+        format!(
+            "CHUNKIFY_MCP_COLLECTOR_URL={}\nCHUNKIFY_MCP_READ_TOKEN={}\nCOLLECTOR_BIND=invalid\n",
+            collector.url,
+            collector.keys["read_token"].as_str().unwrap()
+        ),
+    )
+    .unwrap();
+    let mut command = clean_command();
+    command.args(["--env-file", file.to_str().unwrap(), "mcp"]);
+    let transport = TokioChildProcess::new(tokio::process::Command::from(command)).unwrap();
+    let client = ClientConfig::default()
+        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+        .await
+        .unwrap();
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
+    client.cancel().await.unwrap();
+}

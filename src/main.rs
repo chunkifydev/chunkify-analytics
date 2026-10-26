@@ -2,6 +2,7 @@ mod admin;
 mod api;
 mod cli;
 mod config;
+mod settings;
 
 use clap::Parser;
 mod context;
@@ -21,14 +22,15 @@ mod writer;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = cli::Cli::parse();
+    let settings = settings::Settings::load(cli.env_file.as_deref())?;
     if matches!(cli.command, cli::Command::Mcp) {
-        return mcp::run().await;
+        return mcp::run(&settings).await;
     }
     let bind = match &cli.command {
         cli::Command::Serve { bind } => *bind,
         _ => None,
     };
-    let config = config::Config::load_with(cli.data_dir.as_deref(), bind)?;
+    let config = config::Config::load_with(&settings, cli.data_dir.as_deref(), bind)?;
     match cli.command {
         cli::Command::Init => config.initialize(),
         cli::Command::Config {

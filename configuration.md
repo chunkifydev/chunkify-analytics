@@ -22,7 +22,9 @@ persistent data directory, with read tokens kept on the dashboard backend.
 Only the server administrator configures these settings. Environment changes take
 effect when the process starts. Recreate a Docker container to apply changes to
 its environment file, keeping the same data volume; `docker restart` alone keeps
-the old environment. The executable does not automatically load an `.env` file.
+the old environment. The executable loads `.env` from its current working directory when present.
+Use `--env-file <path>` to select another file. Existing process environment
+variables take priority; CLI flags take priority over both.
 For a standalone installation, export the same variables through the service
 manager or shell and use the appropriate `COLLECTOR_DATA_DIR` and bind address.
 

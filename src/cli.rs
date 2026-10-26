@@ -7,6 +7,9 @@ pub struct Cli {
     /// Directory containing the database and credentials
     #[arg(long, global = true)]
     pub data_dir: Option<PathBuf>,
+    /// Load environment values from this file instead of ./.env
+    #[arg(long, global = true)]
+    pub env_file: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }

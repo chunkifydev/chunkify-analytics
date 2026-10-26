@@ -70,9 +70,15 @@ against real HTTP responses alongside the integration suite. CI runs both checks
 
 ## Build and run
 
-Install Rust and a C++ compiler. CI uses Rust 1.99.0 and Node.js 24. DuckDB is compiled into the executable, so the
-first build takes longer than later builds. No separate database server is needed.
-The lockfile records the exact Rust dependencies.
+Install Rust and a C++17 compiler. CI uses Rust 1.99.0 and Node.js 24. The collector
+embeds DuckDB 2.0.0 through the pinned `duckdb` Rust crate, version `1.20000.0`.
+DuckDB is compiled into the executable, so the first build takes longer than later
+builds. No separate database server is needed. The lockfile records the exact Rust
+dependencies.
+
+The published crate reports `v2.0.0-dev88614` from `version()`, but its bundled
+source commit `d54cbbe3df` matches the
+[DuckDB 2.0.0 release](https://github.com/duckdb/duckdb/releases/tag/v2.0.0).
 
 From this directory:
 
@@ -299,10 +305,10 @@ Always mount the same volume at `/data` for the server and administrative comman
 Deleting a container keeps its named volume; deleting the volume removes the data.
 See Docker's [volume documentation](https://docs.docker.com/engine/storage/volumes/).
 
-The first build compiles bundled DuckDB and needs several minutes, sufficient free
-disk space, and memory for a C++ compiler. It defaults to two compilation jobs;
-use `--build-arg BUILD_JOBS=1` on a smaller build machine. Rust, Debian base images,
-and Cargo dependencies are pinned. Runtime packages use a dated
+The first build compiles bundled DuckDB and can take tens of minutes. It needs
+sufficient free disk space and memory for a C++17 compiler. It defaults to two
+compilation jobs; use `--build-arg BUILD_JOBS=1` on a smaller build machine.
+Rust, Debian base images, and Cargo dependencies are pinned. Runtime packages use a dated
 [Debian snapshot](https://snapshot.debian.org/). Update those pins deliberately for
 dependency and security updates. The final image contains no Rust/C++ toolchain.
 No prebuilt image is published by this change.

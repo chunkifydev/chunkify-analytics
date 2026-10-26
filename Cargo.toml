@@ -10,7 +10,7 @@ description = "Self-hosted storage and queries for Chunkify playback analytics"
 axum = "0.8.9"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-duckdb = { version = "=1.10506.0", features = ["bundled", "json"] }
+duckdb = { version = "=1.20000.0", features = ["bundled", "json"] }
 flate2 = "1"
 futures = "0.3"
 ipnet = "2"

@@ -58,7 +58,7 @@ export async function containerCollector({ settings = {}, resources = [], seed }
     },
     async get(path) {
       const response = await fetch(`${server.url}${path}`, {
-        headers: { Authorization: `Bearer ${server.keys.read_token}` }, signal: AbortSignal.timeout(10000),
+        headers: { Authorization: `Bearer ${server.keys.secret_key}` }, signal: AbortSignal.timeout(10000),
       });
       if (!response.ok) throw new Error(`Read API returned ${response.status}: ${await response.text()}`);
       return response.json();

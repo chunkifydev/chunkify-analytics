@@ -1,7 +1,7 @@
 # Local analytics dashboard demo
 
 A local dashboard with a Node backend.
-At runtime, the backend reads the HTTP API; the browser never receives a read token.
+At runtime, the backend reads the HTTP API; the browser never receives a secret key.
 
 For automatic native setup with sample data and a preconfigured player, use the
 [local demo launcher](../demo/README.md). The manual setup below connects this
@@ -10,11 +10,11 @@ dashboard to an existing collector.
 ## Run
 
 Use Node.js 24 and a matching collector. From the repository root, set the
-collector URL and a private project read token:
+collector URL and a private secret key:
 
 ```sh
 export COLLECTOR_URL=http://127.0.0.1:4174
-export CHUNKIFY_PLAYER_READ_TOKEN=YOUR_PROJECT_READ_TOKEN
+export CHUNKIFY_PLAYER_SECRET_KEY=YOUR_SECRET_KEY
 node examples/dashboard/server.cjs
 ```
 
@@ -23,10 +23,10 @@ The project selector only lists configured tokens:
 
 | Environment variable | Label |
 | --- | --- |
-| `CHUNKIFY_DEMO_READ_TOKEN` | Demo data, marked synthetic |
-| `CHUNKIFY_PLAYER_READ_TOKEN` | Player test |
-| `CHUNKIFY_LIVE_READ_TOKEN` | Live |
-| `CHUNKIFY_STAGING_READ_TOKEN` | Staging |
+| `CHUNKIFY_DEMO_SECRET_KEY` | Demo data, marked synthetic |
+| `CHUNKIFY_PLAYER_SECRET_KEY` | Player test |
+| `CHUNKIFY_LIVE_SECRET_KEY` | Live |
+| `CHUNKIFY_STAGING_SECRET_KEY` | Staging |
 
 Each token belongs to the project you created in the collector. These labels
 are dashboard configuration, not collector project overrides. Keep tokens out
@@ -57,19 +57,19 @@ watched. See [metric definitions](../../docs/api.md#metric-definitions).
 Use a **separate demo project**. Stop the collector to create it with
 `project create demo --name "Dashboard demo"`, save the returned credentials privately,
 and restart the collector. See the root README for native and Docker commands.
-Set that project's read token as `CHUNKIFY_DEMO_READ_TOKEN` above.
+Set that project's secret key as `CHUNKIFY_DEMO_SECRET_KEY` above.
 
 The optional seed script uses the repository's installed analytics SDK to create
 event envelopes. Run `npm ci` if dependencies are not already installed. Then:
 
 ```sh
-export CHUNKIFY_DEMO_INGEST_KEY=YOUR_DEMO_PROJECT_INGEST_KEY
+export CHUNKIFY_DEMO_PUBLIC_KEY=YOUR_DEMO_PROJECT_PUBLIC_KEY
 node examples/dashboard/seed.mjs
-unset CHUNKIFY_DEMO_INGEST_KEY
+unset CHUNKIFY_DEMO_PUBLIC_KEY
 ```
 
 The script sends 816 synthetic events for 268 views across nine videos and seven
-days. These are fabricated measurements. Use a demo project's ingest key.
+days. These are fabricated measurements. Use a demo project's public key.
 
 Same-day reruns reuse event IDs. Local storage ignores repeats; S3 stores each
 delivery. A new day produces another dataset. Use a fresh project to replace
@@ -81,5 +81,5 @@ sample fixtures.
 node --test examples/dashboard/*.test.*
 ```
 
-For MCP comparisons, use the same project token and filters with `get_summary`,
+For MCP comparisons, use the same secret key and filters with `get_summary`,
 `get_quality`, `get_engagement` and `get_timeseries`. See [MCP setup](../../docs/mcp.md).

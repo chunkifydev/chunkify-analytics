@@ -3,7 +3,7 @@ const http = require('node:http');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
-const projects = Object.freeze({ demo: 'CHUNKIFY_DEMO_READ_TOKEN', live: 'CHUNKIFY_LIVE_READ_TOKEN', staging: 'CHUNKIFY_STAGING_READ_TOKEN', player: 'CHUNKIFY_PLAYER_READ_TOKEN' });
+const projects = Object.freeze({ demo: 'CHUNKIFY_DEMO_SECRET_KEY', live: 'CHUNKIFY_LIVE_SECRET_KEY', staging: 'CHUNKIFY_STAGING_SECRET_KEY', player: 'CHUNKIFY_PLAYER_SECRET_KEY' });
 const routes = Object.freeze({ '/api/summary': '/v1/summary', '/api/videos': '/v1/videos', '/api/events': '/v1/events', '/api/quality': '/v1/quality', '/api/engagement': '/v1/engagement', '/api/timeseries': '/v1/timeseries' });
 const assets = Object.freeze({ '/': ['index.html', 'text/html'], '/app.js': ['app.js', 'text/javascript'], '/style.css': ['style.css', 'text/css'], '/event-details.js': ['event-details.js', 'text/javascript'] });
 class SafeError extends Error {
@@ -39,7 +39,7 @@ function createHandler({ env = process.env, fetchImpl = fetch, demo = null } = {
   async function upstream(route, project, query, deadline) {
     if (!Object.values(routes).includes(route)) throw new SafeError(400, 'Unknown read route.');
     const token = env[projects[project]];
-    if (!token) throw new SafeError(503, 'Read token is not configured for this project.');
+    if (!token) throw new SafeError(503, 'Secret key is not configured for this project.');
     let base;
     try {
       base = new URL(env.COLLECTOR_URL);

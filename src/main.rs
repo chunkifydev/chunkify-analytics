@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let config = std::sync::Arc::new(config);
             let projects = std::sync::Arc::new(projects::Registry::new(&keys, &config)?);
             let admin = admin::Server::bind(config.clone(), projects.clone(), keys)?;
+            let controller = admin.controller();
             let (store, worker) = store::Store::from_config(&config, projects.clone())?;
             let removed = store
                 .purge_expired(projects.clone())
@@ -96,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Listening on http://{}", listener.local_addr()?);
             let result = axum::serve(
                 listener,
-                api::router(store.clone(), projects, &config)
+                api::router(store.clone(), projects, &config, controller)
                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .with_graceful_shutdown(shutdown)

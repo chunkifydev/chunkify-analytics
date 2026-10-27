@@ -39,7 +39,7 @@ async function otlpRequests(events, options) {
 
 function postOtlp(server, body, headers = {}) {
   return fetch(`${server.url}/v1/logs`, { method: "POST", body,
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, ...headers },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, ...headers },
   });
 }
 
@@ -105,17 +105,17 @@ async function collector(t, settings = {}, initialBinary = binary) {
       const [code, receivedSignal] = await exited;
       if (signal === "SIGTERM") assert.equal(code, 0, `${receivedSignal}: ${errors}`);
     },
-    async get(path, token = keys.read_token) {
+    async get(path, token = keys.secret_key) {
       const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${token}` } });
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
     async send(event, headers = {}) {
-      await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.ingest_key, ...headers } }).send(event);
+      await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.public_key, ...headers } }).send(event);
     },
     async sendOtlp(event, options = {}) {
       await createOtlpAdapter(`${server.url}/v1/logs`, {
-        ...options, headers: { "X-Chunkify-Ingest-Key": keys.ingest_key, ...options.headers },
+        ...options, headers: { "X-Chunkify-Ingest-Key": keys.public_key, ...options.headers },
       }).send(event);
     },
   };
@@ -220,7 +220,7 @@ test("optional profiling reports database work on shutdown without event data or
     assert.ok(profile.ingest_stages[name].total_ms >= profile.ingest_stages[name].max_ms);
   }
   assert.equal(profile.ingest_stages.insert_otlp.count, 1);
-  for (const secret of [server.keys.ingest_key, server.keys.read_token, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
+  for (const secret of [server.keys.public_key, server.keys.secret_key, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
     assert.ok(!JSON.stringify(profiles(server)).includes(secret), "profiles must contain only aggregate measurements");
   }
   await server.start(binary, { "profile": "false" });
@@ -297,7 +297,7 @@ test("oversized write requests are rejected atomically and a full byte budget re
   assert.equal((await postOtlp(server, JSON.stringify(batch))).status, 413);
   assert.equal((await server.get("/v1/events")).events.length, 0);
   const post = (event) => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } });
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } });
   assert.equal((await post({ ...events[0], extra: "x".repeat(20000) })).status, 413);
   const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => post({ ...sdkEvents(`budget-${i}`)[0], extra: "x".repeat(4000) })));
   assert.ok(responses.some((r) => r.status === 503), "outstanding bytes must be bounded");
@@ -317,7 +317,7 @@ test("bulk writes keep the first event and envelope and return per-request dupli
   assert.equal((await postOtlp(server, JSON.stringify(body))).status, 200);
   const responses = await Promise.all(Array.from({ length: 6 }, () => fetch(`${server.url}/v1/events`, {
     method: "POST", body: JSON.stringify({ ...events[0], replaced: true }),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
   })));
   for (const response of responses) {
     assert.equal(response.status, 200);
@@ -353,7 +353,7 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
     const responses = await Promise.all(events.map((event, i) => i % 2
       ? postOtlp(server, JSON.stringify(envelopes[i]))
       : fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } })));
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } })));
     assert.ok(responses.every((r) => r.status === 500), `failed writes returned ${responses.map((r) => r.status)}`);
   } finally { await chmod(server.directory, 0o700); }
   await server.stop("SIGKILL");
@@ -418,7 +418,7 @@ test("a concurrent native duplicate has exactly one acknowledged owner", async (
   const event = sdkEvents()[0];
   const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => fetch(`${server.url}/v1/events`, {
     method: "POST", body: JSON.stringify({ ...event, delivery: i }),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
   })));
   assert.equal(responses.filter((r) => r.status === 201).length, 1);
   assert.equal(responses.filter((r) => r.status === 200).length, 11);
@@ -559,7 +559,7 @@ test("multiple X-Forwarded-For header lines form one ordered chain", async (t) =
   const status = await new Promise((resolveStatus, reject) => {
     const request = httpRequest(`${server.url}/v1/events`, { method: "POST", headers: [
       "Content-Type", "application/json", "Content-Length", String(Buffer.byteLength(body)),
-      "X-Chunkify-Ingest-Key", server.keys.ingest_key,
+      "X-Chunkify-Ingest-Key", server.keys.public_key,
       "X-Forwarded-For", "203.0.113.99, 198.51.100.7", "X-Forwarded-For", "10.20.1.2",
     ] }, (response) => { response.resume(); response.on("end", () => resolveStatus(response.statusCode)); });
     request.on("error", reject);
@@ -626,7 +626,7 @@ test("the browser Chunkify adapter persists context through authenticated ingest
   browser = await chromium.launch();
   const page = await browser.newPage({ locale: "fr-FR", timezoneId: "Europe/Paris", viewport: { width: 960, height: 540 } });
   await page.goto(origin);
-  const destination = { endpoint: `${server.url}/v1/events`, ingestKey: server.keys.ingest_key };
+  const destination = { endpoint: `${server.url}/v1/events`, ingestKey: server.keys.public_key };
   const events = await page.evaluate(async ({ endpoint, ingestKey }) => {
     const { attachAnalytics } = await import("/core.js");
     const { createChunkifyAdapter } = await import("/chunkify.js");
@@ -733,12 +733,12 @@ test("offline key rotation replaces each credential independently without exposi
   await server.stop();
   const invalid = await server.command(["key", "rotate-primary", "unknown"]);
   assert.notEqual(invalid.code, 0);
-  const ingest = await server.command(["key", "rotate-primary", "ingest"]);
+  const ingest = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(ingest.code, 0, ingest.stderr);
   await server.reloadKeys();
-  assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
-  assert.equal(server.keys.read_token, originalKeys.read_token);
-  assert.ok(server.keys.ingest_key.length >= 32);
+  assert.notEqual(server.keys.public_key, originalKeys.public_key);
+  assert.equal(server.keys.secret_key, originalKeys.secret_key);
+  assert.ok(server.keys.public_key.length >= 32);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
     assert.equal(`${ingest.stdout}${ingest.stderr}`.includes(key), false);
   }
@@ -748,25 +748,25 @@ test("offline key rotation replaces each credential independently without exposi
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), original);
   const deniedWrite = await fetch(`${server.url}/v1/events`, { method: "POST",
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": originalKeys.ingest_key },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": originalKeys.public_key },
     body: JSON.stringify(event),
   });
   assert.equal(deniedWrite.status, 401);
-  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.ingest_key })).status, 401);
-  const rotatedIngest = server.keys.ingest_key;
+  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.public_key })).status, 401);
+  const rotatedIngest = server.keys.public_key;
   await server.sendOtlp(sdkEvents("after-ingest-rotation")[0]);
   await server.stop("SIGKILL");
-  const read = await server.command(["key", "rotate-primary", "read"]);
+  const read = await server.command(["key", "rotate-primary", "secret"]);
   assert.equal(read.code, 0, read.stderr);
   await server.reloadKeys();
-  assert.notEqual(server.keys.read_token, originalKeys.read_token);
-  assert.equal(server.keys.ingest_key, rotatedIngest);
+  assert.notEqual(server.keys.secret_key, originalKeys.secret_key);
+  assert.equal(server.keys.public_key, rotatedIngest);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
     assert.equal(`${read.stdout}${read.stderr}`.includes(key), false);
   }
   await server.start();
   const deniedRead = await fetch(`${server.url}/v1/events`, {
-    headers: { Authorization: `Bearer ${originalKeys.read_token}` },
+    headers: { Authorization: `Bearer ${originalKeys.secret_key}` },
   });
   assert.equal(deniedRead.status, 401);
   await server.send(sdkEvents("after-read-rotation")[0]);
@@ -788,10 +788,10 @@ test("a stopped data-directory backup restores events, OTLP context, summaries a
   await server.stop();
   await cp(server.directory, join(backups, "snapshot"), { recursive: true, force: false, errorOnExist: true });
   // Changes made after the backup must not appear in the restored installation.
-  const rotation = await server.command(["key", "rotate-primary", "ingest"]);
+  const rotation = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(rotation.code, 0, rotation.stderr);
   await server.reloadKeys();
-  assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
+  assert.notEqual(server.keys.public_key, originalKeys.public_key);
   await server.start();
   await server.send(sdkEvents("after-backup")[0]);
   await server.stop();
@@ -837,12 +837,12 @@ test("ingestion validates SDK payloads and separates browser writes from private
   const server = await collector(t, { "server.max_body_bytes": "8192" });
   const event = sdkEvents()[0];
   const post = (body, headers = {}) => fetch(`${server.url}/v1/events`, {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, ...headers },
+    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, ...headers },
     body: JSON.stringify(body),
   });
-  assert.equal((await post(event, { "X-Chunkify-Ingest-Key": server.keys.read_token })).status, 401);
+  assert.equal((await post(event, { "X-Chunkify-Ingest-Key": server.keys.secret_key })).status, 401);
   assert.equal((await fetch(`${server.url}/v1/events`, {
-    headers: { Authorization: `Bearer ${server.keys.ingest_key}` },
+    headers: { Authorization: `Bearer ${server.keys.public_key}` },
   })).status, 401);
   assert.equal((await post(event, { Origin: "https://untrusted.example" })).status, 403);
   const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
@@ -866,7 +866,7 @@ test("ingestion validates SDK payloads and separates browser writes from private
   assert.equal(valid.headers.get("access-control-allow-origin"), "https://player.example");
   assert.deepEqual((await server.get("/v1/events")).events[0].event.extra, { customer_field: "preserved" });
   const read = await fetch(`${server.url}/v1/events`, { headers: {
-    Origin: "https://player.example", Authorization: `Bearer ${server.keys.read_token}`,
+    Origin: "https://player.example", Authorization: `Bearer ${server.keys.secret_key}`,
   } });
   assert.equal(read.headers.get("access-control-allow-origin"), null);
 });
@@ -895,7 +895,7 @@ test("all seven SDK event types can be filtered and paged while new events arriv
     "from=invalid", "from=2026-10-16T00:00:00Z&to=2026-10-15T00:00:00Z",
     `video_id=video-b&cursor=${encodeURIComponent(firstCursor)}`]) {
     const response = await fetch(`${server.url}/v1/events?${query}`, {
-      headers: { Authorization: `Bearer ${server.keys.read_token}` },
+      headers: { Authorization: `Bearer ${server.keys.secret_key}` },
     });
     assert.equal(response.status, 400, query);
   }
@@ -948,7 +948,7 @@ test("ingestion rate limits reject excess requests without storing more events",
   const [envelope] = await otlpRequests([event]);
   const server = await collector(t, { "server.ingest_per_second": "1" });
   const responses = await Promise.all(Array.from({ length: 8 }, (_, index) => fetch(`${server.url}/v1/${index % 2 ? "logs" : "events"}`, {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
     body: JSON.stringify(index % 2 ? envelope : event),
   })));
   assert.equal(responses.filter((response) => response.ok).length, 1);
@@ -1105,7 +1105,7 @@ test("large OTLP batches decode promptly and preserve each scope's original meta
   // Kill a failed test server promptly rather than waiting for the expensive decode.
   try {
     const response = await fetch(`${server.url}/v1/logs`, { method: "POST",
-      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
       body: JSON.stringify({ resourceLogs: [{ ...resource, scopeLogs }] }), signal: AbortSignal.timeout(10000) });
     assert.equal(response.status, 200, await response.clone().text());
     assert.deepEqual(await response.json(), {});
@@ -1146,7 +1146,7 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
     assert.equal((await server.get("/v1/summary")).views, 0);
   }
   await rejected(body, 401, { "X-Chunkify-Ingest-Key": "" });
-  await rejected(body, 401, { "X-Chunkify-Ingest-Key": server.keys.read_token });
+  await rejected(body, 401, { "X-Chunkify-Ingest-Key": server.keys.secret_key });
   await rejected(body, 403, { Origin: "https://elsewhere.example" });
   await rejected(body, 415, { "Content-Type": "application/x-protobuf" });
   await rejected(body, 415, { "Content-Encoding": "br" });
@@ -1253,13 +1253,13 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
     "batch.delay_ms": "100" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live", "--name", "Production website"]);
-  const second = await projectCommand(server, ["key", "create", "live", "ingest", "Mobile app"]);
+  const second = await projectCommand(server, ["key", "create", "live", "public", "Mobile app"]);
   const list = await projectCommand(server, ["project", "list"]);
-  const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "ingest").id;
+  const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "public").id;
   assert.equal(list.find(p => p.id === "live").name, "Production website");
-  assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.secret)));
+  assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.key)));
   const configuration = await readFile(join(server.directory, "keys.json"), "utf8");
-  for (const secret of [live.ingest_key, live.read_token, second.secret]) assert.ok(!configuration.includes(secret));
+  for (const secret of [live.public_key, live.secret_key, second.key]) assert.ok(!configuration.includes(secret));
   await server.start();
   const events = sdkEvents("shared-video", "shared-viewer");
   events.at(-1).playing_time_ms = 1200;
@@ -1270,27 +1270,27 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   liveEvents.at(-1).playing_time_ms = 5400;
   await Promise.all([
     ...events.map(event => server.send(event)),
-    ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key },
+    ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key },
       resourceAttributes: { "service.name": "production" } })),
   ]);
   // Retrying via another key must keep first delivery.
   await server.stop();
   await server.start();
-  await server.send(liveEvents[0], { "X-Chunkify-Ingest-Key": second.secret });
+  await server.send(liveEvents[0], { "X-Chunkify-Ingest-Key": second.key });
   await server.stop();
   await server.start();
   const defaultRows = (await server.get("/v1/events")).events;
-  const liveRows = (await server.get("/v1/events", live.read_token)).events;
+  const liveRows = (await server.get("/v1/events", live.secret_key)).events;
   assert.equal(defaultRows.length, events.length);
   assert.equal(liveRows.length, events.length);
-  assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-ingest" && !r.otlp));
+  assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-public" && !r.otlp));
   assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id === firstKey && r.otlp));
   assert.deepEqual(await server.get("/v1/summary"), { views: 1, unique_viewers: 1, total_playing_time_ms: 1200 });
-  assert.deepEqual(await server.get("/v1/summary", live.read_token), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
-  assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.read_token)).videos[0].total_playing_time_ms, 5400);
+  assert.deepEqual(await server.get("/v1/summary", live.secret_key), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
+  assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.secret_key)).videos[0].total_playing_time_ms, 5400);
   const page = await server.get("/v1/events?limit=1");
   let response = await fetch(`${server.url}/v1/events?limit=1&cursor=${encodeURIComponent(page.next_cursor)}`,
-    { headers: { authorization: `Bearer ${live.read_token}` } });
+    { headers: { authorization: `Bearer ${live.secret_key}` } });
   assert.equal(response.status, 400);
   // Cursors are positions, not authorization: even a forged scope cannot leak another project.
   const cursor = JSON.parse(Buffer.from(page.next_cursor, "base64url"));
@@ -1298,49 +1298,49 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   cursor.after = 0;
   cursor.through = Number.MAX_SAFE_INTEGER;
   const forged = Buffer.from(JSON.stringify(cursor)).toString("base64url");
-  const forgedPage = await server.get(`/v1/events?cursor=${forged}`, live.read_token);
+  const forgedPage = await server.get(`/v1/events?cursor=${forged}`, live.secret_key);
   assert.ok(forgedPage.events.every(r => r.project_id === "live"));
   for (const path of ["/v1/events?project_id=live", "/v1/summary?project_id=live", "/v1/videos?project_id=live"]) {
-    response = await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${server.keys.read_token}` } });
+    response = await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${server.keys.secret_key}` } });
     assert.equal(response.status, 400);
   }
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.ingest_key}` } })).status, 401);
-  assert.equal((await projectPost(server, live.read_token, events[0])).status, 401);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.public_key}` } })).status, 401);
+  assert.equal((await projectPost(server, live.secret_key, events[0])).status, 401);
   await server.stop();
   await projectCommand(server, ["project", "rename", "live", "Customer A — Live"]);
   await server.start();
   assert.equal((await server.get("/v1/events")).events.length, events.length);
-  assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
+  assert.deepEqual((await server.get("/v1/events", live.secret_key)).events, liveRows);
   await server.stop();
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").name, "Customer A — Live");
   await server.start();
-  assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
+  assert.deepEqual((await server.get("/v1/events", live.secret_key)).events, liveRows);
 });
 
 test("project credentials rotate and revoke independently without changing ownership", async (t) => {
   const server = await collector(t);
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
-  const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Website"]);
-  const extraRead = await projectCommand(server, ["key", "create", "live", "read", "Dashboard"]);
+  const extra = await projectCommand(server, ["key", "create", "live", "public", "Website"]);
+  const extraRead = await projectCommand(server, ["key", "create", "live", "secret", "Dashboard"]);
   const events = sdkEvents();
   await server.start();
-  assert.equal((await projectPost(server, extra.secret, events[0])).status, 201);
+  assert.equal((await projectPost(server, extra.key, events[0])).status, 201);
   await server.stop();
   const rotated = await projectCommand(server, ["key", "rotate", "live", extra.key_id]);
   assert.equal(rotated.key_id, extra.key_id);
   await projectCommand(server, ["key", "revoke", "live", extraRead.key_id]);
   await server.start();
-  assert.equal((await projectPost(server, extra.secret, events[1])).status, 401);
-  assert.equal((await projectPost(server, rotated.secret, events[1])).status, 201);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${extraRead.secret}` } })).status, 401);
-  assert.ok((await server.get("/v1/events", live.read_token)).events.every(r => r.ingest_key_id === extra.key_id));
+  assert.equal((await projectPost(server, extra.key, events[1])).status, 401);
+  assert.equal((await projectPost(server, rotated.key, events[1])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${extraRead.key}` } })).status, 401);
+  assert.ok((await server.get("/v1/events", live.secret_key)).events.every(r => r.ingest_key_id === extra.key_id));
   assert.equal((await server.get("/v1/events")).events.length, 0);
   await server.stop();
-  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
   await server.start();
-  assert.equal((await projectPost(server, server.keys.ingest_key, events[0])).status, 401, "legacy root export is not an auth fallback");
-  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0])).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, events[0])).status, 401, "legacy root export is not an auth fallback");
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0])).status, 201);
 });
 
 test("project retention updates live, preserves other settings, and persists across restart", async (t) => {
@@ -1356,15 +1356,15 @@ test("project retention updates live, preserves other settings, and persists acr
   events.at(-1).playing_time_ms = 1200;
   for (const event of events) {
     await server.send(event);
-    await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
+    await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   }
   await delay(1200);
   const result = await projectCommand(server, ["project", "retention", "live", "1"]);
   assert.deepEqual(result, { project_id: "live", retention_seconds: 1, effective_retention_seconds: 1, restart_required: false });
   const deadline = Date.now() + 7000;
-  while ((await server.get("/v1/events", live.read_token)).events.length && Date.now() < deadline) await delay(100);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
-  assert.equal((await server.get("/v1/summary", live.read_token)).total_playing_time_ms, 0);
+  while ((await server.get("/v1/events", live.secret_key)).events.length && Date.now() < deadline) await delay(100);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, 0);
+  assert.equal((await server.get("/v1/summary", live.secret_key)).total_playing_time_ms, 0);
   assert.equal((await server.get("/v1/events")).events.length, events.length);
   assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 1200);
   const listed = (await projectCommand(server, ["project", "list"])).find(p => p.id === "live");
@@ -1373,13 +1373,13 @@ test("project retention updates live, preserves other settings, and persists acr
   assert.equal(server.url, url, "retention change must not restart the HTTP server");
   // A retry after expiration is new data. Disable expiry before resending it.
   await projectCommand(server, ["project", "retention", "live", "0"]);
-  for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
+  for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   await delay(2200);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   await server.stop("SIGKILL");
   await server.start();
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").effective_retention_seconds, 0);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   // The running server's default is authoritative, even if the CLI has a different environment.
   const inherited = await server.command(["project", "retention", "live", "inherit"], { "retention.seconds": "1" });
   assert.equal(inherited.code, 0, inherited.stderr);
@@ -1390,7 +1390,7 @@ test("project retention updates live, preserves other settings, and persists acr
   const secondDeadline = Date.now() + 7000;
   while ((await server.get("/v1/events")).events.length && Date.now() < secondDeadline) await delay(100);
   assert.equal((await server.get("/v1/events")).events.length, 0);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
 });
 
 test("startup retention uses inherited, longer, shorter and disabled project policies", async (t) => {
@@ -1401,7 +1401,7 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   await server.start();
   const event = sdkEvents()[0];
   await server.send(event);
-  for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.ingest_key } });
+  for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.public_key } });
   await server.stop();
   for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
     assert.equal((await projectCommand(server, ["project", "retention", id, seconds])).restart_required, true);
@@ -1409,13 +1409,13 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   await delay(1200);
   await server.start(binary, { "retention.seconds": "1" });
   assert.equal((await server.get("/v1/events")).events.length, 0);
-  for (const project of projects) assert.equal((await server.get("/v1/events", project.read_token)).events.length, project.project_id === "short" ? 0 : 1);
+  for (const project of projects) assert.equal((await server.get("/v1/events", project.secret_key)).events.length, project.project_id === "short" ? 0 : 1);
   await server.stop();
   // Removing an override makes existing data eligible under the inherited policy at startup.
   await projectCommand(server, ["project", "retention", "long", "inherit"]);
   await server.start(binary, { "retention.seconds": "1" });
-  assert.equal((await server.get("/v1/events", projects[1].read_token)).events.length, 0);
-  assert.equal((await server.get("/v1/events", projects[2].read_token)).events.length, 1);
+  assert.equal((await server.get("/v1/events", projects[1].secret_key)).events.length, 0);
+  assert.equal((await server.get("/v1/events", projects[2].secret_key)).events.length, 1);
 });
 
 test("invalid or unpersisted project retention changes preserve policy and data", async (t) => {
@@ -1449,21 +1449,21 @@ test("project origin policies and rate quotas apply across all of its keys", asy
   const server = await collector(t, { "server.ingest_per_second": "1000" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
-  const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Another integration"]);
+  const extra = await projectCommand(server, ["key", "create", "live", "public", "Another integration"]);
   const settings = join(server.directory, "live-settings.json");
-  await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 1 }));
+  await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 2 }));
   await projectCommand(server, ["project", "configure", "live", settings]);
   await server.start();
   const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
     origin: "https://live.example", "access-control-request-method": "POST", "access-control-request-headers": "x-chunkify-ingest-key,content-type" } });
   assert.equal(preflight.status, 204);
-  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0], { origin: "https://player.example" })).status, 403);
-  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0], { origin: "https://live.example" })).status, 403);
-  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0], { origin: "https://live.example" })).status, 201);
-  const limited = await projectPost(server, extra.secret, sdkEvents()[0]);
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0], { origin: "https://player.example" })).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0], { origin: "https://live.example" })).status, 403);
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0], { origin: "https://live.example" })).status, 201);
+  const limited = await projectPost(server, extra.key, sdkEvents()[0]);
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get("retry-after"), "1");
-  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0])).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 201);
 });
 
 test("a busy project leaves admission slots for another project", async (t) => {
@@ -1472,8 +1472,8 @@ test("a busy project leaves admission slots for another project", async (t) => {
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
   await server.start();
-  const busy = Array.from({ length: 4 }, () => projectPost(server, live.ingest_key, sdkEvents()[0]));
-  const other = projectPost(server, server.keys.ingest_key, sdkEvents()[0]);
+  const busy = Array.from({ length: 4 }, () => projectPost(server, live.public_key, sdkEvents()[0]));
+  const other = projectPost(server, server.keys.public_key, sdkEvents()[0]);
   const responses = await Promise.all(busy);
   assert.equal(responses.filter(r => r.status === 201).length, 2);
   assert.equal(responses.filter(r => r.status === 503).length, 2);
@@ -1491,13 +1491,13 @@ test("project administration rejects invalid changes without overwriting credent
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
   }
-  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
   const keys = JSON.parse(await readFile(keyFile, "utf8"));
-  keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "ingest",
+  keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "public",
     hash: index.toString(16).padStart(64, "0") }));
   await writeFile(keyFile, JSON.stringify(keys));
   const before = await readFile(keyFile, "utf8");
-  const result = await server.command(["key", "rotate-primary", "ingest"]);
+  const result = await server.command(["key", "rotate-primary", "public"]);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /64 keys/);
   assert.equal(await readFile(keyFile, "utf8"), before, "failed legacy rotation must not break the registry");
@@ -1510,31 +1510,31 @@ test("live keys update ingestion and read access immediately and survive a crash
   const other = await projectCommand(server, ["project", "create", "other"]);
   await server.start();
   const originalUrl = server.url;
-  const first = await projectCommand(server, ["key", "create", "default", "ingest", "Website"]);
-  const read = await projectCommand(server, ["key", "create", "default", "read", "Dashboard"]);
+  const first = await projectCommand(server, ["key", "create", "default", "public", "Website"]);
+  const read = await projectCommand(server, ["key", "create", "default", "secret", "Dashboard"]);
   assert.equal(first.restart_required, false);
   assert.equal(read.restart_required, false);
   const events = sdkEvents("live-keys");
-  assert.equal((await projectPost(server, first.secret, events[0])).status, 201);
-  assert.equal((await server.get("/v1/events", read.secret)).events.length, 1);
-  assert.equal((await server.get("/v1/events", other.read_token)).events.length, 0);
-  assert.equal((await projectPost(server, read.secret, events[1])).status, 401);
+  assert.equal((await projectPost(server, first.key, events[0])).status, 201);
+  assert.equal((await server.get("/v1/events", read.key)).events.length, 1);
+  assert.equal((await server.get("/v1/events", other.secret_key)).events.length, 0);
+  assert.equal((await projectPost(server, read.key, events[1])).status, 401);
 
   const rotated = await projectCommand(server, ["key", "rotate", "default", first.key_id]);
   assert.equal(rotated.restart_required, false);
   assert.equal(rotated.key_id, first.key_id);
-  assert.equal((await projectPost(server, first.secret, events[1])).status, 401);
-  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": first.secret })).status, 401);
-  for (const event of events.slice(1)) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": rotated.secret } });
-  const stored = (await server.get("/v1/events", read.secret)).events;
+  assert.equal((await projectPost(server, first.key, events[1])).status, 401);
+  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": first.key })).status, 401);
+  for (const event of events.slice(1)) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": rotated.key } });
+  const stored = (await server.get("/v1/events", read.key)).events;
   assert.ok(stored.every(row => row.ingest_key_id === first.key_id && row.project_id === "default"));
   assert.deepEqual(stored.map(row => row.event), events);
   await projectCommand(server, ["key", "revoke", "default", read.key_id]);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.secret}` } })).status, 401);
-  assert.equal((await projectPost(server, other.ingest_key, sdkEvents("other")[0])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status, 401);
+  assert.equal((await projectPost(server, other.public_key, sdkEvents("other")[0])).status, 201);
   const listed = await projectCommand(server, ["project", "list"]);
   assert.ok(listed.find(project => project.id === "default").keys.some(key => key.id === first.key_id));
-  for (const secret of [first.secret, rotated.secret, read.secret, other.ingest_key, other.read_token]) {
+  for (const secret of [first.key, rotated.key, read.key, other.public_key, other.secret_key]) {
     assert.ok(!JSON.stringify(listed).includes(secret));
     assert.ok(!server.logs().includes(secret));
   }
@@ -1543,9 +1543,9 @@ test("live keys update ingestion and read access immediately and survive a crash
   assert.equal(server.url, originalUrl);
   await server.stop("SIGKILL");
   await server.start();
-  assert.equal((await projectPost(server, first.secret, sdkEvents()[0])).status, 401);
-  assert.equal((await projectPost(server, rotated.secret, sdkEvents()[0])).status, 201);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.secret}` } })).status, 401);
+  assert.equal((await projectPost(server, first.key, sdkEvents()[0])).status, 401);
+  assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status, 401);
   assert.equal((await server.get("/v1/summary")).views, 2);
   await server.stop();
   await assert.rejects(stat(join(server.directory, "admin.sock")), { code: "ENOENT" });
@@ -1554,14 +1554,14 @@ test("live keys update ingestion and read access immediately and survive a crash
 test("live administration serializes concurrent commands and rejects invalid changes", async (t) => {
   const server = await collector(t);
   const created = await Promise.all(Array.from({ length: 5 }, (_, index) =>
-    projectCommand(server, ["key", "create", "default", "read", `Dashboard ${index}`])));
+    projectCommand(server, ["key", "create", "default", "secret", `Dashboard ${index}`])));
   const listed = await projectCommand(server, ["project", "list"]);
   assert.equal(listed[0].keys.length, 7);
-  await Promise.all(created.map(key => server.get("/v1/summary", key.secret)));
+  await Promise.all(created.map(key => server.get("/v1/summary", key.key)));
   const keyFile = join(server.directory, "keys.json");
   const before = await readFile(keyFile, "utf8");
-  for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "read", ""],
-    ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-ingest"],
+  for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "secret", ""],
+    ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-public"],
     ["project", "create", "other"], ["project", "configure", "default", "missing.json"]]) {
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
@@ -1573,20 +1573,20 @@ test("live administration serializes concurrent commands and rejects invalid cha
 test("live primary rotation and revocation keep legacy exports consistent", async (t) => {
   const server = await collector(t);
   const original = { ...server.keys };
-  for (const kind of ["ingest", "read"]) {
+  for (const kind of ["public", "secret"]) {
     const result = await server.command(["key", "rotate-primary", kind]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /new key is active/);
     await server.reloadKeys();
     for (const secret of Object.values(server.keys)) assert.ok(!result.stdout.includes(secret));
   }
-  assert.equal((await projectPost(server, original.ingest_key, sdkEvents()[0])).status, 401);
-  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.read_token}` } })).status, 401);
+  assert.equal((await projectPost(server, original.public_key, sdkEvents()[0])).status, 401);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.secret_key}` } })).status, 401);
   await server.send(sdkEvents()[0]);
   assert.equal((await server.get("/v1/summary")).views, 1);
-  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
-  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0])).status, 401);
-  const restored = await server.command(["key", "rotate-primary", "ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 401);
+  const restored = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(restored.code, 0, restored.stderr);
   await server.reloadKeys();
   await server.send(sdkEvents()[0]);
@@ -1600,13 +1600,13 @@ test("failed live key persistence does not change active credentials", async (t)
   // read its existing database. Restore permissions before shutdown/cleanup.
   await chmod(server.directory, 0o500);
   try {
-    const result = await server.command(["key", "rotate", "default", "primary-read"]);
+    const result = await server.command(["key", "rotate", "default", "primary-secret"]);
     assert.notEqual(result.code, 0);
     assert.equal(await readFile(join(server.directory, "keys.json"), "utf8"), before);
     assert.equal((await server.get("/v1/summary")).views, 0);
   } finally { await chmod(server.directory, 0o700); }
-  const rotated = await projectCommand(server, ["key", "rotate", "default", "primary-read"]);
-  assert.equal((await server.get("/v1/summary", rotated.secret)).views, 0);
+  const rotated = await projectCommand(server, ["key", "rotate", "default", "primary-secret"]);
+  assert.equal((await server.get("/v1/summary", rotated.key)).views, 0);
 });
 
 
@@ -1618,11 +1618,11 @@ test("live key administration supports a deeply nested data directory", async (t
   const init = await server.command(["init"], settings);
   assert.equal(init.code, 0, init.stderr);
   await server.start(binary, settings);
-  const created = await server.command(["key", "create", "default", "read", "Long path"], settings);
+  const created = await server.command(["key", "create", "default", "secret", "Long path"], settings);
   assert.equal(created.code, 0, created.stderr);
   const token = JSON.parse(created.stdout);
   assert.equal(token.restart_required, false);
-  assert.equal((await server.get("/v1/summary", token.secret)).views, 0);
+  assert.equal((await server.get("/v1/summary", token.key)).views, 0);
   const locator = join(directory, "admin.socket-id");
   const previousSocket = await readFile(locator, "utf8");
   assert.equal((await stat(locator)).mode & 0o777, 0o600);
@@ -1631,5 +1631,101 @@ test("live key administration supports a deeply nested data directory", async (t
   assert.notEqual(await readFile(locator, "utf8"), previousSocket);
   const revoked = await server.command(["key", "revoke", "default", token.key_id], settings);
   assert.equal(revoked.code, 0, revoked.stderr);
-  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.secret}` } })).status, 401);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.key}` } })).status, 401);
+});
+
+async function projectApi(server, path, { method = "GET", body, token = server.keys.secret_key, headers = {} } = {}) {
+  return fetch(`${server.url}/v1/project${path}`, { method,
+    headers: { authorization: `Bearer ${token}`, ...(body !== undefined && { "content-type": "application/json" }), ...headers },
+    ...(body !== undefined && { body: JSON.stringify(body) }) });
+}
+
+test("project origins update live, merge shared origins and persist without changing other settings", async t => {
+  const server = await collector(t, { "server.allowed_origins": "https://chunkify.dev", "server.ingest_per_second": "1000" });
+  await server.stop();
+  const live = await projectCommand(server, ["project", "create", "live"]);
+  const file = join(server.directory, "origin-settings.json");
+  await writeFile(file, JSON.stringify({ allowed_origins: ["https://old.example"], retention_seconds: 86400, ingest_per_second: 100 }));
+  await projectCommand(server, ["project", "configure", "live", file]);
+  await server.start();
+  const send = origin => projectPost(server, live.public_key, sdkEvents()[0], { origin });
+  assert.equal((await send("https://chunkify.dev")).status, 201);
+  assert.equal((await send("https://customer.example")).status, 403);
+  assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", body: { allowed_origins: [] }, token: live.public_key })).status, 401);
+  for (const body of [{ allowed_origins: null }, { allowed_origins: "https://customer.example" },
+    { allowed_origins: ["https://customer.example/"] }, { allowed_origins: ["*"] },
+    { allowed_origins: [], project_id: "default" }]) {
+    assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", body, token: live.secret_key })).status, 400);
+  }
+  const update = origins => projectApi(server, "/allowed-origins", { method: "PUT", body: { allowed_origins: origins }, token: live.secret_key });
+  const response = await update(["https://customer.example", "https://customer.example"]);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), { project_id: "live", allowed_origins: ["https://customer.example"],
+    effective_allowed_origins: ["https://chunkify.dev", "https://customer.example"], restart_required: false });
+  assert.equal((await send("https://customer.example")).status, 201);
+  assert.equal((await send("https://old.example")).status, 403);
+  assert.equal((await send("https://chunkify.dev")).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0], { origin: "https://customer.example" })).status, 403);
+  await chmod(server.directory, 0o500);
+  try { assert.equal((await update(["https://unsaved.example"])).status, 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal((await send("https://customer.example")).status, 201);
+  assert.equal((await send("https://unsaved.example")).status, 403);
+  const [updated, created] = await Promise.all([update(["https://next.example"]),
+    server.command(["key", "create", "live", "secret", "Concurrent integration"])]);
+  assert.equal(updated.status, 200);
+  assert.equal(created.code, 0, created.stderr);
+  const token = JSON.parse(created.stdout).key;
+  assert.equal((await projectApi(server, "/keys", { token })).status, 200);
+  const settings = (await projectCommand(server, ["project", "list"])).find(project => project.id === "live").settings;
+  assert.equal(settings.retention_seconds, 86400);
+  assert.equal(settings.ingest_per_second, 100);
+  await server.stop();
+  await server.start();
+  assert.equal((await send("https://next.example")).status, 201);
+  assert.equal((await projectApi(server, "/keys", { token })).status, 200);
+  assert.equal((await update([])).status, 200);
+  assert.equal((await send("https://next.example")).status, 403);
+  assert.equal((await send("https://chunkify.dev")).status, 201);
+});
+
+test("secret keys list and rotate only their own project keys", async t => {
+  const server = await collector(t, { "retention.seconds": "0", "server.ingest_per_second": "1000" });
+  assert.match(server.keys.public_key, /^ck_public_[0-9a-f]{64}$/);
+  assert.match(server.keys.secret_key, /^ck_secret_[0-9a-f]{64}$/);
+  await server.stop();
+  const live = await projectCommand(server, ["project", "create", "live"]);
+  await server.start();
+  const options = { token: live.secret_key };
+  let response = await projectApi(server, "/keys", options);
+  assert.equal(response.status, 200);
+  const list = await response.json();
+  assert.equal(list.project_id, "live");
+  assert.deepEqual(list.keys.map(key => key.permission).sort(), ["public", "secret"]);
+  for (const key of list.keys) assert.deepEqual(Object.keys(key).sort(), ["id", "name", "permission"]);
+  assert.equal((await projectApi(server, "/keys", { token: live.public_key })).status, 401);
+  const foreign = (await (await projectApi(server, "/keys")).json()).keys[0].id;
+  assert.equal((await projectApi(server, `/keys/${foreign}/rotate`, { ...options, method: "POST" })).status, 404);
+  const publicId = list.keys.find(key => key.permission === "public").id;
+  response = await projectApi(server, `/keys/${publicId}/rotate`, { ...options, method: "POST" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const rotated = await response.json();
+  assert.equal(rotated.permission, "public");
+  assert.match(rotated.key, /^ck_public_[0-9a-f]{64}$/);
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0])).status, 401);
+  assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
+  const secretId = list.keys.find(key => key.permission === "secret").id;
+  response = await projectApi(server, `/keys/${secretId}/rotate`, { ...options, method: "POST" });
+  assert.equal(response.status, 200);
+  const secret = (await response.json()).key;
+  assert.match(secret, /^ck_secret_[0-9a-f]{64}$/);
+  assert.equal((await projectApi(server, "/keys", options)).status, 401);
+  assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
+  assert.equal((await projectApi(server, "/allowed-origins", { ...options, method: "PUT", body: { allowed_origins: [] } })).status, 401);
+  await server.stop();
+  await server.start();
+  assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
+  assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
 });

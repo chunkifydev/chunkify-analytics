@@ -32,8 +32,8 @@ pub struct Config {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Keys {
-    pub ingest_key: String,
-    pub read_token: String,
+    pub public_key: String,
+    pub secret_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projects: Option<Vec<crate::projects::Project>>,
 }
@@ -239,8 +239,8 @@ impl Config {
         let _lock = self.lock()?;
         let keys = Keys {
             projects: None,
-            ingest_key: format!("cki_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
-            read_token: format!("ckr_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+            public_key: crate::projects::generate_key(crate::projects::Permission::Public),
+            secret_key: crate::projects::generate_key(crate::projects::Permission::Secret),
         };
         if let crate::backend::Backend::S3(remote) = &self.backend {
             if remote.read_keys()?.is_some() {
@@ -349,9 +349,9 @@ impl Config {
 
 pub(crate) fn decode_keys(bytes: &[u8]) -> Result<Keys> {
     let keys: Keys = serde_json::from_slice(bytes)?;
-    if keys.ingest_key.len() < 32
-        || keys.read_token.len() < 32
-        || keys.ingest_key == keys.read_token
+    if keys.public_key.len() < 32
+        || keys.secret_key.len() < 32
+        || keys.public_key == keys.secret_key
     {
         return Err(
             "Invalid keys.json: two distinct keys of at least 32 characters are required.".into(),

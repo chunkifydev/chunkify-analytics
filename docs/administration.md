@@ -24,19 +24,20 @@ for customers, websites or environments.
 ```sh
 chunkify-analytics project create live --name "Production website"
 chunkify-analytics project rename live "Customer website"
-chunkify-analytics key create live ingest "Website"
-chunkify-analytics key create live read "Dashboard"
+chunkify-analytics key create live public "Website"
+chunkify-analytics key create live secret "Dashboard"
 chunkify-analytics key rotate live KEY_ID
 chunkify-analytics key revoke live KEY_ID
 ```
 
-Creating a project returns `ingest_key` and `read_token`. Creating or rotating a
-named key returns its `key_id` and `secret`. Save the secret when returned; named
+Creating a project returns `public_key` and `secret_key`. Creating or rotating a
+named key returns its `key_id`, `permission` and `key`. Save the secret when returned; named
 key secrets cannot be retrieved later. `project list` shows settings and key IDs
 without secrets.
 
-Ingest keys send events; read tokens read analytics and MCP. A token belongs to
-one project. Multiple keys for that project share its limits and events.
+Public keys start with `ck_public_` and send events. Secret keys start with
+`ck_secret_` and read analytics, update origins and rotate keys. Each key belongs
+to one project. Multiple keys for that project share its limits and events.
 Rotation keeps the key ID and immediately replaces its secret. For an update
 without interruption, create a second key, switch clients, then revoke the old key.
 
@@ -51,8 +52,8 @@ the registry in the bucket as well. Do not edit it while the collector runs.
 To replace a default primary credential:
 
 ```sh
-chunkify-analytics key rotate-primary ingest
-chunkify-analytics key rotate-primary read
+chunkify-analytics key rotate-primary public
+chunkify-analytics key rotate-primary secret
 ```
 
 Read the replacement from the key registry, then update clients. These commands
@@ -60,7 +61,8 @@ do not print the secret or change stored events.
 
 ## Project limits and origins
 
-Projects inherit installation origins and retention. Rate, in-flight request
+Every project allows the shared TOML origins plus its own additional origins.
+Retention inherits the installation default. Rate, in-flight request
 and write-buffer allowances divide the installation limits across projects.
 To replace a project's overrides, save a JSON file:
 
@@ -79,13 +81,40 @@ Then stop the collector and apply it:
 chunkify-analytics project configure live /path/to/settings.json
 ```
 
-Omitted or null values inherit defaults. `allowed_origins: []` denies browser
-origins; `retention_seconds: 0` disables expiration. `queue_bytes` accepts
+Omitted or null values inherit defaults. `allowed_origins: []` clears additional
+project origins; shared TOML origins stay allowed. `retention_seconds: 0` disables expiration. `queue_bytes` accepts
 4096 to 268435456 bytes, capped by the installation limit. It bounds pending writes,
 not retained storage. Installation limits still apply across projects.
 
 Excess requests return 429, full write buffers return 503, and a request larger
-than its buffer budget returns 413. Origin checks use the ingest key's project.
+than its buffer budget returns 413. Origin checks use the public key's project.
+
+## Live project API
+
+Use a project's secret key as `Authorization: Bearer SECRET_KEY`.
+It can manage only that project.
+
+| Endpoint | Use |
+| --- | --- |
+| `PUT /v1/project/allowed-origins` | Replace additional origins without restarting. |
+| `GET /v1/project/keys` | List key IDs, names and types. |
+| `POST /v1/project/keys/{key_id}/rotate` | Replace a key and return its new value. |
+
+For example, keep `https://chunkify.dev` in TOML and add a customer's website:
+
+```sh
+curl --request PUT http://127.0.0.1:4174/v1/project/allowed-origins \
+  -H "Authorization: Bearer $SECRET_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"allowed_origins":["https://customer.example"]}'
+```
+
+Both origins then work for this project. Other projects keep their own lists.
+Send `[]` to remove the additions. Changes are saved before they take effect.
+
+Rotation invalidates the old key immediately. Save the returned `key` value;
+key listings never reveal it. Rotating the secret key used by the request means
+subsequent calls must use its replacement.
 
 ## Retention
 

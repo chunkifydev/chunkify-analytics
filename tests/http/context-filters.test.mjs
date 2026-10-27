@@ -52,7 +52,7 @@ async function collector(t, separateReads) {
     },
     request(path, params = {}) {
       return fetch(`${server.url}${path}?${new URLSearchParams(params)}`, {
-        headers: { Authorization: `Bearer ${server.keys.read_token}` },
+        headers: { Authorization: `Bearer ${server.keys.secret_key}` },
       });
     },
     async get(path, params = {}) {
@@ -61,7 +61,7 @@ async function collector(t, separateReads) {
       return response.json();
     },
     async send(event, otlp = false) {
-      const headers = { "X-Chunkify-Ingest-Key": server.keys.ingest_key };
+      const headers = { "X-Chunkify-Ingest-Key": server.keys.public_key };
       if (otlp) return createOtlpAdapter(`${server.url}/v1/logs`, { headers }).send(event);
       const response = await fetch(`${server.url}/v1/events`, { method: "POST",
         headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(event) });

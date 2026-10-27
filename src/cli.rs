@@ -66,15 +66,15 @@ pub enum ProjectCommand {
 
 #[derive(Clone, ValueEnum)]
 pub enum Permission {
-    Ingest,
-    Read,
+    Public,
+    Secret,
 }
 
 impl Permission {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Ingest => "ingest",
-            Self::Read => "read",
+            Self::Public => "public",
+            Self::Secret => "secret",
         }
     }
 }

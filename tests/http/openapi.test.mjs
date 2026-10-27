@@ -56,10 +56,10 @@ async function collector(t, settings = {}) {
     url, keys,
     async post(path, body, status, headers = {}) {
       const response = await fetch(`${url}${path}`, { method: "POST", body,
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": keys.ingest_key, ...headers } });
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": keys.public_key, ...headers } });
       return assertResponse(path, "post", response, status);
     },
-    async get(path, status = 200, headers = { Authorization: `Bearer ${keys.read_token}` }) {
+    async get(path, status = 200, headers = { Authorization: `Bearer ${keys.secret_key}` }) {
       return assertResponse(path.split("?")[0], "get", await fetch(`${url}${path}`, { headers }), status);
     },
   };
@@ -228,14 +228,14 @@ test("documented authentication, CORS and protocol errors match the API", async 
   const server = await collector(t, { "server.max_body_bytes": "8192", "server.max_otlp_records": "1" });
   for (const path of ["/v1/events", "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos", "/v1/ingestion"]) {
     await server.get(path, 401, {});
-    await server.get(path, 401, { Authorization: `Bearer ${server.keys.ingest_key}` });
-    const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${server.keys.read_token}`, Origin: "https://player.example" } });
+    await server.get(path, 401, { Authorization: `Bearer ${server.keys.public_key}` });
+    const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${server.keys.secret_key}`, Origin: "https://player.example" } });
     assert.equal(response.headers.get("access-control-allow-origin"), null);
     await assertResponse(path, "get", response, 200);
   }
   for (const path of ["/v1/events", "/v1/logs"]) {
     await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": "" });
-    await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": server.keys.read_token });
+    await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": server.keys.secret_key });
     await server.post(path, "{}", 403, { Origin: "https://elsewhere.example" });
     await server.post(path, "{}", 415, { "Content-Type": "application/x-protobuf" });
     await server.post(path, "{}", 415, { "Content-Encoding": "br" });
@@ -256,7 +256,7 @@ test("documented authentication, CORS and protocol errors match the API", async 
   const batch = await otlpPayload([event, event]);
   await server.post("/v1/logs", JSON.stringify(batch), 413);
   const response = await fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, Origin: "https://player.example" } });
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, Origin: "https://player.example" } });
   assert.equal(response.headers.get("access-control-allow-origin"), "https://player.example");
   await assertResponse("/v1/events", "post", response, 201);
 });
@@ -266,7 +266,7 @@ test("rate limit responses use the documented native and OTLP error envelopes", 
   await server.post("/v1/logs", "{}", 200);
   for (const path of ["/v1/events", "/v1/logs"]) {
     const response = await fetch(`${server.url}${path}`, { method: "POST", body: "{}",
-      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } });
+      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } });
     assert.equal(response.headers.get("retry-after"), "1");
     await assertResponse(path, "post", response, 429);
   }
@@ -347,7 +347,7 @@ for (const separateReads of [false, true]) {
       await server.get(`/v1/timeseries?${new URLSearchParams(invalid)}`, 400);
     }
     await server.get(`/v1/timeseries?${new URLSearchParams(params)}&interval=day`, 400);
-    for (const token of [null, "invalid", server.keys.ingest_key]) {
+    for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get(`/v1/timeseries?${new URLSearchParams(params)}`, 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
     for (const path of ["/v1/summary", "/v1/videos", "/v1/events"]) await server.get(`${path}?interval=day`, 400);
@@ -439,7 +439,7 @@ for (const separateReads of [false, true]) {
       await server.get(`/v1/quality?${new URLSearchParams({ ...filters, ...invalid })}`, 400);
     }
     await server.get("/v1/quality?video_id=a&video_id=b", 400);
-    for (const token of [null, "invalid", server.keys.ingest_key]) {
+    for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get("/v1/quality", 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
     const otlpServer = await collector(t, settings);
@@ -545,7 +545,7 @@ for (const separateReads of [false, true]) {
       await server.get(`/v1/engagement?${new URLSearchParams({ ...filters, ...invalid })}`, 400);
     }
     await server.get("/v1/engagement?video_id=a&video_id=b", 400);
-    for (const token of [null, "invalid", server.keys.ingest_key]) {
+    for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get("/v1/engagement", 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
     const otlpServer = await collector(t, settings);

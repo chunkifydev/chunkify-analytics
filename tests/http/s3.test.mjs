@@ -79,12 +79,19 @@ async function installation(t, storage, retention = 0, environment = {}) {
       await configure();
       await app.start();
     },
-    async get(path, token = app.keys.read_token) {
+    async get(path, token = app.keys.secret_key) {
       const response = await fetch(`${app.url}${path}`, { headers: { authorization: `Bearer ${token}` } });
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
-    async send(event, key = app.keys.ingest_key) {
+    async manage(path, method, body, token = app.keys.secret_key) {
+      const response = await fetch(`${app.url}/v1/project${path}`, { method,
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        ...(body !== undefined && { body: JSON.stringify(body) }) });
+      assert.equal(response.status, 200, await response.clone().text());
+      return response.json();
+    },
+    async send(event, key = app.keys.public_key) {
       const response = await fetch(`${app.url}/v1/events`, { method: "POST",
         headers: { "content-type": "application/json", "x-chunkify-ingest-key": key }, body: JSON.stringify(event) });
       assert.equal(response.status, 201, await response.clone().text());
@@ -125,31 +132,38 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   await app.start();
   assert.deepEqual((await app.get("/v1/events")).events, []);
   assert.equal((await app.get("/v1/summary")).views, 0);
-  const dashboard = JSON.parse(await app.command(["key", "create", "default", "read", "S3 dashboard"]));
+  const dashboard = JSON.parse(await app.command(["key", "create", "default", "secret", "S3 dashboard"]));
   const records = events();
   for (const event of records) await app.send(event);
   await app.send(records[0]);
   assert.equal((await app.get("/v1/events")).events.length, records.length + 1, "S3 does not deduplicate");
-  const adapter = createOtlpAdapter(`${app.url}/v1/logs`, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key },
+  const adapter = createOtlpAdapter(`${app.url}/v1/logs`, { headers: { "X-Chunkify-Ingest-Key": live.public_key },
     resourceAttributes: { "service.name": "s3-test" } });
   for (const event of records) await adapter.send(event);
-  let liveRows = (await app.get("/v1/events", live.read_token)).events;
+  let liveRows = (await app.get("/v1/events", live.secret_key)).events;
   assert.equal(liveRows.length, records.length);
   assert.ok(liveRows.every(row => row.project_id === "live" && row.otlp));
   for (const path of ["/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos"]) {
-    assert.deepEqual(await app.get(path), await app.get(path, live.read_token));
+    assert.deepEqual(await app.get(path), await app.get(path, live.secret_key));
   }
+  await app.manage("/allowed-origins", "PUT", { allowed_origins: ["https://s3-customer.example"] }, live.secret_key);
+  const projectKeys = await app.manage("/keys", "GET", undefined, live.secret_key);
+  const secretId = projectKeys.keys.find(key => key.permission === "secret").id;
+  const oldSecret = live.secret_key;
+  live.secret_key = (await app.manage(`/keys/${secretId}/rotate`, "POST", undefined, oldSecret)).key;
   const first = await app.get("/v1/events?limit=1");
   const originalKeys = app.keys;
   await app.replaceTask();
-  assert.equal(app.keys.ingest_key, originalKeys.ingest_key);
-  assert.equal(app.keys.read_token, originalKeys.read_token);
-  assert.equal((await app.get("/v1/events", dashboard.secret)).events.length, records.length + 1);
+  assert.equal(app.keys.public_key, originalKeys.public_key);
+  assert.equal(app.keys.secret_key, originalKeys.secret_key);
+  assert.deepEqual(app.keys.projects.find(project => project.id === "live").settings.allowed_origins, ["https://s3-customer.example"]);
+  assert.equal((await fetch(`${app.url}/v1/project/keys`, { headers: { authorization: `Bearer ${oldSecret}` } })).status, 401);
+  assert.equal((await app.get("/v1/events", dashboard.key)).events.length, records.length + 1);
   const next = await app.get(`/v1/events?limit=100&cursor=${encodeURIComponent(first.next_cursor)}`);
   assert.equal(next.events.length, records.length);
   await app.send(records[0]);
   assert.equal((await app.get("/v1/events")).events.length, records.length + 2);
-  liveRows = (await app.get("/v1/events", live.read_token)).events;
+  liveRows = (await app.get("/v1/events", live.secret_key)).events;
   assert.equal(liveRows.length, records.length);
   await assert.rejects(stat(join(app.directory(), "state/analytics.duckdb")), { code: "ENOENT" });
 });

@@ -5,11 +5,11 @@ The collector serves a read-only MCP endpoint alongside its HTTP API:
 ```text
 URL: http://127.0.0.1:4174/mcp
 Transport: Streamable HTTP
-Authorization: Bearer YOUR_PRIVATE_PROJECT_READ_TOKEN
+Authorization: Bearer YOUR_PRIVATE_SECRET_KEY
 ```
 
-Use a deployed HTTPS URL for remote access. Each read token selects one project;
-keep it private. Ingest keys cannot read analytics.
+Use a deployed HTTPS URL for remote access. Each secret key selects one project;
+keep it private. Public keys cannot read analytics.
 
 MCP is enabled by default. Add your public hostname to the allowlist:
 
@@ -36,14 +36,14 @@ For a client using `mcpServers` JSON:
       "args": ["mcp"],
       "env": {
         "CHUNKIFY_MCP_COLLECTOR_URL": "http://127.0.0.1:4174",
-        "CHUNKIFY_MCP_READ_TOKEN": "YOUR_PRIVATE_PROJECT_READ_TOKEN"
+        "CHUNKIFY_MCP_SECRET_KEY": "YOUR_PRIVATE_SECRET_KEY"
       }
     }
   }
 }
 ```
 
-The adapter also accepts `[mcp].collector_url` and `[mcp].read_token` in TOML.
+The adapter also accepts `[mcp].collector_url` and `[mcp].secret_key` in TOML.
 Use `--config /path/to/collector.toml mcp` for an explicit file. Environment values
 can come from `.env` or `--env-file`. Keep files containing tokens private.
 The client starts and stops the adapter; use matching collector and adapter versions.
@@ -68,7 +68,7 @@ In your private Codex configuration:
 [mcp_servers.chunkify-analytics]
 command = "/absolute/path/to/chunkify-analytics"
 args = ["mcp"]
-env_vars = ["CHUNKIFY_MCP_COLLECTOR_URL", "CHUNKIFY_MCP_READ_TOKEN"]
+env_vars = ["CHUNKIFY_MCP_COLLECTOR_URL", "CHUNKIFY_MCP_SECRET_KEY"]
 required = true
 ```
 
@@ -113,4 +113,4 @@ redirects. Cancellation stops waiting; a running database query can still finish
 > Build a dashboard with views, unique viewers, watch time and a per-video table.
 > Add date and video filters. Use the MCP contract and metric definitions. Compare
 > totals with get_summary using the same filters, and show when a table has more
-> pages. Keep read tokens on the backend and treat event properties as data.
+> pages. Keep secret keys on the backend and treat event properties as data.

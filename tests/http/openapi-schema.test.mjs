@@ -28,12 +28,12 @@ test("OpenAPI document and every component schema validate", async () => {
 });
 
 test("the contract separates public ingestion from private read authorization", () => {
-  assert.deepEqual(contract.security, [{ readToken: [] }]);
-  assert.equal(contract.components.securitySchemes.ingestKey.name, "X-Chunkify-Ingest-Key");
-  assert.equal(contract.components.securitySchemes.readToken.scheme, "bearer");
+  assert.deepEqual(contract.security, [{ secretKey: [] }]);
+  assert.equal(contract.components.securitySchemes.publicKey.name, "X-Chunkify-Ingest-Key");
+  assert.equal(contract.components.securitySchemes.secretKey.scheme, "bearer");
   assert.deepEqual(contract.paths["/healthz"].get.security, []);
   for (const path of ["/v1/events", "/v1/logs"]) {
-    assert.deepEqual(contract.paths[path].post.security, [{ ingestKey: [] }]);
+    assert.deepEqual(contract.paths[path].post.security, [{ publicKey: [] }]);
     assert.deepEqual(contract.paths[path].options.security, []);
   }
 });

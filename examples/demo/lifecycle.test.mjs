@@ -23,8 +23,8 @@ test('native demo seeds once, receives player events, resumes a seed and survive
     const config = await json(demo.dashboardUrl, '/api/player-config');
     assert.equal(config.endpoint, demo.collectorUrl + '/v1/events');
     const publicJson = JSON.stringify(config) + JSON.stringify(await json(demo.dashboardUrl, '/api/projects'));
-    for (const project of Object.values(state.projects)) assert.equal(publicJson.includes(project.read_token), false);
-    assert.equal(publicJson.includes(state.projects.demo.ingest_key), false);
+    for (const project of Object.values(state.projects)) assert.equal(publicJson.includes(project.secret_key), false);
+    assert.equal(publicJson.includes(state.projects.demo.public_key), false);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=demo')).views, 268);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=player')).views, 0);
     const event = { ...buildDemoEvents()[0], video_id: 'real-player-test' };

@@ -30,7 +30,7 @@ async function prepareData(dir, binary, env, signal) {
     const content = await readFile(path.join(dir, 'demo.json'), 'utf8');
     let state;
     try { state = JSON.parse(content); } catch { throw new Error('Invalid demo.json. Restore the saved demo state or choose a new data directory.'); }
-    const hasKeys = id => ['read_token', 'ingest_key'].every(key => typeof state.projects?.[id]?.[key] === 'string' && state.projects[id][key].length > 0);
+    const hasKeys = id => ['secret_key', 'public_key'].every(key => typeof state.projects?.[id]?.[key] === 'string' && state.projects[id][key].length > 0);
     if (state.version !== 1 || typeof state.seeded !== 'boolean' || !hasKeys('demo') || !hasKeys('player') ||
       !/^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/.test(state.seedDate) || !Number.isFinite(Date.parse(state.seedDate))) throw new Error('Invalid demo state.');
     return state;
@@ -71,7 +71,7 @@ async function seed(url, state, signal) {
     await Promise.all(events.slice(offset, offset + 8).map(async event => {
       for (let attempt = 0; ; attempt++) {
         const response = await fetch(url + '/v1/events', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': state.projects.demo.ingest_key },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': state.projects.demo.public_key },
           body: JSON.stringify(event), signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
         });
         await response.body?.cancel();

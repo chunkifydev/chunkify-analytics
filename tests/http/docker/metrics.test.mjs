@@ -18,7 +18,7 @@ test('packaged metrics work without a writable home or downloaded extensions', a
     reason: 'ended', playing_time_ms: 9000, startup_time_ms: 250.25, rebuffer_duration_ms: 1000.5 };
   for (const event of [start, end]) {
     const response = await fetch(`${server.url}/v1/events`, { method: 'POST', headers: {
-      'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': server.keys.ingest_key,
+      'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': server.keys.public_key,
     }, body: JSON.stringify(event) });
     assert.equal(response.status, 201, await response.text());
   }
@@ -39,13 +39,13 @@ test('time buckets reject unrepresentable playing-time totals', async t => {
     const end = { ...start, event_id: randomUUID(), sequence: 2, event_name: 'chunkify.video.view_ended', playing_time_ms: 1e308 };
     for (const event of [start, end]) {
       const response = await fetch(`${server.url}/v1/events`, { method: 'POST', headers: {
-        'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': server.keys.ingest_key,
+        'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': server.keys.public_key,
       }, body: JSON.stringify(event) });
       assert.equal(response.status, 201, await response.text());
     }
   }
   const response = await fetch(`${server.url}/v1/timeseries?from=2026-10-19T00:00:00Z&to=2026-10-20T00:00:00Z&interval=day`, {
-    headers: { Authorization: `Bearer ${server.keys.read_token}` },
+    headers: { Authorization: `Bearer ${server.keys.secret_key}` },
   });
   assert.equal(response.status, 500, await response.text());
 });

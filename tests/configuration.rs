@@ -75,7 +75,7 @@ fn missing_explicit_and_malformed_env_files_fail_without_echoing_values() {
     assert!(String::from_utf8_lossy(&missing.stderr).contains("Cannot read environment file"));
     std::fs::write(
         fixture.0.join(".env"),
-        "CHUNKIFY_MCP_READ_TOKEN='private-test-secret\n",
+        "CHUNKIFY_MCP_SECRET_KEY='private-test-secret\n",
     )
     .unwrap();
     let output = fixture.run(&["config", "check"]);
@@ -161,7 +161,7 @@ fn unknown_fields_types_and_missing_files_fail_without_echoing_configuration() {
         "unknown = 'private-test-secret'",
         "[server]\nbnid = 'private-test-secret'",
         "[retention]\nseconds = 'private-test-secret'",
-        "[mcp]\nread_token = 'private-test-secret",
+        "[mcp]\nsecret_key = 'private-test-secret",
     ] {
         std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
         let output = fixture.run(&["config", "check"]);

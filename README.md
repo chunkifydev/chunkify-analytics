@@ -116,8 +116,8 @@ The initial `default` project has two credentials:
 
 | Credential | Use |
 | --- | --- |
-| `ingest_key` | Send events from the player. This key can be included in browser code. |
-| `read_token` | Read analytics through the HTTP API or MCP. Keep it on a backend or in private AI-client settings. |
+| `public_key` | Starts with `ck_public_`. Use it in the player to send events. |
+| `secret_key` | Starts with `ck_secret_`. Read analytics and manage project origins and keys. Keep it on your backend. |
 
 Save these values privately. You can create separate named keys for each
 integration and revoke them independently.
@@ -161,8 +161,8 @@ its data in `./data`, beside `collector.toml`. Read the initial credentials with
 cat data/keys.json
 ```
 
-Use `ingest_key` in the player and keep `read_token` private for API and MCP
-access. This read token must stay out of browser code.
+Use `public_key` in the player and keep `secret_key` private for API and MCP
+access. This secret key must stay out of browser code.
 
 ### 3. Run and check the service
 
@@ -208,21 +208,21 @@ const session = monitor(document.querySelector("video"), {
   videoId: "video-123",
   destinations: [
     createChunkifyAdapter("http://localhost:4174/v1/events", {
-      ingestKey: "YOUR_PROJECT_INGEST_KEY",
+      ingestKey: "YOUR_PROJECT_PUBLIC_KEY",
     }),
   ],
 });
 ```
 
 This URL connects to the collector on your computer for testing. Use that
-project's ingest key, and allow the player's origin in `[server].allowed_origins`.
+project's public key, and allow the player's origin in `[server].allowed_origins`.
 For a deployed player, replace the URL with your collector's public HTTPS address.
 The adapter includes browser and device context by default; set
 `collectBrowserContext: false` in
 its options to disable that collection.
 
 For OTLP/HTTP JSON logs, use `createOtlpAdapter` from
-`@chunkify/analytics/otlp`, point it at `/v1/logs`, and supply the ingest key in
+`@chunkify/analytics/otlp`, point it at `/v1/logs`, and supply the public key in
 `X-Chunkify-Ingest-Key`. This endpoint accepts Chunkify playback events carried
 in OTLP logs; it is not a general metrics or traces backend.
 
@@ -231,13 +231,13 @@ error responses, or inspect the [OpenAPI specification](openapi.json).
 
 ## Read analytics
 
-Use a private project read token from your backend:
+Use a private secret key from your backend:
 
 ```sh
-export READ_TOKEN='YOUR_PRIVATE_PROJECT_READ_TOKEN'
+export SECRET_KEY='YOUR_PRIVATE_SECRET_KEY'
 
 curl --fail http://127.0.0.1:4174/v1/summary \
-  -H "Authorization: Bearer $READ_TOKEN"
+  -H "Authorization: Bearer $SECRET_KEY"
 ```
 
 | Endpoint | Returns |
@@ -250,7 +250,7 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/events` | Stored events, context, and pagination cursors. |
 | `GET /v1/ingestion` | Ingestion status. |
 
-Read tokens grant access to one project. Keep them out of browser code. Build
+Secret keys grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before
 calling the collector.
 
@@ -265,7 +265,7 @@ setup with synthetic events and a player, see the [local demo](examples/demo/REA
 ## Connect an MCP client
 
 Connect an HTTP MCP client to `http://127.0.0.1:4174/mcp` with the header
-`Authorization: Bearer YOUR_PRIVATE_PROJECT_READ_TOKEN`. Use your deployed HTTPS
+`Authorization: Bearer YOUR_PRIVATE_SECRET_KEY`. Use your deployed HTTPS
 address for remote access and add its hostname to `[mcp].allowed_hosts`.
 
 MCP tools read the authenticated project's analytics. See the
@@ -291,7 +291,7 @@ Give each customer or website a separate project and credentials:
 
 ```sh
 chunkify-analytics project create production --name "Production website"
-chunkify-analytics key create production read "Dashboard"
+chunkify-analytics key create production secret "Dashboard"
 chunkify-analytics project retention production 604800
 ```
 
@@ -317,7 +317,7 @@ See [storage](docs/storage.md) for configuration and
 
 | Symptom | Check |
 | --- | --- |
-| `401` response | Use an ingest key for writes and a read token for reads/MCP. Check whether the key was rotated or revoked. |
+| `401` response | Use an public key for writes and a secret key for reads/MCP. Check whether the key was rotated or revoked. |
 | Browser requests receive `403` | Match the website's exact origin in the project's allowed origins. |
 | MCP requests receive `403` | Add the client-facing HTTP hostname to `[mcp].allowed_hosts`; browser Origin headers must also be allowed. |
 | Ingestion receives `429` | Requests exceed an installation or project rate limit. See the admission settings. |

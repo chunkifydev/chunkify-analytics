@@ -40,7 +40,7 @@ async fn connect(url: &str, token: &str, modern: bool) -> Mcp {
     command
         .arg("mcp")
         .env("CHUNKIFY_MCP_COLLECTOR_URL", url)
-        .env("CHUNKIFY_MCP_READ_TOKEN", token)
+        .env("CHUNKIFY_MCP_SECRET_KEY", token)
         // This would make normal collector configuration fail. MCP must not load it.
         .env("COLLECTOR_BIND", "invalid")
         .env("COLLECTOR_DATA_DIR", "/unused-mcp-data");
@@ -240,7 +240,7 @@ impl Collector {
                         .post(format!("{}/v1/events", self.url))
                         .header(
                             "X-Chunkify-Ingest-Key",
-                            credentials["ingest_key"].as_str().unwrap(),
+                            credentials["public_key"].as_str().unwrap(),
                         )
                         .json(&event)
                         .send()
@@ -310,11 +310,11 @@ async fn embedded_http_mcp_matches_api_and_isolates_projects() {
 async fn exercise_project_queries(http: bool) {
     let collector = Collector::start();
     collector.seed().await;
-    let token = collector.keys["read_token"].as_str().unwrap();
+    let token = collector.keys["secret_key"].as_str().unwrap();
     let client = connect_mode(&collector.url, token, false, http).await;
     let live = connect_mode(
         &collector.url,
-        collector.live["read_token"].as_str().unwrap(),
+        collector.live["secret_key"].as_str().unwrap(),
         true,
         http,
     )
@@ -383,7 +383,7 @@ async fn exercise_project_queries(http: bool) {
         assert_eq!(
             result["data"],
             collector
-                .get("/v1/quality", credentials["read_token"].as_str().unwrap())
+                .get("/v1/quality", credentials["secret_key"].as_str().unwrap())
                 .await
         );
         assert_eq!(result["coverage"]["kind"], "filtered_totals");
@@ -418,7 +418,7 @@ async fn exercise_project_queries(http: bool) {
             collector
                 .get(
                     "/v1/engagement",
-                    credentials["read_token"].as_str().unwrap()
+                    credentials["secret_key"].as_str().unwrap()
                 )
                 .await
         );
@@ -463,7 +463,7 @@ async fn exercise_project_queries(http: bool) {
         assert_eq!(
             result["data"],
             collector
-                .get(series_path, credentials["read_token"].as_str().unwrap())
+                .get(series_path, credentials["secret_key"].as_str().unwrap())
                 .await
         );
         assert_eq!(result["coverage"]["kind"], "time_buckets");
@@ -610,7 +610,7 @@ async fn exercise_project_queries(http: bool) {
     for wrong in if http {
         vec![]
     } else {
-        vec!["bad-token", collector.keys["ingest_key"].as_str().unwrap()]
+        vec!["bad-token", collector.keys["public_key"].as_str().unwrap()]
     } {
         let unauthorized = connect(&collector.url, wrong, true).await;
         for tool in [
@@ -656,7 +656,7 @@ async fn unicode_filters_and_long_stored_ids_never_return_unusable_cursors() {
             .post(format!("{}/v1/events", collector.url))
             .header(
                 "X-Chunkify-Ingest-Key",
-                collector.keys["ingest_key"].as_str().unwrap(),
+                collector.keys["public_key"].as_str().unwrap(),
             )
             .json(&event)
             .send()
@@ -671,7 +671,7 @@ async fn unicode_filters_and_long_stored_ids_never_return_unusable_cursors() {
     }
     let client = connect(
         &collector.url,
-        collector.keys["read_token"].as_str().unwrap(),
+        collector.keys["secret_key"].as_str().unwrap(),
         true,
     )
     .await;
@@ -853,7 +853,7 @@ fn startup_does_not_echo_secrets_and_protocol_frames_are_bounded() {
         let output = clean_command()
             .arg("mcp")
             .env("CHUNKIFY_MCP_COLLECTOR_URL", url)
-            .env("CHUNKIFY_MCP_READ_TOKEN", "private-token-value")
+            .env("CHUNKIFY_MCP_SECRET_KEY", "private-token-value")
             .output()
             .unwrap();
         assert!(!output.status.success());
@@ -864,7 +864,7 @@ fn startup_does_not_echo_secrets_and_protocol_frames_are_bounded() {
     let mut child = clean_command()
         .arg("mcp")
         .env("CHUNKIFY_MCP_COLLECTOR_URL", "http://127.0.0.1:1")
-        .env("CHUNKIFY_MCP_READ_TOKEN", "private-token-value")
+        .env("CHUNKIFY_MCP_SECRET_KEY", "private-token-value")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -887,9 +887,9 @@ async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
     std::fs::write(
         &file,
         format!(
-            "CHUNKIFY_MCP_COLLECTOR_URL={}\nCHUNKIFY_MCP_READ_TOKEN={}\nCOLLECTOR_BIND=invalid\n",
+            "CHUNKIFY_MCP_COLLECTOR_URL={}\nCHUNKIFY_MCP_SECRET_KEY={}\nCOLLECTOR_BIND=invalid\n",
             collector.url,
-            collector.keys["read_token"].as_str().unwrap()
+            collector.keys["secret_key"].as_str().unwrap()
         ),
     )
     .unwrap();
@@ -911,9 +911,9 @@ async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
     std::fs::write(
         &file,
         format!(
-            "[server]\nbind = 'invalid'\n[mcp]\ncollector_url = '{}'\nread_token = '{}'\n",
+            "[server]\nbind = 'invalid'\n[mcp]\ncollector_url = '{}'\nsecret_key = '{}'\n",
             collector.url,
-            collector.keys["read_token"].as_str().unwrap()
+            collector.keys["secret_key"].as_str().unwrap()
         ),
     )
     .unwrap();
@@ -940,7 +940,7 @@ async fn embedded_http_authentication_origins_hosts_and_message_limits() {
     for token in [
         "",
         "invalid",
-        collector.keys["ingest_key"].as_str().unwrap(),
+        collector.keys["public_key"].as_str().unwrap(),
     ] {
         let response = http
             .post(&endpoint)
@@ -953,7 +953,7 @@ async fn embedded_http_authentication_origins_hosts_and_message_limits() {
         assert_eq!(response.headers()["www-authenticate"], "Bearer");
         assert_eq!(response.headers()["cache-control"], "no-store");
     }
-    let token = collector.keys["read_token"].as_str().unwrap();
+    let token = collector.keys["secret_key"].as_str().unwrap();
     let request = || {
         http.post(&endpoint)
             .bearer_auth(token)
@@ -1028,8 +1028,8 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
         );
         serde_json::from_slice::<Value>(&output.stdout).unwrap()
     };
-    let created = admin(&["key", "create", "default", "read", "MCP"]);
-    let client = connect_http(&collector.url, created["secret"].as_str().unwrap(), true).await;
+    let created = admin(&["key", "create", "default", "secret", "MCP"]);
+    let client = connect_http(&collector.url, created["key"].as_str().unwrap(), true).await;
     assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
     let rotated = admin(&[
         "key",
@@ -1039,7 +1039,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
     ]);
     assert!(client.list_tools(None).await.is_err());
     client.cancel().await.unwrap();
-    let client = connect_http(&collector.url, rotated["secret"].as_str().unwrap(), false).await;
+    let client = connect_http(&collector.url, rotated["key"].as_str().unwrap(), false).await;
     assert_eq!(
         call(&client, "get_summary", json!({}), false).await["data"]["views"],
         0
@@ -1069,7 +1069,7 @@ async fn embedded_http_can_be_disabled_and_supports_an_explicit_ingress_hostname
     let collector = Collector::with_settings(&[("mcp.allowed_hosts", "analytics.example")]);
     let request = || {
         http.post(format!("{}/mcp", collector.url))
-        .bearer_auth(collector.keys["read_token"].as_str().unwrap())
+        .bearer_auth(collector.keys["secret_key"].as_str().unwrap())
         .header("accept", "application/json, text/event-stream")
         .json(&json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
             "protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"test", "version":"1"}

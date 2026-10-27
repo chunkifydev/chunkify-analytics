@@ -7,12 +7,15 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
 | `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch finishes storage, including empty batches. |
-| `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
-| `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
-| `GET /v1/engagement` | `Authorization: Bearer READ_TOKEN` | Average playing time per attempt and observed reached-end count/rate. |
-| `GET /v1/quality` | `Authorization: Bearer READ_TOKEN` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
-| `GET /v1/timeseries` | `Authorization: Bearer READ_TOKEN` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
-| `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
+| `PUT /v1/project/allowed-origins` | `Authorization: Bearer SECRET_KEY` | Save additional project origins and apply them immediately. |
+| `GET /v1/project/keys` | `Authorization: Bearer SECRET_KEY` | Key IDs, names and permissions, without key values. |
+| `POST /v1/project/keys/{key_id}/rotate` | `Authorization: Bearer SECRET_KEY` | New key value; the previous value stops working immediately. |
+| `GET /v1/events` | `Authorization: Bearer SECRET_KEY` | `{"events":[{"project_id":"default","ingest_key_id":"primary-public","received_at":"...","event":{...}}],"next_cursor":null}` |
+| `GET /v1/summary` | `Authorization: Bearer SECRET_KEY` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/engagement` | `Authorization: Bearer SECRET_KEY` | Average playing time per attempt and observed reached-end count/rate. |
+| `GET /v1/quality` | `Authorization: Bearer SECRET_KEY` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
+| `GET /v1/timeseries` | `Authorization: Bearer SECRET_KEY` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
+| `GET /v1/videos` | `Authorization: Bearer SECRET_KEY` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
 Native ingestion accepts `Content-Type: application/json` and one complete schema
 version 1 event. It validates all seven event shapes emitted by the SDK. Malformed
@@ -22,6 +25,10 @@ return 413. Missing or invalid keys return 401. Disallowed origins return 403.
 Only the ingest endpoints enable CORS, including preflight for the ingest header.
 Read endpoints are intended for the customer's backend and do not enable CORS.
 Keys are never accepted in a query string. Responses are marked `no-store`.
+
+Public keys start with `ck_public_`; secret keys start with `ck_secret_`.
+Secret keys can read analytics and manage origins and keys in their own project.
+See [live project management](administration.md#live-project-api) for requests.
 
 ### OTLP format and storage
 
@@ -144,10 +151,10 @@ within that sequence. Start without a cursor to refresh. This is not an indefini
 export snapshot; retention can remove records between requests.
 
 For example, run this from your dashboard backend or terminal, using a local
-`READ_TOKEN` environment variable containing the private token:
+`SECRET_KEY` environment variable containing the private token:
 
 ```sh
-curl -H "Authorization: Bearer $READ_TOKEN" \
+curl -H "Authorization: Bearer $SECRET_KEY" \
   'http://127.0.0.1:4174/v1/summary?video_id=video-123'
 ```
 
@@ -171,18 +178,18 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
   people, and per-video viewer counts should not be summed for a global count.
 - Final events do not imply video completion. Missing events can make metrics
   incomplete. Client occurrence times and metric values are supplied by the SDK;
-  an ingest key does not verify their authenticity.
+  an public key does not verify their authenticity.
 
 ### Hourly and daily charts
 
 `GET /v1/timeseries` returns the same metrics grouped by the time each view
 started. Supply `from`, `to` and `interval=hour` or `interval=day`. The
 video, viewer, browser, OS and device filters also apply. The project is selected
-by the private read token.
+by the private secret key.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/timeseries' \
-  -H "Authorization: Bearer $READ_TOKEN" \
+  -H "Authorization: Bearer $SECRET_KEY" \
   --data-urlencode 'from=2026-10-19T00:00:00Z' \
   --data-urlencode 'to=2026-10-21T00:00:00Z' \
   --data-urlencode 'interval=day'
@@ -196,12 +203,12 @@ UTC hours, and daily buckets align to midnight UTC, regardless of input offsets.
 ### Watch time and reaching the end
 
 `GET /v1/engagement` accepts the same optional date, video, viewer, browser, OS
-and device filters as summary. The private read token selects the project.
+and device filters as summary. The private secret key selects the project.
 There is no pagination. The MCP tool is `get_engagement`.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/engagement' \
-  -H "Authorization: Bearer $READ_TOKEN" \
+  -H "Authorization: Bearer $SECRET_KEY" \
   --data-urlencode 'video_id=video-123' \
   --data-urlencode 'from=2026-10-19T00:00:00Z' \
   --data-urlencode 'to=2026-10-21T00:00:00Z'
@@ -240,11 +247,11 @@ so this does not measure whether the whole video was watched.
 `GET /v1/quality` returns startup time, buffering and observed fatal errors for
 one project's view cohort. It accepts the same optional date, video, viewer,
 browser, OS and device filters as summary. Pagination and event-name filters are
-not supported. Keep the read token on your backend.
+not supported. Keep the secret key on your backend.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/quality' \
-  -H "Authorization: Bearer $READ_TOKEN" \
+  -H "Authorization: Bearer $SECRET_KEY" \
   --data-urlencode 'from=2026-10-19T00:00:00Z' \
   --data-urlencode 'to=2026-10-21T00:00:00Z'
 ```

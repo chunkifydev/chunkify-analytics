@@ -19,7 +19,7 @@ const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
     ("COLLECTOR_S3_URL_STYLE", "storage.url_style"),
     ("COLLECTOR_S3_USE_SSL", "storage.use_ssl"),
     ("CHUNKIFY_MCP_COLLECTOR_URL", "mcp.collector_url"),
-    ("CHUNKIFY_MCP_READ_TOKEN", "mcp.read_token"),
+    ("CHUNKIFY_MCP_SECRET_KEY", "mcp.secret_key"),
 ];
 
 fn environment_field(name: &str) -> Option<&'static str> {

@@ -229,7 +229,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     try {
       const response = await fetch(`${server.url}${format === "native" ? "/v1/events" : "/v1/logs"}`, {
         method: "POST", body, signal: AbortSignal.timeout(safety.request_timeout_ms),
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key,
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key,
           ...(config.gzip && format === "otlp" ? { "Content-Encoding": "gzip" } : {}) },
       });
       await response.text();

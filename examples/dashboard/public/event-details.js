@@ -102,7 +102,7 @@ function openEvent(record, row, trigger) {
       ['Event name', e.event_name], ['Event ID', e.event_id], ['View ID', e.view_id],
       ['Viewer ID', e.viewer_id], ['Video ID', e.video_id], ['Sequence', e.sequence],
       ['Occurred at', timestamp(e.occurred_at)], ['Received at', timestamp(record.received_at)],
-      ['Project', record.project_id], ['Ingest key ID', record.ingest_key_id],
+      ['Project', record.project_id], ['Public key ID', record.ingest_key_id],
     ]),
     detailSection('Playback', [
       ['Playing time', duration(e.playing_time_ms)], ['Buffering time', duration(e.rebuffer_duration_ms)],

@@ -21,16 +21,16 @@ pub fn default_project() -> String {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
-    Ingest,
-    Read,
+    Public,
+    Secret,
 }
 
 impl Permission {
     pub fn parse(value: &str) -> Result<Self, String> {
         match value {
-            "ingest" => Ok(Self::Ingest),
-            "read" => Ok(Self::Read),
-            _ => Err("Key kind must be ingest or read".into()),
+            "public" => Ok(Self::Public),
+            "secret" => Ok(Self::Secret),
+            _ => Err("Key kind must be public or secret".into()),
         }
     }
 }
@@ -52,17 +52,21 @@ pub fn hash(secret: &str) -> String {
         .collect()
 }
 
-pub fn credential(name: &str, permission: Permission) -> (Credential, String) {
-    let prefix = if permission == Permission::Ingest {
-        "cki"
+pub fn generate_key(permission: Permission) -> String {
+    let prefix = if permission == Permission::Public {
+        "ck_public"
     } else {
-        "ckr"
+        "ck_secret"
     };
-    let secret = format!(
+    format!(
         "{prefix}_{}{}",
         uuid::Uuid::new_v4().simple(),
         uuid::Uuid::new_v4().simple()
-    );
+    )
+}
+
+pub fn credential(name: &str, permission: Permission) -> (Credential, String) {
+    let secret = generate_key(permission);
     (
         Credential {
             id: uuid::Uuid::new_v4().to_string(),
@@ -101,16 +105,16 @@ pub fn projects(keys: &Keys) -> Vec<Project> {
             settings: Settings::default(),
             keys: vec![
                 Credential {
-                    id: "primary-ingest".into(),
-                    name: "Primary ingest".into(),
-                    permission: Permission::Ingest,
-                    hash: hash(&keys.ingest_key),
+                    id: "primary-public".into(),
+                    name: "Primary public".into(),
+                    permission: Permission::Public,
+                    hash: hash(&keys.public_key),
                 },
                 Credential {
-                    id: "primary-read".into(),
-                    name: "Primary read".into(),
-                    permission: Permission::Read,
-                    hash: hash(&keys.read_token),
+                    id: "primary-secret".into(),
+                    name: "Primary secret".into(),
+                    permission: Permission::Secret,
+                    hash: hash(&keys.secret_key),
                 },
             ],
         }]
@@ -224,7 +228,7 @@ impl RateLimit {
 
 pub struct Access {
     pub id: String,
-    pub origins: Vec<String>,
+    origins: RwLock<Vec<String>>,
     pub rate: Mutex<RateLimit>,
     budget: Arc<Semaphore>,
     requests: Arc<Semaphore>,
@@ -237,6 +241,14 @@ pub struct Admission {
     _request: OwnedSemaphorePermit,
 }
 impl Access {
+    pub fn allows_origin(&self, origin: &str) -> bool {
+        self.origins
+            .read()
+            .expect("origins lock")
+            .iter()
+            .any(|value| value == origin)
+    }
+
     pub fn admit(&self, bytes: usize) -> Result<Admission, ApiError> {
         if bytes > self.queue_bytes {
             return Err(ApiError(
@@ -292,10 +304,10 @@ impl Registry {
                 .min(config.batch.queue_bytes);
             let access = Arc::new(Access {
                 id: project.id.clone(),
-                origins: project
-                    .settings
-                    .allowed_origins
-                    .unwrap_or_else(|| config.allowed_origins.clone()),
+                origins: RwLock::new(effective_origins(
+                    &config.allowed_origins,
+                    project.settings.allowed_origins.as_deref(),
+                )),
                 rate: Mutex::new(RateLimit::new(
                     project
                         .settings
@@ -348,6 +360,13 @@ impl Registry {
         *self.credentials.write().expect("credentials lock") = credentials;
     }
 
+    pub fn replace_origins(&self, project: &str, origins: Vec<String>) {
+        *self.projects[project]
+            .origins
+            .write()
+            .expect("origins lock") = origins;
+    }
+
     pub fn authorize(&self, secret: &str, permission: Permission) -> Result<Resolved, ApiError> {
         self.credentials
             .read()
@@ -362,6 +381,16 @@ impl Registry {
                 )
             })
     }
+}
+
+pub fn effective_origins(shared: &[String], extra: Option<&[String]>) -> Vec<String> {
+    let mut origins = shared.to_vec();
+    for origin in extra.unwrap_or_default() {
+        if !origins.contains(origin) {
+            origins.push(origin.clone());
+        }
+    }
+    origins
 }
 
 pub fn apply_command(
@@ -380,8 +409,8 @@ pub fn apply_command(
                 let permission = Permission::parse(kind)?;
                 let (mut key, secret) = credential(&format!("Primary {kind}"), permission);
                 key.id = format!("primary-{kind}");
-                if permission == Permission::Ingest { keys.ingest_key = secret; }
-                else { keys.read_token = secret; }
+                if permission == Permission::Public { keys.public_key = secret; }
+                else { keys.secret_key = secret; }
                 // Keep the legacy format until named projects/keys are used.
                 if keys.projects.is_none() { return Ok(output); }
                 let project = list.iter_mut().find(|p| p.id == DEFAULT_PROJECT).ok_or("Missing default project")?;
@@ -391,11 +420,11 @@ pub fn apply_command(
             ("project-create", [id]) | ("project-create", [id, _]) => {
                 validate_id(id)?;
                 if list.iter().any(|p| &p.id == id) { return Err("Project already exists".into()); }
-                let (ingest, ingest_key) = credential("Primary ingest", Permission::Ingest);
-                let (read, read_token) = credential("Primary read", Permission::Read);
+                let (ingest, public_key) = credential("Primary public", Permission::Public);
+                let (project_key, secret_key) = credential("Primary secret", Permission::Secret);
                 let name = args.get(1).unwrap_or(id).clone();
-                output = serde_json::json!({"project_id": id, "name": name, "ingest_key": ingest_key, "read_token": read_token, "restart_required": true});
-                list.push(Project { id: id.clone(), name, settings: Settings::default(), keys: vec![ingest, read] });
+                output = serde_json::json!({"project_id": id, "name": name, "public_key": public_key, "secret_key": secret_key, "restart_required": true});
+                list.push(Project { id: id.clone(), name, settings: Settings::default(), keys: vec![ingest, project_key] });
             }
             ("project-rename", [id, name]) => {
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
@@ -409,6 +438,12 @@ pub fn apply_command(
                 project.settings.retention_seconds = seconds;
                 output = serde_json::json!({"project_id": id, "retention_seconds": seconds, "restart_required": true});
             }
+            ("project-origins", [id, value]) => {
+                let origins: Vec<String> = serde_json::from_str(value)?;
+                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                project.settings.allowed_origins = Some(origins.clone());
+                output = serde_json::json!({"project_id": id, "allowed_origins": origins, "restart_required": true});
+            }
             ("project-configure", [id, file]) => {
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
                 project.settings = serde_json::from_slice(&std::fs::read(file)?)?;
@@ -416,7 +451,7 @@ pub fn apply_command(
             ("key-create", [id, kind, name]) => {
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
                 let (key, secret) = credential(name, Permission::parse(kind)?);
-                output = serde_json::json!({"project_id": id, "key_id": key.id, "secret": secret, "restart_required": true});
+                output = serde_json::json!({"project_id": id, "key_id": key.id, "key": secret, "permission": key.permission, "restart_required": true});
                 project.keys.push(key);
             }
             ("key-revoke", [id, key_id]) => {
@@ -429,11 +464,11 @@ pub fn apply_command(
                 let old = project.keys.iter_mut().find(|k| &k.id == key_id).ok_or("Unknown key")?;
                 let (new, secret) = credential(&old.name, old.permission);
                 old.hash = new.hash;
-                if id == DEFAULT_PROJECT && key_id == "primary-ingest" { keys.ingest_key = secret.clone(); }
-                if id == DEFAULT_PROJECT && key_id == "primary-read" { keys.read_token = secret.clone(); }
-                output = serde_json::json!({"project_id": id, "key_id": key_id, "secret": secret, "restart_required": true});
+                if id == DEFAULT_PROJECT && key_id == "primary-public" { keys.public_key = secret.clone(); }
+                if id == DEFAULT_PROJECT && key_id == "primary-secret" { keys.secret_key = secret.clone(); }
+                output = serde_json::json!({"project_id": id, "key_id": key_id, "key": secret, "permission": old.permission, "restart_required": true});
             }
-            _ => return Err("Expected project list | project create <id> [name] | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <ingest|read> <name> | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
+            _ => return Err("Expected project list | project create <id> [name] | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <public|secret> <name> | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
         }
     validate(&list)?;
     keys.projects = Some(list);

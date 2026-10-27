@@ -6,7 +6,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -24,6 +24,7 @@ fn live_command(command: &str) -> bool {
         command,
         "project-list"
             | "project-retention"
+            | "project-origins"
             | "key-create"
             | "key-rotate"
             | "key-revoke"
@@ -58,6 +59,13 @@ fn execute(
             .unwrap_or(config.retention_seconds)
             .into();
     }
+    if request.command == "project-origins" {
+        let origins: Vec<String> = serde_json::from_value(output["allowed_origins"].clone())?;
+        output["effective_allowed_origins"] = serde_json::json!(projects::effective_origins(
+            &config.allowed_origins,
+            Some(&origins)
+        ));
+    }
     if request.command != "project-list" {
         let mut retention = if request.command == "project-retention" {
             registry
@@ -77,7 +85,12 @@ fn execute(
                 crate::retention::Policy::new(config.retention_seconds, &projects::projects(&next));
         }
         if let Some(registry) = registry {
-            if request.command != "project-retention" {
+            if request.command == "project-origins" {
+                registry.replace_origins(
+                    &request.args[0],
+                    serde_json::from_value(output["effective_allowed_origins"].clone())?,
+                );
+            } else if request.command != "project-retention" {
                 registry.replace_keys(&next);
             }
             output["restart_required"] = false.into();
@@ -88,6 +101,79 @@ fn execute(
         }
     }
     Ok(output)
+}
+
+pub struct Controller {
+    config: Arc<Config>,
+    registry: Arc<Registry>,
+    keys: Mutex<Keys>,
+}
+
+pub enum ProjectAction {
+    Origins(Vec<String>),
+    Keys,
+    RotateKey(String),
+}
+
+impl Controller {
+    fn new(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Self {
+        Self {
+            config,
+            registry,
+            keys: Mutex::new(keys),
+        }
+    }
+
+    fn execute(&self, request: &Request) -> Reply {
+        let mut keys = self.keys.lock().map_err(|_| "Administration lock failed")?;
+        execute(&self.config, &mut keys, Some(&self.registry), request)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn project(
+        &self,
+        secret: &str,
+        action: ProjectAction,
+    ) -> std::result::Result<Value, crate::api::ApiError> {
+        use crate::{api::ApiError, projects::Permission};
+        let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
+        // Recheck under the mutation lock so a revoked or rotated token cannot
+        // authorize another queued change.
+        let resolved = self.registry.authorize(secret, Permission::Secret)?;
+        let id = resolved.project.id.clone();
+        let project = projects::projects(&keys)
+            .into_iter()
+            .find(|project| project.id == id)
+            .ok_or_else(ApiError::internal)?;
+        let request = match action {
+            ProjectAction::Keys => {
+                return Ok(
+                    serde_json::json!({"project_id": id, "keys": project.keys.iter().map(|key| serde_json::json!({"id": key.id, "name": key.name, "permission": key.permission})).collect::<Vec<_>>() }),
+                );
+            }
+            ProjectAction::Origins(origins) => Request {
+                command: "project-origins".into(),
+                args: vec![
+                    id,
+                    serde_json::to_string(&origins).map_err(|_| ApiError::internal())?,
+                ],
+            },
+            ProjectAction::RotateKey(key) => {
+                if !project.keys.iter().any(|credential| credential.id == key) {
+                    return Err(ApiError(
+                        axum::http::StatusCode::NOT_FOUND,
+                        "Unknown project key".into(),
+                    ));
+                }
+                Request {
+                    command: "key-rotate".into(),
+                    args: vec![id, key],
+                }
+            }
+        };
+        execute(&self.config, &mut keys, Some(&self.registry), &request)
+            .map_err(|_| ApiError::internal())
+    }
 }
 
 pub async fn command(config: &Config, command: &str, args: &[String]) -> Result<()> {
@@ -246,9 +332,7 @@ mod live {
     pub struct Server {
         listener: UnixListener,
         socket: SocketFile,
-        config: Arc<Config>,
-        registry: Arc<Registry>,
-        keys: Keys,
+        controller: Arc<Controller>,
         uid: u32,
     }
 
@@ -273,11 +357,13 @@ mod live {
             Ok(Self {
                 listener,
                 socket,
-                config,
-                registry,
-                keys,
+                controller: Arc::new(Controller::new(config, registry, keys)),
                 uid: metadata.uid(),
             })
+        }
+
+        pub fn controller(&self) -> Arc<Controller> {
+            self.controller.clone()
         }
 
         pub fn start(self) -> Running {
@@ -286,9 +372,7 @@ mod live {
                 let Self {
                     listener,
                     socket,
-                    config,
-                    registry,
-                    mut keys,
+                    controller,
                     uid,
                 } = self;
                 loop {
@@ -313,19 +397,12 @@ mod live {
                         timeout(IO_TIMEOUT, receive::<Request>(&mut stream, REQUEST_LIMIT)).await;
                     let reply = match request {
                         Ok(Ok(request)) => {
-                            let config = config.clone();
-                            let registry = registry.clone();
-                            let result = tokio::task::spawn_blocking(move || {
-                                let reply = execute(&config, &mut keys, Some(&registry), &request)
-                                    .map_err(|e| e.to_string());
-                                (keys, reply)
-                            })
-                            .await;
+                            let controller = controller.clone();
+                            let result =
+                                tokio::task::spawn_blocking(move || controller.execute(&request))
+                                    .await;
                             match result {
-                                Ok((updated, reply)) => {
-                                    keys = updated;
-                                    reply
-                                }
+                                Ok(reply) => reply,
                                 Err(_) => {
                                     eprintln!("Local administration worker failed");
                                     break;
@@ -413,10 +490,17 @@ mod live {
 #[cfg(not(unix))]
 mod live {
     use super::*;
-    pub struct Server;
+    pub struct Server {
+        controller: Arc<Controller>,
+    }
     impl Server {
-        pub fn bind(_: Arc<Config>, _: Arc<Registry>, _: Keys) -> Result<Self> {
-            Ok(Self)
+        pub fn bind(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Result<Self> {
+            Ok(Self {
+                controller: Arc::new(Controller::new(config, registry, keys)),
+            })
+        }
+        pub fn controller(&self) -> Arc<Controller> {
+            self.controller.clone()
         }
         pub fn start(self) -> Self {
             self
@@ -475,7 +559,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let access = fixture
             .registry
-            .authorize(&fixture.keys.ingest_key, projects::Permission::Ingest)
+            .authorize(&fixture.keys.public_key, projects::Permission::Public)
             .ok()
             .unwrap()
             .project;
@@ -484,14 +568,14 @@ mod tests {
             &fixture.config,
             &mut fixture.keys,
             Some(&fixture.registry),
-            &request("key-rotate", &["default", "primary-ingest"]),
+            &request("key-rotate", &["default", "primary-public"]),
         )
         .unwrap();
         let updated = fixture
             .registry
             .authorize(
-                output["secret"].as_str().unwrap(),
-                projects::Permission::Ingest,
+                output["key"].as_str().unwrap(),
+                projects::Permission::Public,
             )
             .ok()
             .unwrap()
@@ -515,14 +599,14 @@ mod tests {
                 &fixture.config,
                 &mut fixture.keys,
                 Some(&fixture.registry),
-                &request("key-rotate", &["default", "primary-ingest"])
+                &request("key-rotate", &["default", "primary-public"])
             )
             .is_err()
         );
         assert!(
             fixture
                 .registry
-                .authorize(&fixture.keys.ingest_key, projects::Permission::Ingest)
+                .authorize(&fixture.keys.public_key, projects::Permission::Public)
                 .is_ok()
         );
         assert_eq!(serde_json::to_vec_pretty(&fixture.keys).unwrap(), before);

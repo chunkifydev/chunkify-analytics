@@ -4,7 +4,7 @@
   "info": {
     "title": "Chunkify analytics collector API",
     "version": "1.1.0",
-    "description": "Self-hosted analytics collector with isolated projects in one installation. This contract describes implemented /v1 endpoints, including an explicitly experimental reader mode. Projects and named credentials are administered through the CLI. Hosted accounts, membership, project administration HTTP APIs and MCP are future work. Ingest keys and private read tokens each resolve to exactly one project; request fields cannot change that scope. Browser ingestion uses a write-only ingest key; keep read tokens on the dashboard backend. Deploy HTTPS at the ingress; loopback HTTP is for local development. JSON examples contain invented IDs and no credentials.",
+    "description": "Collect playback events, query analytics, and manage origins and keys for your project.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -28,11 +28,15 @@
     {
       "name": "Operations",
       "description": "Health and private ingestion status."
+    },
+    {
+      "name": "Projects",
+      "description": "Project origins and keys."
     }
   ],
   "security": [
     {
-      "readToken": []
+      "secretKey": []
     }
   ],
   "paths": {
@@ -40,14 +44,14 @@
       "get": {
         "operationId": "getHealth",
         "summary": "Check collector health",
-        "description": "Unauthenticated database/worker health check. Does not expose keys or queue contents.",
+        "description": "Check whether the service is ready.",
         "tags": [
           "Operations"
         ],
         "security": [],
         "responses": {
           "200": {
-            "description": "Healthy database and workers.",
+            "description": "Service is ready.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -86,7 +90,7 @@
             }
           },
           "503": {
-            "description": "A worker is unavailable.",
+            "description": "The service is busy or temporarily unavailable.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -110,7 +114,7 @@
       "get": {
         "operationId": "getIngestionStatus",
         "summary": "Inspect ingestion status",
-        "description": "Private operational status. Ingestion is direct: successful requests have completed storage.",
+        "description": "Check ingestion availability for your project.",
         "tags": [
           "Operations"
         ],
@@ -134,7 +138,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -194,7 +198,7 @@
       "get": {
         "operationId": "listEvents",
         "summary": "Read retained analytics events",
-        "description": "Limited to the project resolved from the read token. Returns full canonical payloads in server ingestion order, ascending by default. Use order=desc to retrieve the newest received events first, with receipt time and optional context. All filters combine using AND; time filters use event occurred_at, not receipt time. Unknown query parameters are rejected. Private reads have no cross-origin browser access headers.",
+        "description": "List project events with filters and pagination. Use order=desc for the newest events.",
         "tags": [
           "Queries"
         ],
@@ -253,7 +257,7 @@
             }
           },
           "400": {
-            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "description": "Invalid filters, dates, or pagination cursor.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -276,7 +280,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -334,13 +338,13 @@
       "post": {
         "operationId": "ingestEvent",
         "summary": "Ingest one native Chunkify event",
-        "description": "All records belong to the project resolved from the ingest key. Client-provided project or key IDs cannot override this scope. Project and installation rate and memory-buffer limits apply. Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with server.max_body_bytes. Extra fields are preserved. Local storage acknowledges after the DuckDB transaction commits and enforces uniqueness by (project_id, event_id), including across keys and native/OTLP delivery. The first payload and context win. S3 acknowledges after Parquet uploads finish and stores repeated event IDs as separate rows without deduplication. A failed multi-object batch can leave some objects written.",
+        "description": "Send one playback event using a public key. Success confirms storage completed.",
         "tags": [
           "Ingestion"
         ],
         "security": [
           {
-            "ingestKey": []
+            "publicKey": []
           }
         ],
         "parameters": [
@@ -517,7 +521,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid ingest key.",
+            "description": "Missing or invalid public key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -553,7 +557,7 @@
             }
           },
           "413": {
-            "description": "Request or decompressed body exceeds the configured limit; too many OTLP records; or prepared event/queue entry exceeds its byte budget.",
+            "description": "Request size or record count exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -589,7 +593,7 @@
             }
           },
           "429": {
-            "description": "Installation-wide ingestion token bucket exceeded. Counts HTTP requests, including duplicate deliveries and invalid payloads after authentication. Default 100 requests/s with a burst capacity of 100.",
+            "description": "Ingestion rate exceeded. Retry after the indicated delay.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -631,7 +635,7 @@
             }
           },
           "503": {
-            "description": "Collector is busy, queue is full, or a worker is unavailable.",
+            "description": "The service is busy or temporarily unavailable.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -653,7 +657,7 @@
       "options": {
         "operationId": "preflightEvents",
         "summary": "Check browser ingest preflight",
-        "description": "Requires an explicitly allowed Origin and Access-Control-Request-Method: POST. No ingest key is required on preflight. Requested header names are case-insensitive and limited to Content-Type, Content-Encoding and X-Chunkify-Ingest-Key. Credentials and cross-origin reads are not enabled. CORS does not authenticate a sender.",
+        "description": "Check whether a browser origin can send playback events.",
         "tags": [
           "Ingestion"
         ],
@@ -665,7 +669,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the ingest key.",
+            "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the public key.",
             "required": true
           },
           {
@@ -743,13 +747,13 @@
       "post": {
         "operationId": "exportLogs",
         "summary": "Ingest OTLP/HTTP JSON logs",
-        "description": "All records belong to the project resolved from the ingest key. Client-provided project or key IDs cannot override this scope. Project and installation rate and memory-buffer limits apply. Supports JSON logs, including multiple resources/scopes and gzip. Protobuf, gRPC, metrics and traces are outside this API. Log attributes must normalize to one of the seven AnalyticsEvent variants. Omitted nullable SDK attributes are restored to null; required identity and measurements remain mandatory. Original resource/scope/log data are preserved. All records are validated before storage. Local storage commits the batch atomically and deduplicates by (project_id, event_id), preserving first delivery across formats. S3 stores every row and acknowledges after all Parquet uploads finish; a storage error can leave some objects written. Retrying can store duplicates. Success returns 200 and never reports partial success.",
+        "description": "Send playback events as OTLP JSON logs. Gzip is supported. All records must pass validation.",
         "tags": [
           "Ingestion"
         ],
         "security": [
           {
-            "ingestKey": []
+            "publicKey": []
           }
         ],
         "parameters": [
@@ -948,7 +952,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid ingest key.",
+            "description": "Missing or invalid public key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -984,7 +988,7 @@
             }
           },
           "413": {
-            "description": "Request or decompressed body exceeds the configured limit; too many OTLP records; or prepared event/queue entry exceeds its byte budget.",
+            "description": "Request size or record count exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1020,7 +1024,7 @@
             }
           },
           "429": {
-            "description": "Installation-wide ingestion token bucket exceeded. Counts HTTP requests, including duplicate deliveries and invalid payloads after authentication. Default 100 requests/s with a burst capacity of 100.",
+            "description": "Ingestion rate exceeded. Retry after the indicated delay.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1062,7 +1066,7 @@
             }
           },
           "503": {
-            "description": "Collector is busy, queue is full, or a worker is unavailable.",
+            "description": "The service is busy or temporarily unavailable.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1084,7 +1088,7 @@
       "options": {
         "operationId": "preflightLogs",
         "summary": "Check browser ingest preflight",
-        "description": "Requires an explicitly allowed Origin and Access-Control-Request-Method: POST. No ingest key is required on preflight. Requested header names are case-insensitive and limited to Content-Type, Content-Encoding and X-Chunkify-Ingest-Key. Credentials and cross-origin reads are not enabled. CORS does not authenticate a sender.",
+        "description": "Check whether a browser origin can send logs.",
         "tags": [
           "Ingestion"
         ],
@@ -1096,7 +1100,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the ingest key.",
+            "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the public key.",
             "required": true
           },
           {
@@ -1174,7 +1178,7 @@
       "get": {
         "operationId": "getSummary",
         "summary": "Read totals for a view cohort",
-        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention removes contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Unknown query parameters, event_name, cursor and limit are rejected.",
+        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts.",
         "tags": [
           "Queries"
         ],
@@ -1226,7 +1230,7 @@
             }
           },
           "400": {
-            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "description": "Invalid filters, dates, or pagination cursor.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1249,7 +1253,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1309,7 +1313,7 @@
       "get": {
         "operationId": "listVideoMetrics",
         "summary": "Read paginated totals by video",
-        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention removes contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Rows are ordered by video_id ascending. unique_viewers is per video and must not be summed to obtain portfolio unique viewers. Unknown query parameters and event_name are rejected.",
+        "description": "List per-video totals. Unique viewer counts cannot be added across videos.",
         "tags": [
           "Queries"
         ],
@@ -1362,7 +1366,7 @@
             }
           },
           "400": {
-            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "description": "Invalid filters, dates, or pagination cursor.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1385,7 +1389,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1445,7 +1449,7 @@
       "get": {
         "operationId": "getTimeseries",
         "summary": "Read hourly or daily metrics by view start",
-        "description": "Limited to the project resolved from the read token. Requires from, to and interval=hour|day. Returns all UTC calendar buckets intersecting [from, to), ordered oldest first, with zero metrics for empty buckets. At most 1000 buckets including partial boundary buckets; larger ranges return 400, never truncated data. Dates are normalized to milliseconds, as with the other read endpoints. Counts distinct view_id values with a retained view_started event. The first retained start, ordered by SDK sequence, occurrence time and ingestion order, determines all filters and the bucket. Playing time uses the final matching video_id/viewer_id view_ended value, otherwise the latest view_snapshot; missing values contribute zero. Whole cumulative playing time belongs to the start bucket, even if playback continued after it or after to. This is playing time for views started in each bucket, not time actually played during that interval and not concurrent viewers. Snapshots are never added together. Views and playing time across buckets equal getSummary with identical filters on the same retained data. unique_viewers counts distinct non-null supplied viewer_id values per bucket and cannot be summed for global unique viewers. Views without a retained start do not contribute. Missing final events can undercount playing time. Retention removes contributions. The entire response uses one ingestion watermark; later requests may change with new events. Unknown query parameters, event_name, limit, cursor and project overrides are rejected.",
+        "description": "Get hourly or daily totals in UTC. Playing time belongs to the view start bucket. Returns at most 1000 buckets.",
         "tags": [
           "Queries"
         ],
@@ -1515,7 +1519,7 @@
             }
           },
           "400": {
-            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "description": "Invalid filters, dates, or pagination cursor.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1538,7 +1542,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1598,7 +1602,7 @@
       "get": {
         "operationId": "getQuality",
         "summary": "Read playback quality for a view cohort",
-        "description": "Limited to the project resolved from the read token. All filters select the earliest retained view_started by sequence, occurrence time, then ingestion order, as in summary. Each view is one playback attempt, including failures before playback. Matching video_id/viewer_id measurements come from the final view_ended when present, otherwise the latest view_snapshot; event precedence is followed by sequence, occurrence time and ingestion order. All fields come from that one event, including nulls. Later events outside the start-date window still contribute. startup_time_ms reports non-null sample count and continuous, linearly interpolated median/p95. Zero is valid; no measurements returns null percentiles. Buffering uses only views with both durations available and positive combined duration; ratio is SUM(rebuffer_duration_ms) / (SUM(playing_time_ms) + SUM(rebuffer_duration_ms)), not the average of per-view ratios. Its totals cover only those samples; no samples returns zero totals and null ratio. Fatal errors count distinct selected views with any retained matching playback_error where error_fatal=true; ratio divides by all selected attempts. No views returns null, while no observed fatal error among selected views returns zero. Error metrics describe observed delivery, not guaranteed error-free playback. Missing final events can leave partial values. Start-only views have no measurement samples. Orphans are excluded; retention remove contributions. Ratios are fractions from 0 to 1. Unknown parameters, event_name, cursor and limit are rejected.",
+        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable.",
         "tags": [
           "Queries"
         ],
@@ -1663,7 +1667,7 @@
             }
           },
           "400": {
-            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "description": "Invalid filters, dates, or pagination cursor.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1686,7 +1690,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1746,7 +1750,7 @@
       "get": {
         "operationId": "getEngagement",
         "summary": "Read average watch time and reached-end rate",
-        "description": "Limited to the project resolved from the read token. Filters select each view's earliest retained view_started by sequence, occurrence time, then ingestion order, exactly as summary. A view is one playback attempt, including failed, ongoing and start-only attempts. Measurements must match the first start's video_id/viewer_id. total_playing_time_ms uses the final view_ended when present, otherwise the latest view_snapshot, with missing values contributing zero. average_playing_time_ms divides that total by all selected attempts, not unique viewers or completed views. reached_end_views counts each view once only when the same winning event is view_ended with reason=ended. If multiple final events exist, the highest sequence, then occurrence time, then ingestion order wins. Snapshots with reason=ended do not count. reached_end_ratio divides by all selected attempts and is a fraction from 0 to 1. No views returns zero counts/totals and null average/ratio. Existing views with no measured time or observed end return zero. Later measurements outside the start-date window still contribute; orphan events do not. Lost final events/snapshots, ongoing attempts and retention can lower or change results. Reaching the end does not prove the whole video was watched, because viewers can seek. No watched-segment retention curve is provided. Do not average these averages or rates across groups without weighting by views. Unknown parameters, event_name, cursor and limit are rejected.",
+        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched.",
         "tags": [
           "Queries"
         ],
@@ -1800,7 +1804,7 @@
             }
           },
           "400": {
-            "description": "Invalid filters, bounds or cursor. Semantic validation returns JSON; malformed query syntax, unknown parameters, duplicate parameters or an invalid integer return the framework plain-text error.",
+            "description": "Invalid filters, dates, or pagination cursor.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1823,7 +1827,7 @@
             }
           },
           "401": {
-            "description": "Missing or invalid private read bearer token.",
+            "description": "Missing or invalid secret key.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1878,20 +1882,338 @@
           }
         }
       }
+    },
+    "/v1/project/allowed-origins": {
+      "put": {
+        "operationId": "updateProjectOrigins",
+        "summary": "Update project origins",
+        "description": "Replace this project's additional origins. Shared TOML origins stay allowed. Changes apply immediately.",
+        "tags": [
+          "Projects"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectOriginsRequest"
+              },
+              "example": {
+                "allowed_origins": [
+                  "https://customer.example"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Origins saved and active.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectOrigins"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid origins or request fields.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the size limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected uncompressed JSON.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The change could not be saved.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/project/keys": {
+      "get": {
+        "operationId": "listProjectKeys",
+        "summary": "List project keys",
+        "description": "List key IDs, names, and types. Key values are not returned.",
+        "tags": [
+          "Projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Project keys.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectKeys"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/project/keys/{key_id}/rotate": {
+      "post": {
+        "operationId": "rotateProjectKey",
+        "summary": "Rotate a project key",
+        "description": "Replace a key in this project. The old value stops working immediately. Save the returned replacement.",
+        "tags": [
+          "Projects"
+        ],
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Key ID from the project key list."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key rotated.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedProjectKey"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Key not found in this project.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The change could not be saved.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
     "securitySchemes": {
-      "ingestKey": {
+      "publicKey": {
         "type": "apiKey",
         "in": "header",
         "name": "X-Chunkify-Ingest-Key",
-        "description": "Public write-only opaque key associated with exactly one project by collector CLI administration. The collector looks up its hash to resolve project_id and ingest_key_id; the project ID is not encoded in the token. Does not authorize reads or authenticate a viewer. Never send credentials in query parameters."
+        "description": "Public key starting with ck_public_. Use it in the player to send events."
       },
-      "readToken": {
+      "secretKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Private opaque read token associated with exactly one project. All reads are limited to that project, regardless of request fields or cursors. This is not a JWT. Keep it on your dashboard backend; the exact Authorization prefix is Bearer."
+        "description": "Secret key starting with ck_secret_. Reads analytics and manages origins and keys in one project. Keep it on your backend."
       }
     },
     "parameters": {
@@ -1953,7 +2275,7 @@
           "minLength": 1,
           "maxLength": 64
         },
-        "description": "Exact case-sensitive browser name in event_context, for example Chrome. No trimming/coercion. Unknown names are valid and match no records. Missing/null values do not match. Summary/video queries use the selected view_started event."
+        "description": "Exact browser name, such as Chrome. Missing values do not match."
       },
       "os_name": {
         "name": "os_name",
@@ -1963,7 +2285,7 @@
           "minLength": 1,
           "maxLength": 64
         },
-        "description": "Exact case-sensitive OS name in event_context, for example macOS. No trimming/coercion. Unknown names are valid and match no records. Missing/null values do not match. Summary/video queries use the selected view_started event."
+        "description": "Exact operating-system name, such as macOS. Missing values do not match."
       },
       "device_type": {
         "name": "device_type",
@@ -1976,7 +2298,7 @@
             "unknown"
           ]
         },
-        "description": "Exact event_context device class. unknown matches only an explicit unknown value, not missing/null fields. Summary/video queries use the selected view_started event."
+        "description": "Exact device class. unknown matches an explicit unknown value."
       },
       "limit": {
         "name": "limit",
@@ -1995,7 +2317,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Opaque next_cursor from the same project, endpoint, event order and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention can remove records between pages. A cursor is not a durable database snapshot or authorization token."
+        "description": "Use next_cursor from the previous page. Keep the same filters and order."
       },
       "origin": {
         "name": "Origin",
@@ -2003,7 +2325,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the ingest key."
+        "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the public key."
       },
       "identity_encoding": {
         "name": "Content-Encoding",
@@ -2033,7 +2355,7 @@
           "type": "string",
           "format": "date-time"
         },
-        "description": "Required inclusive RFC3339 bound with timezone, applied to the selected view start. Must have from < to after millisecond normalization. Together with interval, the range may intersect at most 1000 UTC buckets. Boundaries may be partial buckets.",
+        "description": "Inclusive view-start time in RFC3339 format with a timezone.",
         "required": true
       },
       "timeseries_to": {
@@ -2043,14 +2365,14 @@
           "type": "string",
           "format": "date-time"
         },
-        "description": "Required exclusive RFC3339 bound with timezone, applied to the selected view start. Must have from < to after millisecond normalization. Together with interval, the range may intersect at most 1000 UTC buckets. Boundaries may be partial buckets.",
+        "description": "Exclusive view-start time in RFC3339 format with a timezone. Must be later than from.",
         "required": true
       },
       "interval": {
         "name": "interval",
         "in": "query",
         "required": true,
-        "description": "UTC calendar bucket size. hour aligns to the UTC hour; day aligns to midnight UTC. At most 1000 buckets, including empty and partial boundary buckets. No pagination or automatic coarsening.",
+        "description": "UTC hour or day. The requested range can contain at most 1000 buckets.",
         "schema": {
           "type": "string",
           "enum": [
@@ -2070,7 +2392,7 @@
           ],
           "default": "asc"
         },
-        "description": "Event ingestion order only. asc returns oldest first; desc returns newest first. This orders by server receipt sequence, not event occurrence time. Keep the same order when following a cursor. Other read routes reject this parameter."
+        "description": "Event receipt order: asc for oldest first, desc for newest first."
       }
     },
     "schemas": {
@@ -2098,7 +2420,7 @@
             "$ref": "#/components/schemas/SeekCompleted"
           }
         ],
-        "description": "One of the seven schema_version 1 SDK events. Native JSON must include required nullable fields as null. Extra properties are preserved. Millisecond measurements are cumulative for a view unless the field names an individual state or seek interval. Counts and dimensions accept non-negative JSON numbers as the current collector does."
+        "description": "A schema version 1 playback event. Extra properties are preserved."
       },
       "EventEnvelope": {
         "type": "object",
@@ -2398,7 +2720,7 @@
             }
           },
           "browser_context": {
-            "description": "Optional caller-supplied context. The Chunkify adapter emits the BrowserContext schema. The collector preserves this raw property without validating its shape. It copies supported primitive fields from schema_version 1 objects into event_context; do not treat caller-supplied metadata as authenticated."
+            "description": "Optional browser information supplied by the player."
           }
         },
         "required": [
@@ -2820,7 +3142,7 @@
           "viewport_height_px",
           "pixel_ratio"
         ],
-        "description": "Shape emitted by createChunkifyAdapter in a browser. Measurements unavailable through browser APIs are null. Stable context is cached per adapter; viewport, screen, pixel ratio and UTC-minus-local timezone offset are read per send. The adapter does not supply client IP or viewer identity."
+        "description": "Browser and device information reported by the player. Unavailable measurements are null."
       },
       "EventContext": {
         "type": "object",
@@ -2981,7 +3303,7 @@
               "string",
               "null"
             ],
-            "description": "Request sender IP. Direct peer unless it is an explicitly trusted proxy. Null when a trusted proxy has no usable forwarding chain. A gateway sender may not be the viewer."
+            "description": "Request sender IP, using trusted proxy information when available. May identify a gateway."
           },
           "client_ip_source": {
             "enum": [
@@ -2995,7 +3317,7 @@
           "schema_version"
         ],
         "additionalProperties": false,
-        "description": "Flat derived context. Browser fields are optional and may be null. Server IP fields are present only when IP storage is enabled, which is the default. Trusted proxies use the rightmost untrusted X-Forwarded-For hop. Request-derived fields cannot be overridden by event properties. Omitted when no context is available."
+        "description": "Browser and request context for the event. Fields can be absent or null."
       },
       "StoredEvent": {
         "type": "object",
@@ -3016,14 +3338,14 @@
           "project_id": {
             "type": "string",
             "pattern": "^[A-Za-z0-9_-]{1,64}$",
-            "description": "Trusted project identifier resolved from the ingest key. Historical events migrate to default."
+            "description": "Trusted project identifier resolved from the public key. Historical events migrate to default."
           },
           "ingest_key_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Safe stable identifier of the ingest key for this stored row. Local storage preserves the first delivery. Null for events received before project metadata was recorded. Never contains the key secret."
+            "description": "ID of the public key used to receive this event. Null when unavailable."
           }
         },
         "required": [
@@ -3878,7 +4200,7 @@
             "additionalProperties": true
           }
         ],
-        "description": "Supported typed log attribute values. An absent, empty, or all-null typed value decodes to null. At most one known typed field may be non-null. Non-null bytesValue attributes are unsupported. Unknown properties are ignored while the original record is preserved. Nested arrays and key/value lists are supported; absent/null values arrays decode as empty."
+        "description": "A typed log attribute. At most one value field can be set. Binary values are unsupported."
       },
       "OtlpAttribute": {
         "type": "object",
@@ -4139,7 +4461,7 @@
         "required": [
           "attributes"
         ],
-        "description": "Event fields must be in attributes using the exact native field names. eventName, timestamps, resource and scope do not supply missing event fields. Required nullable native fields omitted by the SDK are restored to null. Duplicate attribute keys and unsupported attribute values fail the entire request."
+        "description": "A playback event in log attributes. Duplicate attributes and invalid event fields reject the request."
       },
       "OtlpScopeLogs": {
         "type": "object",
@@ -4203,7 +4525,7 @@
           }
         },
         "required": [],
-        "description": "OTLP/HTTP JSON logs only. An empty request is valid. Default maximum 100 log records across all resources/scopes, configurable with server.max_otlp_records. Every log must normalize to AnalyticsEvent; JSON Schema alone cannot express this cross-format validation."
+        "description": "OTLP JSON logs containing playback events. Empty exports are valid."
       },
       "StoredOtlpContext": {
         "type": "object",
@@ -4481,6 +4803,133 @@
           }
         },
         "description": "Observed watch time and end-of-media for the same start cohort as summary. Missing delivery can undercount both."
+      },
+      "ProjectOriginsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional project origins. Shared TOML origins are always included."
+          }
+        },
+        "required": [
+          "allowed_origins"
+        ]
+      },
+      "ProjectOrigins": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "effective_allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Combined shared and project origins."
+          },
+          "restart_required": {
+            "const": false
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "allowed_origins",
+          "effective_allowed_origins",
+          "restart_required"
+        ]
+      },
+      "ProjectKey": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "permission": {
+            "enum": [
+              "public",
+              "secret"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "permission"
+        ]
+      },
+      "ProjectKeys": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectKey"
+            }
+          }
+        },
+        "required": [
+          "project_id",
+          "keys"
+        ]
+      },
+      "RotatedProjectKey": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "restart_required": {
+            "const": false
+          },
+          "warning": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "New key value. Save it now; it is returned once."
+          },
+          "permission": {
+            "enum": [
+              "public",
+              "secret"
+            ]
+          }
+        },
+        "required": [
+          "project_id",
+          "key_id",
+          "key",
+          "permission",
+          "restart_required"
+        ]
       }
     }
   },

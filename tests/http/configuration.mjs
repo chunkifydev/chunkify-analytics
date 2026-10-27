@@ -4,7 +4,7 @@ import { join } from "node:path";
 const arrays = new Set(["server.allowed_origins", "server.trusted_proxies", "mcp.allowed_hosts"]);
 const strings = new Set(["data_dir", "server.bind", "batch.insert_mode", "storage.backend", "storage.path",
   "storage.url", "storage.endpoint", "storage.region", "storage.access_key_id", "storage.secret_access_key",
-  "storage.session_token", "storage.url_style", "mcp.collector_url", "mcp.read_token"]);
+  "storage.session_token", "storage.url_style", "mcp.collector_url", "mcp.secret_key"]);
 const field = name => name === "data_dir" || name === "profile" || /^(server|retention|batch|duckdb|experimental|storage|mcp)\./.test(name);
 
 // Fixtures use the same dotted field names as collector.toml. Preserve invalid

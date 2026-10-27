@@ -6,8 +6,8 @@ export function createDemoHandler({ collectorUrl, state }) {
   const from = new Date(Date.parse(state.seedDate) - 6 * 86400000).toISOString().slice(0, 10);
   const dashboard = createHandler({ env: {
     COLLECTOR_URL: collectorUrl,
-    CHUNKIFY_DEMO_READ_TOKEN: state.projects.demo.read_token,
-    CHUNKIFY_PLAYER_READ_TOKEN: state.projects.player.read_token,
+    CHUNKIFY_DEMO_SECRET_KEY: state.projects.demo.secret_key,
+    CHUNKIFY_PLAYER_SECRET_KEY: state.projects.player.secret_key,
   }, demo: { player_url: '/player', from, to: state.seedDate.slice(0, 10) } });
   return async (req, res) => {
     let url;
@@ -28,7 +28,7 @@ export function createDemoHandler({ collectorUrl, state }) {
       if (req.method !== 'GET' || url.search) { res.writeHead(400, headers); return res.end('Unsupported request.'); }
       if (url.pathname === '/api/player-config') {
         res.writeHead(200, { ...headers, 'Content-Type': 'application/json' });
-        return res.end(JSON.stringify({ endpoint: collectorUrl + '/v1/events', ingestKey: state.projects.player.ingest_key }));
+        return res.end(JSON.stringify({ endpoint: collectorUrl + '/v1/events', ingestKey: state.projects.player.public_key }));
       }
       const [file, type] = assets[url.pathname];
       const content = await readFile(new URL('./public/' + file, import.meta.url));

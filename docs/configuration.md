@@ -24,7 +24,7 @@ TOML holds application settings. These deployment variables can override it:
 | `COLLECTOR_S3_URL`, `COLLECTOR_S3_ENDPOINT`, `COLLECTOR_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
 | `COLLECTOR_S3_ACCESS_KEY_ID`, `COLLECTOR_S3_SECRET_ACCESS_KEY`, `COLLECTOR_S3_SESSION_TOKEN` | Corresponding `storage` fields | Inject credentials without putting them in TOML. |
 | `COLLECTOR_S3_URL_STYLE`, `COLLECTOR_S3_USE_SSL` | Corresponding `storage` fields | Provider addressing and TLS. |
-| `CHUNKIFY_MCP_COLLECTOR_URL`, `CHUNKIFY_MCP_READ_TOKEN` | `mcp.collector_url`, `mcp.read_token` | Optional stdio adapter connection and secret. |
+| `CHUNKIFY_MCP_COLLECTOR_URL`, `CHUNKIFY_MCP_SECRET_KEY` | `mcp.collector_url`, `mcp.secret_key` | Optional stdio adapter connection and secret. |
 
 The collector also loads `.env` from the working directory. Use `--env-file` to
 select another file. Precedence is CLI flags, process environment, environment
@@ -60,7 +60,7 @@ See [storage](storage.md) for local and S3/R2 examples.
 | --- | --- | --- |
 | `data_dir` | `./data` | Directory for keys, locks and temporary files. Also holds the default local database and WAL. Environment paths are relative to the working directory. |
 | `server.bind` | `127.0.0.1:4174` | Listening IP address and port. Use `0.0.0.0:4174` behind an ingress when needed. |
-| `server.allowed_origins` | Empty | Array of exact website origins, without paths or trailing slashes. Empty denies requests with an Origin header. Server requests without Origin still require the ingest key. |
+| `server.allowed_origins` | Empty | Shared website origins, without paths or trailing slashes. Each project can allow additional origins. Server requests without Origin still require the public key. |
 | `retention.seconds` | `2592000` | Default retention by server receipt time, in seconds. Default is 30 days. Projects may override it; `0` disables expiration for inheriting projects. Must be a non-negative whole number no larger than `9223372036854775`. |
 | `retention.interval_seconds` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. The timer stays active for live project changes; disabled policies delete nothing. |
 | `server.store_ip` | `true` | Store collector-derived request IP context. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |

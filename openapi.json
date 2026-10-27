@@ -4,7 +4,7 @@
   "info": {
     "title": "Chunkify analytics collector API",
     "version": "1.1.0",
-    "description": "Self-hosted analytics collector with isolated projects in one installation. This contract describes implemented /v1 endpoints, including explicitly experimental ingestion/reader modes. Projects and named credentials are administered through the CLI. Hosted accounts, membership, project administration HTTP APIs and MCP are future work. Ingest keys and private read tokens each resolve to exactly one project; request fields cannot change that scope. Browser ingestion uses a write-only ingest key; keep read tokens on the dashboard backend. Deploy HTTPS at the ingress; loopback HTTP is for local development. JSON examples contain invented IDs and no credentials.",
+    "description": "Self-hosted analytics collector with isolated projects in one installation. This contract describes implemented /v1 endpoints, including an explicitly experimental reader mode. Projects and named credentials are administered through the CLI. Hosted accounts, membership, project administration HTTP APIs and MCP are future work. Ingest keys and private read tokens each resolve to exactly one project; request fields cannot change that scope. Browser ingestion uses a write-only ingest key; keep read tokens on the dashboard backend. Deploy HTTPS at the ingress; loopback HTTP is for local development. JSON examples contain invented IDs and no credentials.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -109,8 +109,8 @@
     "/v1/ingestion": {
       "get": {
         "operationId": "getIngestionStatus",
-        "summary": "Inspect ingestion mode and pending queue",
-        "description": "Private operational status. Pending counts, bytes and age are limited to the read token’s project; mode and failure state describe the shared queue. Default direct mode has no queue object. Experimental durable_queue mode includes duplicates not yet applied to DuckDB. Reads expose committed DuckDB data; successful queued ingestion can precede visibility. Separate-reader mode changes scheduling only.",
+        "summary": "Inspect ingestion status",
+        "description": "Private operational status. Ingestion is direct: successful requests have completed storage.",
         "tags": [
           "Operations"
         ],
@@ -334,7 +334,7 @@
       "post": {
         "operationId": "ingestEvent",
         "summary": "Ingest one native Chunkify event",
-        "description": "All records belong to the project resolved from the ingest key. Deduplication is by (project_id, event_id), including across multiple keys for one project. Client-provided project or key IDs cannot override this scope. Project and installation rate/queue limits apply. Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with COLLECTOR_MAX_BODY_BYTES. Extra fields are preserved. Direct mode acknowledges after the DuckDB transaction commits. Repeated valid event_id values preserve the first payload and context and count once. In experimental durable queue mode, 202 means the SQLite queue entry is committed durably; DuckDB visibility and deduplication happen asynchronously. Queue mode returns 202 even for duplicates. COLLECTOR_EXPERIMENTAL_READ_WORKER changes read scheduling without changing acknowledgment guarantees.",
+        "description": "All records belong to the project resolved from the ingest key. Client-provided project or key IDs cannot override this scope. Project and installation rate and memory-buffer limits apply. Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with COLLECTOR_MAX_BODY_BYTES. Extra fields are preserved. Local storage acknowledges after the DuckDB transaction commits and enforces uniqueness by (project_id, event_id), including across keys and native/OTLP delivery. The first payload and context win. S3 acknowledges after Parquet uploads finish and stores repeated event IDs as separate rows without deduplication. A failed multi-object batch can leave some objects written.",
         "tags": [
           "Ingestion"
         ],
@@ -413,7 +413,7 @@
         },
         "responses": {
           "200": {
-            "description": "Direct mode: event_id already existed; no data was replaced.",
+            "description": "Local storage only: this event ID already exists in the project; its first payload and context are preserved.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -456,7 +456,7 @@
             }
           },
           "201": {
-            "description": "Direct mode: a new event was committed to DuckDB.",
+            "description": "The event finished storage. S3 also returns this response for repeated event IDs.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -494,49 +494,6 @@
                 "example": {
                   "accepted": true,
                   "duplicate": false
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "Experimental queue mode: durably queued, possibly not queryable yet.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                },
-                "description": "Responses are not cacheable."
-              },
-              "Access-Control-Allow-Origin": {
-                "schema": {
-                  "type": "string"
-                },
-                "description": "Present only on accepted browser ingest/preflight requests. Exact allowed origin; never a wildcard."
-              },
-              "Vary": {
-                "schema": {
-                  "const": "Origin"
-                }
-              },
-              "Access-Control-Allow-Methods": {
-                "schema": {
-                  "const": "POST"
-                }
-              },
-              "Access-Control-Allow-Headers": {
-                "schema": {
-                  "const": "Content-Type, Content-Encoding, X-Chunkify-Ingest-Key"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/NativeQueued"
-                },
-                "example": {
-                  "accepted": true,
-                  "queued": true
                 }
               }
             }
@@ -786,7 +743,7 @@
       "post": {
         "operationId": "exportLogs",
         "summary": "Ingest OTLP/HTTP JSON logs",
-        "description": "All records belong to the project resolved from the ingest key. Deduplication is by (project_id, event_id), including across multiple keys for one project. Client-provided project or key IDs cannot override this scope. Project and installation rate/queue limits apply. Supports JSON logs, including multiple resources/scopes and gzip. Protobuf, gRPC, metrics and traces are outside this API. Log attributes must normalize to one of the seven AnalyticsEvent variants. Omitted nullable SDK attributes are restored to null; required identity and measurements remain mandatory. Original resource/scope/log data are preserved. The entire valid batch is committed atomically. Duplicates across native and OTLP delivery count once and preserve first delivery. Default direct mode returns 200 after DuckDB commit. Experimental durable queue mode returns the same OTLP 200 response after durable queue commit, before asynchronous DuckDB visibility; inspect /v1/ingestion to determine mode. The response never reports partial success.",
+        "description": "All records belong to the project resolved from the ingest key. Client-provided project or key IDs cannot override this scope. Project and installation rate and memory-buffer limits apply. Supports JSON logs, including multiple resources/scopes and gzip. Protobuf, gRPC, metrics and traces are outside this API. Log attributes must normalize to one of the seven AnalyticsEvent variants. Omitted nullable SDK attributes are restored to null; required identity and measurements remain mandatory. Original resource/scope/log data are preserved. All records are validated before storage. Local storage commits the batch atomically and deduplicates by (project_id, event_id), preserving first delivery across formats. S3 stores every row and acknowledges after all Parquet uploads finish; a storage error can leave some objects written. Retrying can store duplicates. Success returns 200 and never reports partial success.",
         "tags": [
           "Ingestion"
         ],
@@ -933,7 +890,7 @@
         },
         "responses": {
           "200": {
-            "description": "Successful complete export, including empty batches and duplicates. See mode-specific durability above.",
+            "description": "Successful complete export, including empty batches. Storage guarantees depend on the configured backend.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1217,7 +1174,7 @@
       "get": {
         "operationId": "getSummary",
         "summary": "Read totals for a view cohort",
-        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Unknown query parameters, event_name, cursor and limit are rejected.",
+        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention removes contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Unknown query parameters, event_name, cursor and limit are rejected.",
         "tags": [
           "Queries"
         ],
@@ -1352,7 +1309,7 @@
       "get": {
         "operationId": "listVideoMetrics",
         "summary": "Read paginated totals by video",
-        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention/deletion remove contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Rows are ordered by video_id ascending. unique_viewers is per video and must not be summed to obtain portfolio unique viewers. Unknown query parameters and event_name are rejected.",
+        "description": "Limited to the project resolved from the read token. Counts distinct view_id values with a retained view_started event. Each view is attributed to its earliest retained start ordered by sequence, occurred_at, then ingestion order. All filters select these starts. Playing time uses a matching video_id/viewer_id view_ended event if present, otherwise the latest retained view_snapshot, ordered by sequence, occurrence time, then ingestion order; missing values contribute zero. Whole cumulative playtime is attributed to the selected start, including events after the time window or with later browser context. Snapshots are never added together. unique_viewers counts distinct non-null supplied viewer_id values, not verified people. Views without a retained start do not contribute. Retention removes contributions. view_ended does not imply completion; lost final browser delivery can undercount playtime. Rows are ordered by video_id ascending. unique_viewers is per video and must not be summed to obtain portfolio unique viewers. Unknown query parameters and event_name are rejected.",
         "tags": [
           "Queries"
         ],
@@ -1488,7 +1445,7 @@
       "get": {
         "operationId": "getTimeseries",
         "summary": "Read hourly or daily metrics by view start",
-        "description": "Limited to the project resolved from the read token. Requires from, to and interval=hour|day. Returns all UTC calendar buckets intersecting [from, to), ordered oldest first, with zero metrics for empty buckets. At most 1000 buckets including partial boundary buckets; larger ranges return 400, never truncated data. Dates are normalized to milliseconds, as with the other read endpoints. Counts distinct view_id values with a retained view_started event. The first retained start, ordered by SDK sequence, occurrence time and ingestion order, determines all filters and the bucket. Playing time uses the final matching video_id/viewer_id view_ended value, otherwise the latest view_snapshot; missing values contribute zero. Whole cumulative playing time belongs to the start bucket, even if playback continued after it or after to. This is playing time for views started in each bucket, not time actually played during that interval and not concurrent viewers. Snapshots are never added together. Views and playing time across buckets equal getSummary with identical filters on the same retained data. unique_viewers counts distinct non-null supplied viewer_id values per bucket and cannot be summed for global unique viewers. Views without a retained start do not contribute. Missing final events can undercount playing time. Retention/deletion remove contributions. The entire response uses one ingestion watermark; later requests may change with new events. Unknown query parameters, event_name, limit, cursor and project overrides are rejected.",
+        "description": "Limited to the project resolved from the read token. Requires from, to and interval=hour|day. Returns all UTC calendar buckets intersecting [from, to), ordered oldest first, with zero metrics for empty buckets. At most 1000 buckets including partial boundary buckets; larger ranges return 400, never truncated data. Dates are normalized to milliseconds, as with the other read endpoints. Counts distinct view_id values with a retained view_started event. The first retained start, ordered by SDK sequence, occurrence time and ingestion order, determines all filters and the bucket. Playing time uses the final matching video_id/viewer_id view_ended value, otherwise the latest view_snapshot; missing values contribute zero. Whole cumulative playing time belongs to the start bucket, even if playback continued after it or after to. This is playing time for views started in each bucket, not time actually played during that interval and not concurrent viewers. Snapshots are never added together. Views and playing time across buckets equal getSummary with identical filters on the same retained data. unique_viewers counts distinct non-null supplied viewer_id values per bucket and cannot be summed for global unique viewers. Views without a retained start do not contribute. Missing final events can undercount playing time. Retention removes contributions. The entire response uses one ingestion watermark; later requests may change with new events. Unknown query parameters, event_name, limit, cursor and project overrides are rejected.",
         "tags": [
           "Queries"
         ],
@@ -1641,7 +1598,7 @@
       "get": {
         "operationId": "getQuality",
         "summary": "Read playback quality for a view cohort",
-        "description": "Limited to the project resolved from the read token. All filters select the earliest retained view_started by sequence, occurrence time, then ingestion order, as in summary. Each view is one playback attempt, including failures before playback. Matching video_id/viewer_id measurements come from the final view_ended when present, otherwise the latest view_snapshot; event precedence is followed by sequence, occurrence time and ingestion order. All fields come from that one event, including nulls. Later events outside the start-date window still contribute. startup_time_ms reports non-null sample count and continuous, linearly interpolated median/p95. Zero is valid; no measurements returns null percentiles. Buffering uses only views with both durations available and positive combined duration; ratio is SUM(rebuffer_duration_ms) / (SUM(playing_time_ms) + SUM(rebuffer_duration_ms)), not the average of per-view ratios. Its totals cover only those samples; no samples returns zero totals and null ratio. Fatal errors count distinct selected views with any retained matching playback_error where error_fatal=true; ratio divides by all selected attempts. No views returns null, while no observed fatal error among selected views returns zero. Error metrics describe observed delivery, not guaranteed error-free playback. Missing final events can leave partial values. Start-only views have no measurement samples. Orphans are excluded; retention/deletion remove contributions. Ratios are fractions from 0 to 1. Unknown parameters, event_name, cursor and limit are rejected.",
+        "description": "Limited to the project resolved from the read token. All filters select the earliest retained view_started by sequence, occurrence time, then ingestion order, as in summary. Each view is one playback attempt, including failures before playback. Matching video_id/viewer_id measurements come from the final view_ended when present, otherwise the latest view_snapshot; event precedence is followed by sequence, occurrence time and ingestion order. All fields come from that one event, including nulls. Later events outside the start-date window still contribute. startup_time_ms reports non-null sample count and continuous, linearly interpolated median/p95. Zero is valid; no measurements returns null percentiles. Buffering uses only views with both durations available and positive combined duration; ratio is SUM(rebuffer_duration_ms) / (SUM(playing_time_ms) + SUM(rebuffer_duration_ms)), not the average of per-view ratios. Its totals cover only those samples; no samples returns zero totals and null ratio. Fatal errors count distinct selected views with any retained matching playback_error where error_fatal=true; ratio divides by all selected attempts. No views returns null, while no observed fatal error among selected views returns zero. Error metrics describe observed delivery, not guaranteed error-free playback. Missing final events can leave partial values. Start-only views have no measurement samples. Orphans are excluded; retention remove contributions. Ratios are fractions from 0 to 1. Unknown parameters, event_name, cursor and limit are rejected.",
         "tags": [
           "Queries"
         ],
@@ -1789,7 +1746,7 @@
       "get": {
         "operationId": "getEngagement",
         "summary": "Read average watch time and reached-end rate",
-        "description": "Limited to the project resolved from the read token. Filters select each view's earliest retained view_started by sequence, occurrence time, then ingestion order, exactly as summary. A view is one playback attempt, including failed, ongoing and start-only attempts. Measurements must match the first start's video_id/viewer_id. total_playing_time_ms uses the final view_ended when present, otherwise the latest view_snapshot, with missing values contributing zero. average_playing_time_ms divides that total by all selected attempts, not unique viewers or completed views. reached_end_views counts each view once only when the same winning event is view_ended with reason=ended. If multiple final events exist, the highest sequence, then occurrence time, then ingestion order wins. Snapshots with reason=ended do not count. reached_end_ratio divides by all selected attempts and is a fraction from 0 to 1. No views returns zero counts/totals and null average/ratio. Existing views with no measured time or observed end return zero. Later measurements outside the start-date window still contribute; orphan events do not. Lost final events/snapshots, ongoing attempts and retention/deletion can lower or change results. Reaching the end does not prove the whole video was watched, because viewers can seek. No watched-segment retention curve is provided. Do not average these averages or rates across groups without weighting by views. Unknown parameters, event_name, cursor and limit are rejected.",
+        "description": "Limited to the project resolved from the read token. Filters select each view's earliest retained view_started by sequence, occurrence time, then ingestion order, exactly as summary. A view is one playback attempt, including failed, ongoing and start-only attempts. Measurements must match the first start's video_id/viewer_id. total_playing_time_ms uses the final view_ended when present, otherwise the latest view_snapshot, with missing values contributing zero. average_playing_time_ms divides that total by all selected attempts, not unique viewers or completed views. reached_end_views counts each view once only when the same winning event is view_ended with reason=ended. If multiple final events exist, the highest sequence, then occurrence time, then ingestion order wins. Snapshots with reason=ended do not count. reached_end_ratio divides by all selected attempts and is a fraction from 0 to 1. No views returns zero counts/totals and null average/ratio. Existing views with no measured time or observed end return zero. Later measurements outside the start-date window still contribute; orphan events do not. Lost final events/snapshots, ongoing attempts and retention can lower or change results. Reaching the end does not prove the whole video was watched, because viewers can seek. No watched-segment retention curve is provided. Do not average these averages or rates across groups without weighting by views. Unknown parameters, event_name, cursor and limit are rejected.",
         "tags": [
           "Queries"
         ],
@@ -2038,7 +1995,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Opaque next_cursor from the same project, endpoint, event order and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention or deletion can remove records between pages. A cursor is not a durable database snapshot or authorization token."
+        "description": "Opaque next_cursor from the same project, endpoint, event order and exact filters. Keep all filters on each page. Page size may change. Each cursor pins the first page ingest watermark so later inserts are excluded; retention can remove records between pages. A cursor is not a durable database snapshot or authorization token."
       },
       "origin": {
         "name": "Origin",
@@ -3066,7 +3023,7 @@
               "string",
               "null"
             ],
-            "description": "Safe stable identifier of the first accepted ingest key. Null for events received before project metadata was recorded. Never contains the key secret."
+            "description": "Safe stable identifier of the ingest key for this stored row. Local storage preserves the first delivery. Null for events received before project metadata was recorded. Never contains the key secret."
           }
         },
         "required": [
@@ -3217,22 +3174,6 @@
         ],
         "additionalProperties": false
       },
-      "NativeQueued": {
-        "type": "object",
-        "properties": {
-          "accepted": {
-            "const": true
-          },
-          "queued": {
-            "const": true
-          }
-        },
-        "required": [
-          "accepted",
-          "queued"
-        ],
-        "additionalProperties": false
-      },
       "Error": {
         "type": "object",
         "properties": {
@@ -3264,69 +3205,16 @@
         "description": "ExportLogsServiceResponse with no partialSuccess. Entire batch succeeded or the whole request returned an error."
       },
       "IngestionStatus": {
-        "oneOf": [
-          {
-            "type": "object",
-            "properties": {
-              "mode": {
-                "const": "direct"
-              }
-            },
-            "required": [
-              "mode"
-            ],
-            "additionalProperties": false
-          },
-          {
-            "type": "object",
-            "properties": {
-              "mode": {
-                "const": "durable_queue"
-              },
-              "queue": {
-                "$ref": "#/components/schemas/QueueStatus"
-              }
-            },
-            "required": [
-              "mode",
-              "queue"
-            ],
-            "additionalProperties": false
-          }
-        ]
-      },
-      "QueueStatus": {
         "type": "object",
         "properties": {
-          "pending_requests": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "pending_events": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "pending_bytes": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "oldest_age_ms": {
-            "type": "integer",
-            "minimum": 0
-          },
-          "failed": {
-            "type": "boolean"
+          "mode": {
+            "const": "direct"
           }
         },
         "required": [
-          "pending_requests",
-          "pending_events",
-          "pending_bytes",
-          "oldest_age_ms",
-          "failed"
+          "mode"
         ],
-        "additionalProperties": false,
-        "description": "Queue totals before DuckDB deduplication. pending_bytes counts serialized pending payload bytes, not the total SQLite file or filesystem allocation. Zero pending requests means the queue is drained at the instant sampled; failed reports a worker failure."
+        "additionalProperties": false
       },
       "ViewStarted": {
         "allOf": [
@@ -4362,7 +4250,7 @@
           "log_record"
         ],
         "additionalProperties": false,
-        "description": "Present only when the first accepted delivery of event_id used OTLP. Later duplicates do not replace original data or add transport context."
+        "description": "Present for a row received through OTLP. Local storage preserves only the first delivery of an event ID; S3 retains each delivery separately."
       },
       "TimeBucket": {
         "type": "object",

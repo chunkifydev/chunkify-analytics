@@ -19,7 +19,6 @@ async fn pages_keep_otlp_project_scope_order_and_watermark() {
             },
             false,
             64,
-            None,
             separate_reads,
             Some(1),
         )

@@ -10,6 +10,7 @@ use uuid::Uuid;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct Config {
+    pub backend: crate::backend::Backend,
     pub data_dir: PathBuf,
     pub mcp_enabled: bool,
     pub mcp_allowed_hosts: Vec<String>,
@@ -25,7 +26,6 @@ pub struct Config {
     pub checkpoint_threshold_mib: u32,
     pub duckdb_threads: Option<usize>,
     pub batch: crate::writer::BatchConfig,
-    pub spool: Option<crate::spool::SpoolConfig>,
     pub separate_reads: bool,
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
@@ -47,6 +47,9 @@ impl Config {
     }
 
     pub fn try_lock(&self) -> Result<Option<fs::File>> {
+        if matches!(self.backend, crate::backend::Backend::S3(_)) {
+            self.create_data_directory()?;
+        }
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -60,11 +63,6 @@ impl Config {
             Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(error)) => Err(error.into()),
         }
-    }
-
-    #[cfg(test)]
-    pub fn load() -> Result<Self> {
-        Self::load_with(&crate::settings::Settings::load(None, None)?, None, None)
     }
 
     pub fn load_with(
@@ -158,7 +156,17 @@ impl Config {
         {
             return Err("COLLECTOR_MCP_ALLOWED_HOSTS must contain literal hostnames or host:port authorities".into());
         }
+        let backend = crate::backend::Backend::load(settings)?;
+        if matches!(backend, crate::backend::Backend::S3(_))
+            && settings
+                .var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
+                .as_deref()
+                == Ok("true")
+        {
+            return Err("S3 storage uses a single worker; disable read_worker".into());
+        }
         Ok(Self {
+            backend,
             mcp_enabled: settings
                 .var("COLLECTOR_MCP_ENABLED")
                 .unwrap_or_else(|_| "true".into())
@@ -168,7 +176,6 @@ impl Config {
             checkpoint_threshold_mib,
             duckdb_threads,
             batch: crate::writer::BatchConfig::load(settings)?,
-            spool: crate::spool::SpoolConfig::load(settings)?,
             separate_reads: settings
                 .var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
                 .unwrap_or_else(|_| "false".into())
@@ -211,7 +218,14 @@ impl Config {
         })
     }
 
-    pub fn initialize(&self) -> Result<()> {
+    pub fn database_path(&self) -> PathBuf {
+        match &self.backend {
+            crate::backend::Backend::Local { path: Some(path) } => path.clone(),
+            _ => self.data_dir.join("analytics.duckdb"),
+        }
+    }
+
+    fn create_data_directory(&self) -> Result<()> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
         #[cfg(unix)]
@@ -220,12 +234,30 @@ impl Config {
             builder.mode(0o700);
         }
         builder.create(&self.data_dir)?;
+        Ok(())
+    }
+
+    pub fn initialize(&self) -> Result<()> {
+        self.create_data_directory()?;
         let _lock = self.lock()?;
         let keys = Keys {
             projects: None,
             ingest_key: format!("cki_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
             read_token: format!("ckr_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
         };
+        if let crate::backend::Backend::S3(remote) = &self.backend {
+            if remote.read_keys()?.is_some() {
+                return Err("S3 installation is already initialized; run serve to use it".into());
+            }
+            if let Some(warning) = self.save_keys(&keys)? {
+                eprintln!("{warning}");
+            }
+            println!(
+                "Initialized S3 storage. Keys are cached in {}.",
+                self.key_cache_path().display()
+            );
+            return Ok(());
+        }
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -245,27 +277,44 @@ impl Config {
         Ok(())
     }
 
+    pub fn key_cache_path(&self) -> PathBuf {
+        self.data_dir
+            .join(if matches!(self.backend, crate::backend::Backend::S3(_)) {
+                "s3-keys.json"
+            } else {
+                "keys.json"
+            })
+    }
+
     pub fn keys(&self) -> Result<Keys> {
-        let keys: Keys =
-            serde_json::from_slice(&fs::read(self.data_dir.join("keys.json")).map_err(
-                |_| "Cannot read keys.json. Run the init command with this data directory first.",
-            )?)?;
-        if keys.ingest_key.len() < 32
-            || keys.read_token.len() < 32
-            || keys.ingest_key == keys.read_token
-        {
-            return Err(
-                "Invalid keys.json: two distinct keys of at least 32 characters are required."
-                    .into(),
-            );
+        if let crate::backend::Backend::S3(remote) = &self.backend {
+            let bytes = remote
+                .read_keys()?
+                .ok_or("S3 installation is not initialized; run init first")?;
+            let keys = decode_keys(&bytes)?;
+            let _ = self.save_local_keys(&keys);
+            return Ok(keys);
         }
-        if let Some(projects) = &keys.projects {
-            crate::projects::validate(projects)?;
-        }
-        Ok(keys)
+        let bytes = fs::read(self.data_dir.join("keys.json")).map_err(
+            |_| "Cannot read keys.json. Run the init command with this data directory first.",
+        )?;
+        decode_keys(&bytes)
     }
 
     pub(crate) fn save_keys(&self, keys: &Keys) -> Result<Option<String>> {
+        if let crate::backend::Backend::S3(remote) = &self.backend {
+            remote.write_keys(&serde_json::to_vec_pretty(keys)?)?;
+            return Ok(self.save_local_keys(keys).unwrap_or_else(|_| {
+                Some(
+                    "Keys were saved to S3, but the local credential cache could not be updated."
+                        .into(),
+                )
+            }));
+        }
+        self.save_local_keys(keys)
+    }
+
+    fn save_local_keys(&self, keys: &Keys) -> Result<Option<String>> {
         // Write and sync a private file on the same filesystem before replacing
         // keys.json. Readers see the complete old or complete new key pair.
         let temporary = self.data_dir.join(format!(".keys-{}.tmp", Uuid::new_v4()));
@@ -281,7 +330,7 @@ impl Config {
             file.write_all(&serde_json::to_vec_pretty(&keys)?)?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&temporary, self.data_dir.join("keys.json"))?;
+            fs::rename(&temporary, self.key_cache_path())?;
             Ok(())
         })();
         if result.is_err() {
@@ -299,6 +348,22 @@ impl Config {
         }
         Ok(None)
     }
+}
+
+pub(crate) fn decode_keys(bytes: &[u8]) -> Result<Keys> {
+    let keys: Keys = serde_json::from_slice(bytes)?;
+    if keys.ingest_key.len() < 32
+        || keys.read_token.len() < 32
+        || keys.ingest_key == keys.read_token
+    {
+        return Err(
+            "Invalid keys.json: two distinct keys of at least 32 characters are required.".into(),
+        );
+    }
+    if let Some(projects) = &keys.projects {
+        crate::projects::validate(projects)?;
+    }
+    Ok(keys)
 }
 
 pub(crate) fn validate_origin(origin: &str) -> std::result::Result<(), String> {

@@ -24,8 +24,42 @@ against both the embedded HTTP endpoint and the stdio adapter. No external
 collector installation is required.
 
 `COLLECTOR_BINARY` selects another executable for the Node integration tests.
-Two optional upgrade checks require `COLLECTOR_PREVIOUS_BINARY`; they are
+The optional database upgrade check requires `COLLECTOR_PREVIOUS_BINARY` and is
 skipped when it is absent.
+
+## S3 integration checks
+
+The S3 tests require an existing disposable bucket and an S3-compatible endpoint.
+They store test prefixes containing events and private test credentials. Use an
+isolated service; remove its data after the run. For example, with LocalStack:
+
+```sh
+docker run -d --name chunkify-s3-test -p 127.0.0.1:19000:4566 \
+  -e SERVICES=s3 localstack/localstack:4.14.0
+docker exec chunkify-s3-test awslocal s3 mb s3://chunkify-analytics-test
+COLLECTOR_S3_TEST_ENDPOINT=127.0.0.1:19000 node --test tests/http/s3.test.mjs
+docker rm -f chunkify-s3-test
+```
+
+Wait for LocalStack to be healthy before creating the bucket. Tests default to
+bucket `chunkify-analytics-test`, region `us-east-1`, access and secret keys `test`,
+path addressing and HTTP. Override these with `COLLECTOR_S3_TEST_BUCKET`,
+`COLLECTOR_S3_TEST_REGION`, `COLLECTOR_S3_TEST_ACCESS_KEY_ID`,
+`COLLECTOR_S3_TEST_SECRET_ACCESS_KEY` and `COLLECTOR_S3_TEST_USE_SSL=true`.
+Without an endpoint, remote tests skip; the custom local-path test still runs.
+These tests check duplicate preservation, project isolation, OTLP context,
+expiration and replacement with an empty local data directory.
+
+## DuckDB build and extensions
+
+The pinned `libduckdb-sys` 1.20000.0 bundles DuckDB's exact v2.0.0 release commit,
+`d54cbbe3df17e8e5ce68312f483b4155836112aa`, but its generated version file calls
+it `v2.0.0-dev88614`. `.cargo/config.toml` sets the release version macros so
+extension lookup and validation use the matching official signed release.
+Keep those defines when overriding `CXXFLAGS`. Recheck this workaround when
+updating the dependency. Parquet is bundled into the binary; S3 startup downloads
+`httpfs` and, for default credentials, `aws` into `data_dir/extensions`.
+Signature and version checks remain enabled.
 
 ## Docker checks
 

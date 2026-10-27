@@ -43,7 +43,7 @@ function postOtlp(server, body, headers = {}) {
 }
 
 async function runCommand(args, env) {
-  const child = spawn(binary, args, { env, stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
+  const child = spawn(binary, args, { env, cwd: tmpdir(), stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
@@ -59,7 +59,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const env = { ...process.env, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
     COLLECTOR_ALLOWED_ORIGINS: "https://player.example", COLLECTOR_STORE_IP: "true",
     COLLECTOR_TRUSTED_PROXIES: "", ...settings };
-  const init = spawn(initialBinary, ["init"], { env, stdio: "pipe" });
+  const init = spawn(initialBinary, ["init"], { env, cwd: directory, stdio: "pipe" });
   let errors = "";
   init.stderr.on("data", (chunk) => { errors += chunk; });
   assert.equal((await once(init, "exit"))[0], 0, errors);
@@ -74,7 +74,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
       Object.assign(keys, JSON.parse(await readFile(join(directory, "keys.json"), "utf8")));
     },
     async start(executable = binary, overrides = {}) {
-      child = spawn(executable, ["serve"], { env: { ...env, ...overrides }, stdio: "pipe" });
+      child = spawn(executable, ["serve"], { cwd: directory, env: { ...env, ...overrides }, stdio: "pipe" });
       // Drain stdout/stderr as well as waiting for the process to exit.
       exited = once(child, "close");
       let output = "";
@@ -706,44 +706,11 @@ test("retention defaults to 30 days, can be disabled, and purges at startup", as
   assert.equal((await server.get("/v1/summary")).views, 0);
 });
 
-test("offline viewer deletion removes both transports across videos and preserves other viewers", async (t) => {
+test("viewer deletion is not a supported command", async (t) => {
   const server = await collector(t);
-  const viewerId = "viewer's-id; SELECT * FROM events";
-  const first = sdkEvents("video-a", viewerId);
-  const second = sdkEvents("video-b", viewerId);
-  const other = sdkEvents("video-a", "keep-me");
-  const anonymous = sdkEvents("video-b", null);
-  first.at(-1).playing_time_ms = 1000;
-  second.at(-1).playing_time_ms = 2000;
-  other.at(-1).playing_time_ms = 3000;
-  anonymous.at(-1).playing_time_ms = 500;
-  for (const event of [...first, ...other]) await server.send(event);
-  for (const event of [...second, ...anonymous]) await server.sendOtlp(event);
-  const original = (await server.get("/v1/events")).events;
-  const busy = await server.command(["viewer", "delete", viewerId]);
-  assert.notEqual(busy.code, 0);
-  assert.match(busy.stderr, /Stop the collector/);
-  assert.deepEqual((await server.get("/v1/events")).events, original);
-  await server.stop("SIGKILL");
-  const deleted = await server.command(["viewer", "delete", viewerId]);
-  assert.equal(deleted.code, 0, deleted.stderr);
-  assert.deepEqual(JSON.parse(deleted.stdout), { deleted_events: 6 });
-  await server.start();
-  assert.deepEqual((await server.get("/v1/events")).events,
-    original.filter((record) => record.event.viewer_id !== viewerId));
-  assert.deepEqual(await server.get("/v1/summary"), { views: 2, unique_viewers: 1, total_playing_time_ms: 3500 });
-  assert.deepEqual((await server.get("/v1/videos")).videos, [
-    { video_id: "video-a", views: 1, unique_viewers: 1, total_playing_time_ms: 3000 },
-    { video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500 },
-  ]);
-  await server.stop();
-  const repeated = await server.command(["viewer", "delete", viewerId]);
-  assert.equal(repeated.code, 0, repeated.stderr);
-  assert.deepEqual(JSON.parse(repeated.stdout), { deleted_events: 0 });
-  await server.start();
-  // Deletion removes stored data; it does not block future collection of this ID.
-  await server.sendOtlp(second[0]);
-  assert.equal((await server.get("/v1/summary")).views, 3);
+  const result = await server.command(["viewer", "delete", "viewer"]);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /unrecognized subcommand/);
 });
 
 test("offline key rotation replaces each credential independently without exposing keys or losing data", async (t) => {
@@ -1026,29 +993,6 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   assert.equal((await server.get("/v1/summary")).views, 2);
 });
 
-test("upgrading replays pending durable requests with the current prepared-row budget", {
-  skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
-}, async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_BATCH_MAX_BYTES: "16384",
-    COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" }, process.env.COLLECTOR_PREVIOUS_BINARY);
-  const events = Array.from({ length: 8 }, (_, index) => ({ ...sdkEvents(`legacy-${index}`)[0],
-    browser_context: { schema_version: 1, browser_name: "Firefox", viewport_width_px: 900 + index } }));
-  for (const event of events) await server.send(event);
-  assert.ok((await server.get("/v1/ingestion")).queue.pending_requests > 0);
-  await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  const state = (await server.get("/v1/ingestion")).queue;
-  assert.equal(state.failed, false);
-  assert.equal(state.pending_requests, 0);
-  const records = (await server.get("/v1/events")).events;
-  assert.deepEqual(records.map(r => r.event), events);
-  for (const record of records) {
-    assert.equal(record.event_context.client_ip, "127.0.0.1");
-    assert.equal(record.event_context.browser_name, "Firefox");
-  }
-});
-
 test("the OTLP adapter preserves all seven SDK events and produces the same reports as native ingestion", async (t) => {
   const events = sdkPlayback(t);
   const native = await collector(t);
@@ -1240,10 +1184,10 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
 });
 
-test("separate reader serves committed SDK events with stable pagination in direct and queued modes", async (t) => {
-  for (const queued of [false, true]) await t.test(queued ? "durable queue" : "direct", async (t) => {
+test("separate reader serves committed SDK events with stable pagination", async (t) => {
+  await t.test("direct", async (t) => {
     const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: "true",
-      COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(queued), COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_PROFILE: "true" });
+      COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_PROFILE: "true" });
     const events = Array.from({ length: 8 }, (_, index) => {
       const view = sdkEvents(`video-${index % 2}`, `viewer-${index % 3}`);
       view.at(-1).playing_time_ms = 1000;
@@ -1258,19 +1202,11 @@ test("separate reader serves committed SDK events with stable pagination in dire
         }
       })(),
     ]);
-    const drain = async () => {
-      if (!queued) return;
-      const deadline = Date.now() + 5000;
-      while ((await server.get("/v1/ingestion")).queue.pending_requests && Date.now() < deadline) await delay(10);
-      assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-    };
-    await drain();
     assert.deepEqual(await server.get("/v1/summary"), { views: 8, unique_viewers: 3, total_playing_time_ms: 8000 });
     assert.equal((await server.get("/v1/summary?video_id=video-0")).views, 4);
     const first = await server.get("/v1/events?limit=1");
     const extra = sdkEvents("after-first-page");
     for (const event of extra) await server.send(event);
-    await drain();
     const records = [...first.events];
     let cursor = first.next_cursor;
     while (cursor) {
@@ -1294,129 +1230,6 @@ test("separate reader serves committed SDK events with stable pagination in dire
   });
 });
 
-test("durable queue acknowledges before DuckDB, recovers after SIGKILL, and deduplicates replay", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const event = sdkEvents()[0];
-  event.browser_context = { schema_version: 1, browser_name: "Queue test", language: "fr" };
-  const send = () => fetch(`${server.url}/v1/events`, { method: "POST",
-    headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key }, body: JSON.stringify(event) });
-  const before = Date.now();
-  for (let i = 0; i < 2; i++) {
-    const response = await send();
-    assert.equal(response.status, 202);
-    assert.deepEqual(await response.json(), { accepted: true, queued: true });
-  }
-  const status = await server.get("/v1/ingestion");
-  assert.ok(status.queue.pending_requests >= 1, "acknowledged events remain queued while DuckDB waits for its batch");
-  assert.ok(Date.now() - before < 1000, "acknowledgement does not wait for the DuckDB batching deadline");
-  await server.stop("SIGKILL");
-  const disabled = await server.command(["serve"], { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "false" });
-  assert.notEqual(disabled.code, 0);
-  assert.match(disabled.stderr, /Pending durable events exist/);
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-  const page = await server.get("/v1/events");
-  assert.equal(page.events.length, 1);
-  assert.deepEqual(page.events[0].event, event);
-  assert.equal(page.events[0].event_context.client_ip, "127.0.0.1");
-  assert.equal(page.events[0].event_context.browser_name, "Queue test");
-  assert.ok(Date.parse(page.events[0].received_at) >= before);
-  assert.ok(Date.parse(page.events[0].received_at) < before + 1000, "replay preserves original receipt time");
-  const unauthorized = await fetch(`${server.url}/v1/ingestion`);
-  assert.equal(unauthorized.status, 401);
-});
-
-test("durable queue rejects overload, drains, and accepts subsequent events", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_SPOOL_MAX_BYTES: "4096",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const responses = await Promise.all(Array.from({ length: 12 }, () => {
-    const event = sdkEvents()[0];
-    return fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-      headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
-  }));
-  const statuses = responses.map(r => r.status);
-  await Promise.all(responses.map(r => r.text()));
-  assert.ok(statuses.includes(202));
-  assert.ok(statuses.includes(503), "full disk queue returns retryable overload");
-  assert.ok(statuses.every(s => [202, 503].includes(s)));
-  const deadline = Date.now() + 5000;
-  while ((await server.get("/v1/ingestion")).queue.pending_requests && Date.now() < deadline) await delay(20);
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-  const rows = (await server.get("/v1/events")).events;
-  assert.equal(rows.length, statuses.filter(s => s === 202).length);
-  await server.send(sdkEvents()[0]);
-  await server.stop();
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal((await server.get("/v1/events")).events.length, rows.length + 1);
-});
-
-test("durable queue preserves OTLP context and deletes a viewer after pending recovery", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const events = sdkEvents("queued-video", "queued-viewer");
-  await server.sendOtlp(events[0], { resourceAttributes: { "service.name": "queue-test" } });
-  await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  const rows = (await server.get("/v1/events")).events;
-  assert.equal(rows.length, 1);
-  assert.deepEqual(rows[0].event, events[0]);
-  assert.ok(rows[0].otlp);
-  await server.sendOtlp(events[1]);
-  await server.stop("SIGKILL");
-  const deleted = await server.command(["viewer", "delete", "queued-viewer"], { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal(deleted.code, 0, deleted.stderr);
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal((await server.get("/v1/events")).events.length, 0);
-});
-
-test("durable queue validates prepared sizes before acknowledging with a small writer budget", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" });
-  const post = event => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-    headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
-  const tooLarge = sdkEvents("v".repeat(13500))[0];
-  assert.ok(Buffer.byteLength(JSON.stringify(tooLarge)) < 16384, "input JSON fits the budget");
-  assert.equal((await post(tooLarge)).status, 413, "JSON fits but prepared row does not");
-  const responses = [];
-  for (let i = 0; i < 8; i++) responses.push(await post(sdkEvents("v".repeat(3500))[0]));
-  assert.ok(responses.every(r => r.status === 202));
-  await Promise.all(responses.map(r => r.text()));
-  await server.stop();
-  await server.start();
-  const state = (await server.get("/v1/ingestion")).queue;
-  assert.equal(state.failed, false);
-  assert.equal(state.pending_requests, 0);
-  assert.equal((await server.get("/v1/events")).events.length, 8);
-});
-
-test("durable queue replays the committed-but-not-dequeued crash window without changing first delivery", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const event = sdkEvents()[0];
-  event.browser_context = { schema_version: 1, browser_name: "First delivery" };
-  await server.send(event);
-  assert.ok((await server.get("/v1/ingestion")).queue.pending_requests > 0);
-  const snapshot = join(server.directory, "pending-snapshot.sqlite");
-  // SQLite's online backup includes the WAL. After graceful draining, restoring
-  // this queue snapshot recreates a crash after DuckDB commit but before dequeue.
-  const backup = spawn("python3", ["-c", "import sqlite3,sys; a=sqlite3.connect(sys.argv[1]); b=sqlite3.connect(sys.argv[2]); a.backup(b); assert b.execute('select count(*) from pending').fetchone()[0] > 0; b.close(); a.close()",
-    join(server.directory, "ingestion.sqlite"), snapshot], { stdio: "pipe" });
-  assert.equal((await once(backup, "close"))[0], 0);
-  await server.stop();
-  await cp(snapshot, join(server.directory, "ingestion.sqlite"));
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  const page = await server.get("/v1/events");
-  assert.equal(page.events.length, 1);
-  assert.deepEqual(page.events[0].event, event);
-  const original = page.events[0];
-  await server.send({ ...event, video_id: "different", browser_context: { schema_version: 1, browser_name: "Retry" } });
-  await server.stop();
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.deepEqual((await server.get("/v1/events")).events, [original]);
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-});
-
 async function projectCommand(server, args) {
   const result = await server.command(args);
   assert.equal(result.code, 0, result.stderr);
@@ -1428,10 +1241,10 @@ function projectPost(server, key, event, headers = {}) {
     headers: { "content-type": "application/json", "x-chunkify-ingest-key": key, ...headers } });
 }
 
-for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical IDs, cursors and deletion (${mode})`, async (t) => {
+for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cursors (${mode})`, async (t) => {
   const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INGEST_PER_SECOND: "1000",
     COLLECTOR_INSERT_MODE: mode === "row" ? "row" : "bulk",
-    COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(mode === "durable"), COLLECTOR_BATCH_DELAY_MS: "100" });
+    COLLECTOR_BATCH_DELAY_MS: "100" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live", "--name", "Production website"]);
   const second = await projectCommand(server, ["key", "create", "live", "ingest", "Mobile app"]);
@@ -1454,7 +1267,7 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
     ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key },
       resourceAttributes: { "service.name": "production" } })),
   ]);
-  // Restart waits for all durable entries; retrying via another key must keep first delivery.
+  // Retrying via another key must keep first delivery.
   await server.stop();
   await server.start();
   await server.send(liveEvents[0], { "X-Chunkify-Ingest-Key": second.secret });
@@ -1489,15 +1302,13 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
   assert.equal((await projectPost(server, live.read_token, events[0])).status, 401);
   await server.stop();
   await projectCommand(server, ["project", "rename", "live", "Customer A — Live"]);
-  await projectCommand(server, ["viewer", "delete", "shared-viewer", "--project", "default"]);
   await server.start();
-  assert.equal((await server.get("/v1/events")).events.length, 0);
+  assert.equal((await server.get("/v1/events")).events.length, events.length);
   assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
   await server.stop();
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").name, "Customer A — Live");
-  await projectCommand(server, ["viewer", "delete", "shared-viewer", "--project", "live"]);
   await server.start();
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
+  assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
 });
 
 test("project credentials rotate and revoke independently without changing ownership", async (t) => {
@@ -1662,38 +1473,6 @@ test("a busy project leaves admission slots for another project", async (t) => {
   assert.equal(responses.filter(r => r.status === 503).length, 2);
   assert.equal((await other).status, 201);
   await Promise.all(responses.map(r => r.text()));
-});
-
-test("durable project quotas and pending counters stay isolated through crash recovery", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_BATCH_DELAY_MS: "1000",
-    COLLECTOR_SPOOL_MAX_BYTES: "16384", COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  await server.stop();
-  const live = await projectCommand(server, ["project", "create", "live"]);
-  const settings = join(server.directory, "live-settings.json");
-  await writeFile(settings, JSON.stringify({ spool_bytes: 4096 }));
-  await projectCommand(server, ["project", "configure", "live", settings]);
-  await server.start();
-  const accepted = [];
-  let overloaded = false;
-  for (let i = 0; i < 10; i++) {
-    const event = sdkEvents()[0];
-    const response = await projectPost(server, live.ingest_key, event);
-    if (response.status === 503) { overloaded = true; break; }
-    assert.equal(response.status, 202);
-    accepted.push(event);
-  }
-  assert.ok(overloaded);
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_events, 0);
-  assert.equal((await server.get("/v1/ingestion", live.read_token)).queue.pending_events, accepted.length);
-  const ownEvent = sdkEvents()[0];
-  assert.equal((await projectPost(server, server.keys.ingest_key, ownEvent)).status, 202);
-  await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.deepEqual((await server.get("/v1/events")).events.map(r => r.event), [ownEvent]);
-  const liveRows = (await server.get("/v1/events", live.read_token)).events;
-  assert.deepEqual(liveRows.map(r => r.event), accepted);
-  assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id));
-  assert.equal((await server.get("/v1/ingestion", live.read_token)).queue.pending_events, 0);
 });
 
 test("project administration rejects invalid changes without overwriting credentials", async (t) => {

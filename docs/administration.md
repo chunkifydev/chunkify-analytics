@@ -5,6 +5,8 @@
 A project is the boundary for ownership and access: use separate projects for
 customers, or for staging and production. Each has a stable `id` and an editable
 `name`. Names live once in `keys.json`; events reference the stable `project_id`.
+With S3, this registry lives at the configured bucket prefix and has a local
+`s3-keys.json` cache. Use the same storage configuration for every command.
 There is no additional tenant/account layer in this version.
 
 Stop the collector, then run these commands from the directory containing
@@ -34,7 +36,7 @@ On Linux and macOS, `project list`, `project retention`, `key create`, `key rota
 the same configuration and data directory, and run the CLI as the collector's operating-system
 user. Successful live changes return `restart_required: false` and take effect
 before the command returns. Already authenticated requests may finish. Project
-creation, renaming, full `project configure` changes and viewer deletion still
+creation, renaming and full `project configure` changes still
 require stopping the collector. Use `project retention` for a live retention-only
 change. On other operating systems, administration remains offline.
 
@@ -43,8 +45,10 @@ The CLI connects through a private `admin.sock` in the data directory, with mode
 it uses a randomly named private directory under `/tmp`. A private
 `admin.socket-id` file in the data directory lets the CLI find it automatically.
 `/tmp` must be writable in that case. No public HTTP administration route or admin
-token is added. Keep the data directory private and do not edit `keys.json` while the
-collector runs. A failed write leaves the active keys and retention policy unchanged. If the file was
+token is added. Keep the data directory private and do not edit the key registry while the
+collector runs. A failed authoritative write leaves active settings unchanged.
+S3 changes save remotely before updating the local cache; a cache failure returns
+a warning, and the remote change remains active. For local storage, if the file was
 replaced but its directory could not be synced, the command returns a `warning`;
 the new configuration is active, but its survival after a system crash is uncertain.
 If a command loses its connection or times out, check `project list` before
@@ -65,7 +69,7 @@ replaces the secret immediately and retains its key ID; it has no overlap period
 These commands do not reset project quotas or change stored events.
 
 The initial `default` project's plaintext `ingest_key` and `read_token` exports
-remain in the private `keys.json` file for the existing init/key rotate-primary workflow.
+remain in the private key registry for the init/key rotate-primary workflow.
 Once a `projects` registry is saved, its hashes are authoritative; a revoked
 primary credential is not re-enabled by the legacy export. Rotating an existing
 default primary key updates that export too. Back up the entire file.
@@ -75,19 +79,20 @@ its project and safe key ID; no per-request database lookup is needed. The proje
 ID is not encoded in the token. Native and OTLP records receive `project_id` and
 `ingest_key_id` as trusted response metadata. Client-supplied properties remain in
 the original event but cannot redirect storage. Multiple keys for one project
-share deduplication and quotas; rotation keeps the key ID and historical events.
+share quotas and, with local storage, deduplication. Rotation keeps the key ID
+and historical events.
 An ingest key identifies the destination/integration, not a verified sender or
 viewer. `viewer_id` remains an optional client-supplied identifier.
 
 A read token permits access to exactly one project on all read endpoints,
-including queue counts. Cursors are bound to that project; a cursor never grants
+including ingestion status. Cursors are bound to that project; a cursor never grants
 access. The same event/view/viewer IDs can occur independently in other projects.
 There is no cross-project query token or account membership API yet.
 
 ### Project limits and origins
 
 Defaults divide the installation's ingestion rate, in-flight write slots, memory
-queue budget and durable payload budget evenly across the configured projects
+buffer budget evenly across the configured projects
 (including `default`). Rate and slot defaults have a minimum of one. Each project
 inherits `COLLECTOR_ALLOWED_ORIGINS`. Keys within a project share these limits.
 The installation caps still apply, so these are ceilings, not throughput or latency
@@ -103,7 +108,6 @@ To override one project's limits, save a JSON file and run
   "allowed_origins": ["https://player.example"],
   "ingest_per_second": 100,
   "queue_bytes": 4194304,
-  "spool_bytes": 16777216,
   "retention_seconds": 604800
 }
 ```
@@ -112,9 +116,8 @@ The command replaces that project's overrides. Omitted/null values inherit the
 default; `retention_seconds: 0` disables expiration for that project, and
 `allowed_origins: []` disables browser origins for that project. Queue
 limits accept 4096–268435456 bytes and are capped by the installation limit.
-`spool_bytes` applies only with the experimental durable queue and bounds pending
-serialized payloads, not retained DuckDB storage. Restarting with lower limits
-still recovers previously acknowledged events before accepting new traffic.
+These limits bound in-memory write buffers, not retained storage. Successful
+requests have already completed storage; incomplete requests are not recovered after restart.
 
 A full queue returns 503; exceeding a project rate returns 429; a single request
 that cannot fit its byte budget returns 413. Origin checks on POST use the
@@ -134,13 +137,15 @@ Invalid commands or configuration return a nonzero exit status.
 By default, the collector removes events received more than 30 days ago. Each
 project can override that duration. The collector runs a sweep before accepting
 requests at startup and then once an hour. Expired
-events can remain until the next successful sweep. A failed scheduled sweep logs
+events in local storage can remain until the next successful sweep. S3 reads
+hide expired rows immediately; cleanup removes an entire Parquet file only once
+all its rows expire. See [S3 expiration](storage.md#expiration). A failed scheduled sweep logs
 an error and retries at the next interval; a failed startup sweep prevents startup.
 
 Retention uses the stored server `received_at`, independently of the client's
 `occurred_at`. An old client timestamp does not cause immediate removal, and a
-future client timestamp does not extend storage. Expiration removes the canonical
-event, its OTLP log/context, and its request context in one transaction.
+future client timestamp does not extend storage. Local expiration removes the
+event, its OTLP log/context, and request context in one transaction.
 Summaries use only retained events, so expiration also removes their contributions.
 
 `[retention].seconds` in TOML sets the installation default, initially 2592000
@@ -185,34 +190,15 @@ A positive project override still expires events when the installation default i
 
 The administrator chooses the policy and the collector performs deletion.
 Automatic synchronization with Chunkify customer/project policies, historical
-summaries and S3 archives are future work tracked in
+summaries are future work tracked in
 [issue #381](https://github.com/chunkifydev/chunkify/issues/381). Current dashboard
 history is limited to retained events; changing retention does not create an
 archive or permanent totals.
 
-Duplicate delivery does not refresh an existing event's receipt time. After an
-event expires or is deleted, receiving its ID again creates a new stored event.
-
-### Delete a viewer's stored events
-
-Stop the collector, then run:
-
-```sh
-chunkify-analytics viewer delete 'viewer-123'
-```
-
-The one-argument form targets the `default` project. To target another project,
-use `viewer delete viewer-123 --project live`. The command matches the exact supplied
-`viewer_id` within that project, across all videos and both ingestion formats. It removes the matching events, OTLP context, and request
-context atomically, then prints a count such as `{"deleted_events":42}`.
-Other viewers and anonymous
-events remain. Repeating the command succeeds with zero deletions. Restart the
-collector to resume ingestion; queries and totals reflect the deletion.
-
-This deletes stored records. It does not block new events for that viewer or
-erase existing backups. Apply the customer's collection policy in the application
-and manage backup retention separately. Deletion does not promise an immediate
-reduction in the size of the DuckDB file.
+In local storage, duplicate delivery does not refresh the event's receipt time.
+After expiration, receiving its ID again creates a new stored event. In S3, each
+delivery is a separate row with a new receipt time. Expiration is the only event
+removal mechanism; there is no viewer deletion command.
 
 ### Rotate a credential
 
@@ -225,10 +211,11 @@ chunkify-analytics key rotate-primary read
 
 These legacy commands rotate the `default` project’s primary credential.
 Each command replaces only the selected credential. It writes a complete new
-`keys.json` through a temporary file and rename, with mode `0600` on Unix. It
+local key registry through a temporary file and rename, with mode `0600` on Unix.
+S3 saves the registry remotely and refreshes the local `s3-keys.json` cache. It
 does not print credential values or modify event data.
 
-Read the new value from `keys.json`. For an ingest-key rotation, update the
+Read the new value from `keys.json` for local storage or `s3-keys.json` for S3. For an ingest-key rotation, update the
 browser adapter's `X-Chunkify-Ingest-Key`. For a read-token rotation, update the
 dashboard backend's bearer token. A running collector applies the change
 immediately on Linux and macOS; if stopped, start it to use the new key. The old
@@ -237,10 +224,17 @@ old ingest key will fail to deliver events until they load the new configuration
 
 ### Backup and restore
 
-Use an offline copy of the complete data directory. Stop the collector gracefully
+For S3, stop the collector and back up the configured prefix, including `keys.json`.
+Restore the complete prefix before starting a replacement task with the same
+configuration. Local caches alone are not an S3 backup. Keep configuration and
+credentials private and save them separately.
+
+For local storage, use an offline copy of the complete data directory. Stop the collector gracefully
 and wait for it to exit, then keep it stopped until the copy finishes. Shutdown
 runs a DuckDB [checkpoint](https://duckdb.org/docs/current/sql/statements/checkpoint)
-and closes the database. Include the database, any WAL file, keys, and lock file.
+and closes the database. Include the database, any WAL file, keys, and lock file. If `[storage].path`
+points outside `data_dir`, copy that database and its WAL too, and update its
+configuration path when restoring.
 Keep the backup private because it contains the read token and analytics data.
 Save `collector.toml` and any environment overrides separately.
 
@@ -267,7 +261,7 @@ run `init` on restored data. Check `/healthz` and the authenticated event and
 summary endpoints before sending traffic to the restored installation.
 
 Restoring also restores the keys and events from the backup date. Changes after
-that date are absent. Reapply later viewer deletions, key rotations and project
+that date are absent. Reapply later key rotations and project
 retention changes as needed.
 Startup retention still applies, so an older backup can lose expired events
 when it starts. To inspect it without expiration, explicitly disable retention
@@ -288,16 +282,7 @@ Use `key rotate-primary read` in the same position for the read token. Read and 
 the replacement credential as described below. Named key commands also work
 through `docker exec`.
 
-Project changes and viewer deletion require stopping the server first:
-
-```sh
-docker stop --time 20 chunkify-analytics
-docker run --rm \
-  --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  --mount type=bind,src="$(pwd)/collector.toml",dst=/data/collector.toml,readonly \
-  chunkify-analytics:local viewer delete 'viewer-123'
-docker start chunkify-analytics
-```
+Project creation, renaming and full settings changes require stopping the server first.
 
 To back up the named volume, keep the server stopped until the archive is complete.
 Choose a new backup filename and keep its contents private:
@@ -326,5 +311,5 @@ Save the host's `collector.toml` alongside the archive. The read-only host file
 mount is separate from the named volume and is not included in this backup.
 
 Start the collector using that restored volume and the same TOML mount, without
-running `init`. Follow the same version, retention, deletion, and credential rules
+running `init`. Follow the same version, retention, and credential rules
 in [backup and restore](#backup-and-restore).

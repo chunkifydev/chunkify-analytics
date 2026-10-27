@@ -109,8 +109,9 @@ pub async fn command(config: &Config, command: &str, args: &[String]) -> Result<
             "Start the collector to use it."
         };
         println!(
-            "Rotated {} key. Read the new value from keys.json. {suffix}",
-            args[0]
+            "Rotated {} key. Read the new value from {}. {suffix}",
+            args[0],
+            config.key_cache_path().display()
         );
         if let Some(warning) = output["warning"].as_str() {
             eprintln!("{warning}");
@@ -440,7 +441,8 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            let mut config = Config::load().unwrap();
+            let mut config =
+                Config::load_with(&crate::settings::Settings::default(), None, None).unwrap();
             config.data_dir = std::env::temp_dir().join(format!(
                 "ck-admin-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..12]

@@ -14,6 +14,7 @@ struct FileConfig {
     retention: Retention,
     batch: Batch,
     duckdb: Duckdb,
+    storage: Storage,
     experimental: Experimental,
     mcp: Mcp,
 }
@@ -57,11 +58,23 @@ struct Duckdb {
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+struct Storage {
+    backend: Option<String>,
+    path: Option<PathBuf>,
+    url: Option<String>,
+    endpoint: Option<String>,
+    region: Option<String>,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    session_token: Option<String>,
+    url_style: Option<String>,
+    use_ssl: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 struct Experimental {
-    durable_queue: Option<bool>,
-    replay_pipeline: Option<bool>,
     read_worker: Option<bool>,
-    spool_max_bytes: Option<usize>,
 }
 
 #[derive(Default, Deserialize)]
@@ -99,6 +112,35 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         )
     })?;
     let mut settings = Settings::default();
+    let mut storage = config.storage;
+    if let Some(path) = storage.path.take() {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            file.parent().unwrap_or_else(|| Path::new(".")).join(path)
+        };
+        settings
+            .values
+            .insert("COLLECTOR_LOCAL_PATH".into(), path.into_os_string());
+    }
+    for (name, value) in [
+        ("COLLECTOR_STORAGE_BACKEND", storage.backend),
+        ("COLLECTOR_S3_URL", storage.url),
+        ("COLLECTOR_S3_ENDPOINT", storage.endpoint),
+        ("COLLECTOR_S3_REGION", storage.region),
+        ("COLLECTOR_S3_ACCESS_KEY_ID", storage.access_key_id),
+        ("COLLECTOR_S3_SECRET_ACCESS_KEY", storage.secret_access_key),
+        ("COLLECTOR_S3_SESSION_TOKEN", storage.session_token),
+        ("COLLECTOR_S3_URL_STYLE", storage.url_style),
+        (
+            "COLLECTOR_S3_USE_SSL",
+            storage.use_ssl.map(|value| value.to_string()),
+        ),
+    ] {
+        if let Some(value) = value {
+            settings.values.insert(name.into(), value.into());
+        }
+    }
     if let Some(directory) = config.data_dir {
         let directory = if directory.is_absolute() {
             directory
@@ -208,28 +250,11 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             value.to_string().into(),
         );
     }
-    if let Some(value) = config.experimental.durable_queue {
-        settings.values.insert(
-            "COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE".into(),
-            value.to_string().into(),
-        );
-    }
-    if let Some(value) = config.experimental.replay_pipeline {
-        settings.values.insert(
-            "COLLECTOR_EXPERIMENTAL_REPLAY_PIPELINE".into(),
-            value.to_string().into(),
-        );
-    }
     if let Some(value) = config.experimental.read_worker {
         settings.values.insert(
             "COLLECTOR_EXPERIMENTAL_READ_WORKER".into(),
             value.to_string().into(),
         );
-    }
-    if let Some(value) = config.experimental.spool_max_bytes {
-        settings
-            .values
-            .insert("COLLECTOR_SPOOL_MAX_BYTES".into(), value.to_string().into());
     }
     if let Some(value) = config.mcp.enabled {
         settings

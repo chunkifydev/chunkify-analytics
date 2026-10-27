@@ -20,7 +20,7 @@ async function collector(t, separateReads) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-context-filters-"));
   const env = { ...process.env, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
     COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_STORE_IP: "false", COLLECTOR_TRUSTED_PROXIES: "",
-    COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "false", COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads) };
+    COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads) };
   let child;
   let exited;
   let errors = "";
@@ -33,7 +33,7 @@ async function collector(t, separateReads) {
       try { assert.equal((await exited)[0], 0, errors); } finally { clearTimeout(timeout); }
     },
     async start() {
-      child = spawn(binary, ["serve"], { env, stdio: ["ignore", "pipe", "pipe"] });
+      child = spawn(binary, ["serve"], { env, cwd: directory, stdio: ["ignore", "pipe", "pipe"] });
       exited = once(child, "close");
       let output = "";
       errors = "";
@@ -70,7 +70,7 @@ async function collector(t, separateReads) {
   t.after(async () => {
     try { await server.stop(); } finally { await rm(directory, { recursive: true, force: true }); }
   });
-  await command(binary, ["init"], { env, timeout: 10000 });
+  await command(binary, ["init"], { env, cwd: directory, timeout: 10000 });
   server.keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
   await server.start();
   return server;

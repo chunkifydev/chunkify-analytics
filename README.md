@@ -10,7 +10,7 @@ Chunkify Analytics includes:
 - Separate projects and credentials for different websites or customers.
 - An HTTP API for building dashboards.
 - A read-only MCP endpoint for connecting AI tools.
-- Local DuckDB storage with configurable retention.
+- Local or S3-compatible storage with configurable expiration.
 
 One `chunkify-analytics serve` process runs ingestion, queries, and MCP. You do
 not need to install or run a separate database server.
@@ -248,7 +248,7 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/engagement` | Average watch time and observed reached-end rates. |
 | `GET /v1/quality` | Startup timing, buffering, and fatal-error metrics. |
 | `GET /v1/events` | Stored events, context, and pagination cursors. |
-| `GET /v1/ingestion` | Ingestion mode and queue status. |
+| `GET /v1/ingestion` | Ingestion status. |
 
 Read tokens grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before
@@ -354,7 +354,7 @@ keep them indefinitely or `inherit` to restore the installation default.
 
 On Linux and macOS, listing projects, changing retention, and managing keys work
 while the service is running. Stop it before creating or renaming a project,
-replacing a project's full settings, or deleting a viewer's events.
+or replacing a project's full settings.
 
 For native installations, the same commands run directly:
 
@@ -363,7 +363,6 @@ chunkify-analytics project create production --name "Production website"
 chunkify-analytics key create production ingest "Website"
 chunkify-analytics key rotate production KEY_ID
 chunkify-analytics key revoke production KEY_ID
-chunkify-analytics viewer delete viewer-123 --project production
 ```
 
 Creating or rotating a named key prints its new secret. Save it when returned;
@@ -374,23 +373,33 @@ then revoke the old one.
 Use `chunkify-analytics --help` or a command such as
 `chunkify-analytics project create --help` for arguments. The
 [administration guide](docs/administration.md) includes project settings,
-Docker commands, viewer deletion, and backup/restore procedures.
+Docker commands and backup/restore procedures.
 
 ## Storage, retention, and backups
 
-Events are stored locally in the persistent data directory. By default, the
-service removes events received more than 30 days ago, with cleanup at startup
-and hourly afterward. Projects can have different retention periods. Deletion
-also removes those events' contributions to reports.
+Choose storage in one flat `[storage]` section. Local storage is the default:
 
-Retention limits age, not disk size. There is no automatic S3 sync or archival
-feature. Choose retention for your event volume and monitor available storage.
-The queue settings limit pending writes, not the size of the retained database.
+```toml
+[storage]
+backend = "local"
+# Optional database file, relative to this TOML file:
+path = "./data/analytics.duckdb"
+```
 
-Back up the complete data directory while the collector is stopped. A Docker
-container is replaceable; its data volume is not a backup. See
-[backup and restore](docs/administration.md#backup-and-restore) before replacing
-an installation or moving its data.
+For S3 or Cloudflare R2, set `backend = "s3"` and supply the bucket URL and
+connection settings. Events and installation credentials persist in object
+storage, so a replacement ECS Fargate task can start with an empty local data
+directory. Run one collector task per bucket prefix. See the
+[storage guide](docs/storage.md) for a complete R2 example and deployment limits.
+
+Expiration defaults to 30 days by server receipt time, with cleanup at startup
+and hourly afterward. Projects can have different durations. Expiration also
+removes those events' contributions to reports. It limits age, not storage size.
+Local files can reuse space after cleanup; their disk size need not shrink.
+
+For local storage, back up the data directory and any custom database path while
+the collector is stopped. For S3, back up the configured prefix, including its
+`keys.json`. See [backup and restore](docs/administration.md#backup-and-restore).
 
 ## Troubleshooting
 
@@ -406,6 +415,7 @@ an installation or moving its data.
 
 ## Further documentation
 
+- [Storage backends and R2 setup](docs/storage.md)
 - [Configuration reference](docs/configuration.md)
 - [HTTP API and metric definitions](docs/api.md)
 - [Projects, credentials, retention, and backups](docs/administration.md)

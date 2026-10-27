@@ -31,12 +31,12 @@ async function collector(t, settings = {}) {
     }
     await rm(directory, { recursive: true, force: true });
   });
-  const init = spawn(binary, ["init"], { env, stdio: "pipe" });
+  const init = spawn(binary, ["init"], { env, cwd: directory, stdio: "pipe" });
   init.stdout.resume();
   init.stderr.on("data", chunk => { logs += chunk; });
   assert.equal((await once(init, "close"))[0], 0, logs);
   const keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
-  child = spawn(binary, ["serve"], { env, stdio: "pipe" });
+  child = spawn(binary, ["serve"], { env, cwd: directory, stdio: "pipe" });
   closed = once(child, "close");
   child.stderr.on("data", chunk => { logs += chunk; });
   const url = await new Promise((resolveReady, reject) => {
@@ -267,29 +267,6 @@ test("rate limit responses use the documented native and OTLP error envelopes", 
     assert.equal(response.headers.get("retry-after"), "1");
     await assertResponse(path, "post", response, 429);
   }
-});
-
-test("experimental queue responses and committed visibility follow the same contract", async t => {
-  const events = sdkPlayback(t);
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_EXPERIMENTAL_READ_WORKER: "true", COLLECTOR_BATCH_DELAY_MS: "200" });
-  const start = events[0];
-  assert.deepEqual(await server.post("/v1/events", JSON.stringify(start), 202), { accepted: true, queued: true });
-  assert.deepEqual(await server.post("/v1/events", JSON.stringify(start), 202), { accepted: true, queued: true });
-  const batch = await otlpPayload(events);
-  await server.post("/v1/logs", JSON.stringify(batch), 200);
-  let status = await server.get("/v1/ingestion");
-  assert.equal(status.mode, "durable_queue");
-  const deadline = Date.now() + 10000;
-  while (status.queue.pending_requests && Date.now() < deadline) {
-    await delay(20);
-    status = await server.get("/v1/ingestion");
-  }
-  assert.equal(status.queue.pending_requests, 0);
-  assert.equal(status.queue.failed, false);
-  const page = await server.get("/v1/events");
-  assert.deepEqual(page.events.map(record => record.event), events);
-  assert.equal(page.events[0].otlp, undefined, "the first native delivery keeps its original transport context");
-  assert.equal((await server.get("/v1/summary")).views, 1);
 });
 
 

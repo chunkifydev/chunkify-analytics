@@ -35,7 +35,6 @@ for (const [name, fallback, min, max] of [
     write_settings[`COLLECTOR_${name}`] = String(integer(`COLLECTOR_LOAD_${name}`, fallback, min, max));
   }
 }
-if (process.env.COLLECTOR_LOAD_DURABLE_QUEUE === "1") write_settings.COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE = "true";
 if (process.env.COLLECTOR_LOAD_READ_WORKER === "1") write_settings.COLLECTOR_EXPERIMENTAL_READ_WORKER = "true";
 const insertMode = process.env.COLLECTOR_LOAD_INSERT_MODE;
 if (insertMode !== undefined) {
@@ -65,16 +64,7 @@ const selected = process.env.COLLECTOR_LOAD_CASES?.split(",");
 for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure COLLECTOR_LOAD_* environment variables.`);
 for (const name of selected ?? []) if (!cases.some((item) => item.name === name)) throw new Error(`Unknown benchmark case: ${name}`);
 let plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, profile, queries, write_settings, ...item }));
-const compareQueue = integer("COLLECTOR_LOAD_COMPARE_QUEUE", 0, 0, 1) === 1;
 const compareReads = integer("COLLECTOR_LOAD_COMPARE_READS", 0, 0, 1) === 1;
-if (compareQueue && compareReads) throw new Error("Choose only one comparison so that one setting changes");
-if (compareQueue) {
-  if (plan.length !== 1) throw new Error("Queue comparison requires exactly one selected workload");
-  plan = [
-    { ...plan[0], name: `${plan[0].name}-direct`, write_settings: { ...write_settings, COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "false" } },
-    { ...plan[0], name: `${plan[0].name}-queued`, write_settings: { ...write_settings, COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true" } },
-  ];
-}
 if (compareReads) {
   if (plan.length !== 1) throw new Error("Read-worker comparison requires exactly one selected workload");
   plan = [
@@ -136,7 +126,7 @@ if (process.argv.includes("--list")) {
   const workload = await captureWorkload({ browserContext });
   report.workload = workload.description;
   await save();
-  const fixture = compareQueue || compareReads ? {} : undefined;
+  const fixture = compareReads ? {} : undefined;
   try {
   for (const config of plan) {
     console.error(`Measuring ${config.name} for ${config.seconds}s${config.preload ? ` after preloading ${config.preload} events` : ""}...`);

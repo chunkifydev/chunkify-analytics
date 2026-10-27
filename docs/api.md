@@ -5,8 +5,8 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | Method and path | Authorization | Response |
 | --- | --- | --- |
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
-| `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after commit; 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
-| `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch commits, including empty or duplicate-only batches. |
+| `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
+| `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch finishes storage, including empty batches. |
 | `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
 | `GET /v1/engagement` | `Authorization: Bearer READ_TOKEN` | Average playing time per attempt and observed reached-end count/rate. |
@@ -45,7 +45,10 @@ Every log is validated before storage. An invalid record rejects the entire
 batch with HTTP 400. Wire size, decompressed size, or record count violations return
 413. Unsupported content types or encodings return 415. OTLP errors use the JSON
 Status shape `{"message":"..."}`, including authentication and rate-limit errors.
-No partial export is accepted, and success is sent only after the transaction commits.
+All records must pass validation before storage. Success is sent only after storage
+finishes. Local storage commits the batch atomically. S3 uploads are independent,
+so a storage failure can leave some objects written; retrying can repeat events.
+See [storage behavior](storage.md#parquet-layout-and-writes).
 
 The raw-event API returns the canonical `event` and, for an event first received
 through OTLP, an additional `otlp` object:
@@ -61,8 +64,11 @@ through OTLP, an additional `otlp` object:
 `log_record` retains the original log object. `resource_logs` and `scope_logs`
 retain their original group fields, excluding the nested record/group arrays.
 Objects preserve JSON values, not original whitespace or key order. Native events
-have no `otlp` field. Deduplication is shared across formats: the first accepted
-payload and context win, and later duplicates do not enrich or replace them.
+have no `otlp` field. With local storage, deduplication is shared across formats:
+the first accepted payload and context win. Later duplicates do not enrich or
+replace them. With S3, every delivery is a separate row with its own context;
+repeated event IDs are not deduplicated. Native S3 writes always return 201 with
+`{"accepted":true,"duplicate":false}` on success.
 Both formats feed the same filters, pagination, and summary calculations.
 
 ### Flat event context and request IP
@@ -122,9 +128,10 @@ filter or GeoIP enrichment in this stage.
 
 Set `COLLECTOR_STORE_IP=false` and restart to omit IP fields for new events.
 Raw forwarding headers are neither stored nor logged, and normal request handling
-does not log IP values. First accepted delivery wins, including whether context
-was collected; retries never add or replace it. Retention and viewer deletion
-remove the event's context with its row.
+does not log IP values. Local storage preserves the first delivery's context,
+including whether context was collected; retries never add or replace it.
+S3 retains each delivery's context on its own row. Expiration removes an event's
+context with its row.
 
 ### Filters and pagination
 
@@ -150,7 +157,7 @@ request. `order` accepts `asc` or `desc` only on this route. Keep the same order
 with each cursor; changing it returns 400. Videos are ordered by `video_id`. A pagination sequence is limited to events already committed
 at its first page, so later arrivals do not shift pages or change video totals
 within that sequence. Start without a cursor to refresh. This is not an indefinite
-export snapshot; retention and deletion can remove records between requests.
+export snapshot; retention can remove records between requests.
 
 For example, run this from your dashboard backend or terminal, using a local
 `READ_TOKEN` environment variable containing the private token:
@@ -241,7 +248,7 @@ An ended reason on a snapshot does not count.
 With no views, both the average and ratio are null, while counts and total time
 are zero. With views but no measured time or observed end, these values are zero.
 All filters select the first start; matching later events can contribute even
-after the date window. Retention/deletion and missing browser delivery affect
+after the date window. Retention and missing browser delivery affect
 these metrics. Replays with a new view ID count as new attempts. Live videos and
 ongoing attempts can lower the reached-end rate. Seeking to the end can count,
 so this does not measure whether the whole video was watched.

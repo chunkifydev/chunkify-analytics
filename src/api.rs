@@ -284,20 +284,11 @@ async fn ingest(
         .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let event = read_json(request, app.max_body_bytes, false).await?;
     event::validate(&event)?;
-    let inserted = match app
+    let inserted = app
         .store
         .insert(&resolved.project, &resolved.key_id, event, context)
         .await?
-    {
-        crate::store::Receipt::Queued => {
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(json!({"accepted": true, "queued": true})),
-            )
-                .into_response());
-        }
-        crate::store::Receipt::Committed(count) => count > 0,
-    };
+        > 0;
     Ok((
         if inserted {
             StatusCode::CREATED
@@ -404,7 +395,6 @@ async fn events(
     ))
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
-    app.store.ensure_healthy()?;
     app.store
         .call("health", |db| {
             db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;

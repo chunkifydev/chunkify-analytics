@@ -46,7 +46,7 @@ async function prepareData(dir, binary, env, signal) {
     const adminEnv = { ...env, COLLECTOR_DATA_DIR: staging };
     const run = async args => {
       signal.throwIfAborted();
-      try { return (await exec(binary, args, { env: adminEnv, signal, timeout: 30000 })).stdout; }
+      try { return (await exec(binary, args, { env: adminEnv, cwd: staging, signal, timeout: 30000 })).stdout; }
       catch { throw new Error(`Collector ${args[0]} failed. Check that the executable matches your OS and this repository version.`); }
     };
     await run(['init']);
@@ -119,7 +119,7 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
     const state = await prepareData(dir, binary, env, signal);
     signal.throwIfAborted();
     collectorLog = createWriteStream(path.join(dir, 'collector.log'), { flags: 'a', mode: 0o600 });
-    child = spawn(binary, ['serve'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(binary, ['serve'], { env, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(collectorLog, { end: false }); child.stderr.pipe(collectorLog, { end: false });
     const collectorUrl = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`Collector did not start. See ${path.join(dir, 'collector.log')}.`)), 30000);

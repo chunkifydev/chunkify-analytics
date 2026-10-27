@@ -213,3 +213,44 @@ fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
     .unwrap();
     assert!(fixture.run(&["config", "check"]).status.success());
 }
+
+#[test]
+fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets() {
+    let fixture = Fixture::new();
+    let source = "[storage]\nbackend = 's3'\nurl = 's3://analytics/production/'\nendpoint = 'account.r2.cloudflarestorage.com'\nregion = 'auto'\naccess_key_id = 'test-access'\nsecret_access_key = 'private-test-secret'\nurl_style = 'path'\nuse_ssl = true\n";
+    std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+    let output = fixture.run(&["config", "check"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fixture.0.join("data").exists());
+    for invalid in [
+        source.replace("backend = 's3'", "backend = 'unknown'"),
+        source.replace(
+            "url = 's3://analytics/production/'",
+            "url = 'https://analytics/production/'",
+        ),
+        source.replace("secret_access_key = 'private-test-secret'", ""),
+        source.replace("url_style = 'path'", "url_style = 'unknown'"),
+        source.replace(
+            "account.r2.cloudflarestorage.com",
+            "https://account.r2.cloudflarestorage.com",
+        ),
+        format!("{source}\n[experimental]\ndurable_queue = true"),
+        format!("{source}\n[experimental]\nread_worker = true"),
+    ] {
+        std::fs::write(fixture.0.join("collector.toml"), invalid).unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert!(!output.status.success(), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test-secret"));
+    }
+    std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+    assert!(
+        fixture
+            .command()
+            .args(["config", "check"])
+            .env("COLLECTOR_S3_REGION", "us-east-1")
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+}

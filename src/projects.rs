@@ -81,7 +81,6 @@ pub struct Settings {
     pub retention_seconds: Option<u64>,
     pub ingest_per_second: Option<u32>,
     pub queue_bytes: Option<usize>,
-    pub spool_bytes: Option<usize>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -179,13 +178,10 @@ pub fn validate(projects: &[Project]) -> Result<(), String> {
         if project.settings.ingest_per_second == Some(0) {
             return Err("Project ingest rate must be positive".into());
         }
-        for value in [project.settings.queue_bytes, project.settings.spool_bytes]
-            .into_iter()
-            .flatten()
+        if let Some(value) = project.settings.queue_bytes
+            && !(4096..=268435456).contains(&value)
         {
-            if !(4096..=268435456).contains(&value) {
-                return Err("Project queue limits must be between 4096 and 268435456 bytes".into());
-            }
+            return Err("Project queue limits must be between 4096 and 268435456 bytes".into());
         }
         if let Some(origins) = &project.settings.allowed_origins {
             for origin in origins {
@@ -233,10 +229,9 @@ pub struct Access {
     budget: Arc<Semaphore>,
     requests: Arc<Semaphore>,
     pub queue_bytes: usize,
-    pub spool_bytes: usize,
 }
 
-// Held until the prepared write or durable acknowledgement is complete.
+// Held until the prepared write is complete.
 pub struct Admission {
     _bytes: OwnedSemaphorePermit,
     _request: OwnedSemaphorePermit,
@@ -289,7 +284,6 @@ impl Registry {
             projects: HashMap::new(),
             credentials: RwLock::new(HashMap::new()),
         };
-        let global_spool = config.spool.as_ref().map_or(67108864, |s| s.max_bytes);
         for project in projects {
             let queue_bytes = project
                 .settings
@@ -311,11 +305,6 @@ impl Registry {
                 budget: Arc::new(Semaphore::new(queue_bytes)),
                 queue_bytes,
                 requests: Arc::new(Semaphore::new((config.batch.queue_requests / count).max(1))),
-                spool_bytes: project
-                    .settings
-                    .spool_bytes
-                    .unwrap_or(global_spool / count)
-                    .min(global_spool),
             });
             for key in project.keys {
                 registry

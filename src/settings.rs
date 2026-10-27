@@ -4,6 +4,30 @@ use std::{collections::HashMap, env, ffi::OsString, path::Path};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
+    ("COLLECTOR_DATA_DIR", "data_dir"),
+    ("COLLECTOR_BIND", "server.bind"),
+    ("COLLECTOR_S3_URL", "storage.url"),
+    ("COLLECTOR_S3_ENDPOINT", "storage.endpoint"),
+    ("COLLECTOR_S3_REGION", "storage.region"),
+    ("COLLECTOR_S3_ACCESS_KEY_ID", "storage.access_key_id"),
+    (
+        "COLLECTOR_S3_SECRET_ACCESS_KEY",
+        "storage.secret_access_key",
+    ),
+    ("COLLECTOR_S3_SESSION_TOKEN", "storage.session_token"),
+    ("COLLECTOR_S3_URL_STYLE", "storage.url_style"),
+    ("COLLECTOR_S3_USE_SSL", "storage.use_ssl"),
+    ("CHUNKIFY_MCP_COLLECTOR_URL", "mcp.collector_url"),
+    ("CHUNKIFY_MCP_READ_TOKEN", "mcp.read_token"),
+];
+
+fn environment_field(name: &str) -> Option<&'static str> {
+    ENVIRONMENT_OVERRIDES
+        .iter()
+        .find_map(|(variable, field)| (*variable == name).then_some(*field))
+}
+
 #[derive(Default)]
 pub struct Settings {
     values: HashMap<String, OsString>,
@@ -19,8 +43,10 @@ impl Settings {
                 for entry in entries {
                     let (name, value) = entry
                         .map_err(|_| format!("Invalid environment file: {}", file.display()))?;
-                    if declared.insert(name.clone()) {
-                        settings.values.insert(name, value.into());
+                    if declared.insert(name.clone())
+                        && let Some(field) = environment_field(&name)
+                    {
+                        settings.values.insert(field.into(), value.into());
                     }
                 }
             }
@@ -31,8 +57,10 @@ impl Settings {
             }
         }
         for (name, value) in env::vars_os() {
-            if let Ok(name) = name.into_string() {
-                settings.values.insert(name, value);
+            if let Ok(name) = name.into_string()
+                && let Some(field) = environment_field(&name)
+            {
+                settings.values.insert(field.into(), value);
             }
         }
         Ok(settings)

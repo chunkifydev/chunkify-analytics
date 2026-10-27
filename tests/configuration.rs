@@ -42,14 +42,14 @@ fn dotenv_is_automatic_and_process_environment_has_priority() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.0.join(".env"),
-        "COLLECTOR_DATA_DIR=from-dotenv\nCOLLECTOR_RETENTION_SECONDS=invalid\n",
+        "COLLECTOR_DATA_DIR=from-dotenv\nCOLLECTOR_BIND=invalid\n",
     )
     .unwrap();
     assert!(!fixture.run(&["config", "check"]).status.success());
     let output = fixture
         .command()
         .args(["init"])
-        .env("COLLECTOR_RETENTION_SECONDS", "0")
+        .env("COLLECTOR_BIND", "127.0.0.1:4174")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -59,16 +59,8 @@ fn dotenv_is_automatic_and_process_environment_has_priority() {
 #[test]
 fn an_explicit_env_file_replaces_dotenv_and_cli_overrides_its_data_directory() {
     let fixture = Fixture::new();
-    std::fs::write(
-        fixture.0.join(".env"),
-        "COLLECTOR_RETENTION_SECONDS=invalid\n",
-    )
-    .unwrap();
-    std::fs::write(
-        fixture.0.join("custom.env"),
-        "COLLECTOR_DATA_DIR=unused\nCOLLECTOR_STORE_IP=false\n",
-    )
-    .unwrap();
+    std::fs::write(fixture.0.join(".env"), "COLLECTOR_BIND=invalid\n").unwrap();
+    std::fs::write(fixture.0.join("custom.env"), "COLLECTOR_DATA_DIR=unused\n").unwrap();
     let output = fixture.run(&["--env-file", "custom.env", "init", "--data-dir", "chosen"]);
     assert!(output.status.success(), "{output:?}");
     assert!(fixture.0.join("chosen/keys.json").is_file());
@@ -195,6 +187,56 @@ fn toml_sample_is_complete_and_does_not_create_state_when_checked() {
 }
 
 #[test]
+fn application_settings_are_toml_only_except_deployment_overrides() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("collector.toml"),
+        include_str!("../collector.toml.example"),
+    )
+    .unwrap();
+    let removed = [
+        "COLLECTOR_STORAGE_BACKEND",
+        "COLLECTOR_LOCAL_PATH",
+        "COLLECTOR_PROFILE",
+        "COLLECTOR_ALLOWED_ORIGINS",
+        "COLLECTOR_STORE_IP",
+        "COLLECTOR_TRUSTED_PROXIES",
+        "COLLECTOR_MAX_BODY_BYTES",
+        "COLLECTOR_MAX_OTLP_RECORDS",
+        "COLLECTOR_INGEST_PER_SECOND",
+        "COLLECTOR_RETENTION_SECONDS",
+        "COLLECTOR_RETENTION_INTERVAL_SECONDS",
+        "COLLECTOR_BATCH_MAX_EVENTS",
+        "COLLECTOR_BATCH_MAX_BYTES",
+        "COLLECTOR_BATCH_DELAY_MS",
+        "COLLECTOR_QUEUE_MAX_BYTES",
+        "COLLECTOR_QUEUE_MAX_REQUESTS",
+        "COLLECTOR_INSERT_MODE",
+        "COLLECTOR_DUCKDB_THREADS",
+        "COLLECTOR_CHECKPOINT_THRESHOLD_MIB",
+        "COLLECTOR_EXPERIMENTAL_READ_WORKER",
+        "COLLECTOR_MCP_ENABLED",
+        "COLLECTOR_MCP_ALLOWED_HOSTS",
+    ];
+    std::fs::write(
+        fixture.0.join(".env"),
+        removed
+            .iter()
+            .map(|key| format!("{key}=invalid\n"))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let output = fixture
+        .command()
+        .args(["config", "check"])
+        .envs(removed.iter().map(|key| (*key, "invalid")))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fixture.0.join("data").exists());
+}
+
+#[test]
 fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
     let fixture = Fixture::new();
     for source in [
@@ -253,4 +295,49 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
             .status
             .success()
     );
+}
+
+#[test]
+fn s3_environment_overrides_toml_and_validates_addressing() {
+    let fixture = Fixture::new();
+    std::fs::write(
+        fixture.0.join("collector.toml"),
+        "[storage]\nbackend = 's3'\nurl_style = 'invalid'\n",
+    )
+    .unwrap();
+    let overrides = [
+        ("COLLECTOR_S3_URL", "s3://analytics/production/"),
+        ("COLLECTOR_S3_ENDPOINT", "account.r2.cloudflarestorage.com"),
+        ("COLLECTOR_S3_REGION", "auto"),
+        ("COLLECTOR_S3_ACCESS_KEY_ID", "test-access"),
+        ("COLLECTOR_S3_SECRET_ACCESS_KEY", "private-test-secret"),
+        ("COLLECTOR_S3_SESSION_TOKEN", "private-test-token"),
+        ("COLLECTOR_S3_URL_STYLE", "vhost"),
+        ("COLLECTOR_S3_USE_SSL", "true"),
+    ];
+    let output = fixture
+        .command()
+        .args(["config", "check"])
+        .envs(overrides)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    for (key, value) in [
+        ("COLLECTOR_S3_URL_STYLE", "invalid"),
+        ("COLLECTOR_S3_USE_SSL", "invalid"),
+        ("COLLECTOR_S3_URL", "https://invalid"),
+        ("COLLECTOR_S3_ENDPOINT", "https://invalid"),
+    ] {
+        let output = fixture
+            .command()
+            .args(["config", "check"])
+            .envs(overrides)
+            .env(key, value)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("private-test-secret"));
+        assert!(!error.contains("private-test-token"));
+    }
 }

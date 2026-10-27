@@ -25,6 +25,9 @@ const profile = integer("COLLECTOR_LOAD_PROFILE", 0, 0, 1) === 1;
 const queries = integer("COLLECTOR_LOAD_QUERIES", 1, 0, 1) === 1;
 const browserContext = integer("COLLECTOR_LOAD_BROWSER_CONTEXT", 0, 0, 1) === 1;
 const write_settings = {};
+const writeFields = { BATCH_MAX_EVENTS: "batch.max_events", BATCH_MAX_BYTES: "batch.max_bytes",
+  BATCH_DELAY_MS: "batch.delay_ms", QUEUE_MAX_BYTES: "batch.queue_max_bytes", QUEUE_MAX_REQUESTS: "batch.queue_max_requests",
+  CHECKPOINT_THRESHOLD_MIB: "duckdb.checkpoint_threshold_mib" };
 for (const [name, fallback, min, max] of [
   ["BATCH_MAX_EVENTS", 100, 1, 10000], ["BATCH_MAX_BYTES", 1048576, 1, 67108864],
   ["BATCH_DELAY_MS", 10, 0, 1000], ["QUEUE_MAX_BYTES", 16777216, 1, 268435456],
@@ -32,14 +35,14 @@ for (const [name, fallback, min, max] of [
   ["CHECKPOINT_THRESHOLD_MIB", 16, 1, 1024],
 ]) {
   if (process.env[`COLLECTOR_LOAD_${name}`] !== undefined) {
-    write_settings[`COLLECTOR_${name}`] = String(integer(`COLLECTOR_LOAD_${name}`, fallback, min, max));
+    write_settings[writeFields[name]] = String(integer(`COLLECTOR_LOAD_${name}`, fallback, min, max));
   }
 }
-if (process.env.COLLECTOR_LOAD_READ_WORKER === "1") write_settings.COLLECTOR_EXPERIMENTAL_READ_WORKER = "true";
+if (process.env.COLLECTOR_LOAD_READ_WORKER === "1") write_settings["experimental.read_worker"] = "true";
 const insertMode = process.env.COLLECTOR_LOAD_INSERT_MODE;
 if (insertMode !== undefined) {
   if (!["row", "bulk"].includes(insertMode)) throw new Error("COLLECTOR_LOAD_INSERT_MODE must be row or bulk");
-  write_settings.COLLECTOR_INSERT_MODE = insertMode;
+  write_settings["batch.insert_mode"] = insertMode;
 }
 const cases = [
   ...[100, 200, 400, 500, 750, 800, 1000, 1600, 2000, 3000, 4000].map((rate) => ({ name: `native-${rate}`, format: "native", rate })),
@@ -68,8 +71,8 @@ const compareReads = integer("COLLECTOR_LOAD_COMPARE_READS", 0, 0, 1) === 1;
 if (compareReads) {
   if (plan.length !== 1) throw new Error("Read-worker comparison requires exactly one selected workload");
   plan = [
-    { ...plan[0], name: `${plan[0].name}-shared-worker`, write_settings: { ...write_settings, COLLECTOR_EXPERIMENTAL_READ_WORKER: "false" } },
-    { ...plan[0], name: `${plan[0].name}-separate-reader`, write_settings: { ...write_settings, COLLECTOR_EXPERIMENTAL_READ_WORKER: "true" } },
+    { ...plan[0], name: `${plan[0].name}-shared-worker`, write_settings: { ...write_settings, "experimental.read_worker": "false" } },
+    { ...plan[0], name: `${plan[0].name}-separate-reader`, write_settings: { ...write_settings, "experimental.read_worker": "true" } },
   ];
 }
 if (process.argv.includes("--list")) {

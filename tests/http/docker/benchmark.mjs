@@ -168,9 +168,9 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     assert.ok(fixture.sent.length <= safety.max_unique_events, "fixture exceeds the unique-event safety limit");
   }
   if (await hostFreeBytes() < (safety.min_free_disk_mib + safety.max_data_mib) * mib) throw new Error("Benchmark requires its data budget plus the free-disk floor before starting");
-  const settings = { COLLECTOR_INGEST_PER_SECOND: String(config.rate_limit), COLLECTOR_MAX_BODY_BYTES: "1048576",
-    COLLECTOR_MAX_OTLP_RECORDS: "100", COLLECTOR_RETENTION_SECONDS: "2592000", COLLECTOR_RETENTION_INTERVAL_SECONDS: "5",
-    COLLECTOR_PROFILE: String(config.profile), ...config.write_settings };
+  const settings = { "server.ingest_per_second": String(config.rate_limit), "server.max_body_bytes": "1048576",
+    "server.max_otlp_records": "100", "retention.seconds": "2592000", "retention.interval_seconds": "5",
+    "profile": String(config.profile), ...config.write_settings };
   const server = await containerCollector({ resources, settings, seed: fixture?.volume });
   const sent = new Map();
   const acknowledged = new Set();
@@ -393,7 +393,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     const collectorProfile = profiles.find((profile) => !profile.worker || profile.worker === "writer") ?? null;
     const readerProfile = profiles.find((profile) => profile.worker === "reader") ?? null;
     if (config.profile && config.shutdown === "stop") assert.ok(collectorProfile, "collector profile must be available after graceful shutdown");
-    if (config.profile && config.shutdown === "stop" && settings.COLLECTOR_EXPERIMENTAL_READ_WORKER === "true") assert.ok(readerProfile, "separate reader profile must be available after graceful shutdown");
+    if (config.profile && config.shutdown === "stop" && settings["experimental.read_worker"] === "true") assert.ok(readerProfile, "separate reader profile must be available after graceful shutdown");
     const shutdownMs = performance.now() - stopStart;
     assert.equal(stopped.OOMKilled, false, "benchmark must stay within memory limits");
     assert.equal(stopped.ExitCode, config.shutdown === "kill" ? 137 : 0);

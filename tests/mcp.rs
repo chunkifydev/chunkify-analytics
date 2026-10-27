@@ -42,7 +42,7 @@ async fn connect(url: &str, token: &str, modern: bool) -> Mcp {
         .env("CHUNKIFY_MCP_COLLECTOR_URL", url)
         .env("CHUNKIFY_MCP_READ_TOKEN", token)
         // This would make normal collector configuration fail. MCP must not load it.
-        .env("COLLECTOR_RETENTION_SECONDS", "invalid")
+        .env("COLLECTOR_BIND", "invalid")
         .env("COLLECTOR_DATA_DIR", "/unused-mcp-data");
     let transport = TokioChildProcess::new(tokio::process::Command::from(command)).unwrap();
     let mode = if modern {
@@ -155,12 +155,25 @@ impl Collector {
             "Live website",
         ]))
         .unwrap();
+        let mut config = "retention.seconds = 0\n".to_owned();
+        for (field, value) in settings {
+            let value = match *field {
+                "server.allowed_origins" | "mcp.allowed_hosts" => {
+                    serde_json::to_string(&value.split(',').collect::<Vec<_>>()).unwrap()
+                }
+                "mcp.enabled" => value.to_string(),
+                _ => panic!("Unknown test setting"),
+            };
+            config.push_str(&format!("{field} = {value}\n"));
+        }
+        let config_file = directory.join("collector.toml");
+        std::fs::write(&config_file, config).unwrap();
         let mut child = clean_command()
+            .arg("--config")
+            .arg(config_file)
             .arg("serve")
             .env("COLLECTOR_DATA_DIR", &directory)
             .env("COLLECTOR_BIND", "127.0.0.1:0")
-            .env("COLLECTOR_RETENTION_SECONDS", "0")
-            .envs(settings.iter().copied())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -918,7 +931,7 @@ async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
 #[tokio::test]
 async fn embedded_http_authentication_origins_hosts_and_message_limits() {
     let collector =
-        Collector::with_settings(&[("COLLECTOR_ALLOWED_ORIGINS", "https://allowed.example")]);
+        Collector::with_settings(&[("server.allowed_origins", "https://allowed.example")]);
     let endpoint = format!("{}/mcp", collector.url);
     let http = reqwest::Client::new();
     let initialize = json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
@@ -1043,7 +1056,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
 
 #[tokio::test]
 async fn embedded_http_can_be_disabled_and_supports_an_explicit_ingress_hostname() {
-    let disabled = Collector::with_settings(&[("COLLECTOR_MCP_ENABLED", "false")]);
+    let disabled = Collector::with_settings(&[("mcp.enabled", "false")]);
     let http = reqwest::Client::new();
     assert_eq!(
         http.post(format!("{}/mcp", disabled.url))
@@ -1053,8 +1066,7 @@ async fn embedded_http_can_be_disabled_and_supports_an_explicit_ingress_hostname
             .status(),
         404
     );
-    let collector =
-        Collector::with_settings(&[("COLLECTOR_MCP_ALLOWED_HOSTS", "analytics.example")]);
+    let collector = Collector::with_settings(&[("mcp.allowed_hosts", "analytics.example")]);
     let request = || {
         http.post(format!("{}/mcp", collector.url))
         .bearer_auth(collector.keys["read_token"].as_str().unwrap())

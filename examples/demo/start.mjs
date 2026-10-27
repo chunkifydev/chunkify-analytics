@@ -113,10 +113,10 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COLLECTOR_')));
     Object.assign(env, {
       COLLECTOR_DATA_DIR: dir, COLLECTOR_BIND: '127.0.0.1:0',
-      COLLECTOR_ALLOWED_ORIGINS: [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'].join(','),
-      COLLECTOR_DUCKDB_THREADS: '1', COLLECTOR_RETENTION_SECONDS: '0', COLLECTOR_INGEST_PER_SECOND: '10000',
     });
     const state = await prepareData(dir, binary, env, signal);
+    const origins = [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'];
+    await writeFile(path.join(dir, 'collector.toml'), `server.allowed_origins = ${JSON.stringify(origins)}\nserver.ingest_per_second = 10000\nduckdb.threads = 1\nretention.seconds = 0\n`, { mode: 0o600 });
     signal.throwIfAborted();
     collectorLog = createWriteStream(path.join(dir, 'collector.log'), { flags: 'a', mode: 0o600 });
     child = spawn(binary, ['serve'], { env, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });

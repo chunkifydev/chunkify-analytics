@@ -12,14 +12,17 @@ import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
+import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
 async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-openapi-test-"));
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("COLLECTOR_")));
-  const env = { ...inherited, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
-    COLLECTOR_ALLOWED_ORIGINS: "https://player.example", COLLECTOR_RETENTION_SECONDS: "0", ...settings };
+  const configuration = { ...inherited, "data_dir": directory, "server.bind": "127.0.0.1:0",
+    "server.allowed_origins": "https://player.example", "retention.seconds": "0", ...settings };
+  await writeConfig(directory, configuration);
+  const env = collectorEnvironment(inherited);
   let child;
   let closed;
   let logs = "";
@@ -222,7 +225,7 @@ test("OTLP gzip, all seven SDK events and cross-transport duplicates match the c
 
 test("documented authentication, CORS and protocol errors match the API", async t => {
   const event = sdkPlayback(t)[0];
-  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "8192", COLLECTOR_MAX_OTLP_RECORDS: "1" });
+  const server = await collector(t, { "server.max_body_bytes": "8192", "server.max_otlp_records": "1" });
   for (const path of ["/v1/events", "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos", "/v1/ingestion"]) {
     await server.get(path, 401, {});
     await server.get(path, 401, { Authorization: `Bearer ${server.keys.ingest_key}` });
@@ -259,7 +262,7 @@ test("documented authentication, CORS and protocol errors match the API", async 
 });
 
 test("rate limit responses use the documented native and OTLP error envelopes", async t => {
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1" });
+  const server = await collector(t, { "server.ingest_per_second": "1" });
   await server.post("/v1/logs", "{}", 200);
   for (const path of ["/v1/events", "/v1/logs"]) {
     const response = await fetch(`${server.url}${path}`, { method: "POST", body: "{}",
@@ -272,7 +275,7 @@ test("rate limit responses use the documented native and OTLP error envelopes", 
 
 for (const separateReads of [false, true]) {
   test(`timeseries returns bounded UTC start cohorts with summary parity (separate reads: ${separateReads})`, async t => {
-    const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" });
+    const server = await collector(t, { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" });
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (at, viewer, video = "video-a", browser = "Chrome") => ({
       ...sample, event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
@@ -354,7 +357,7 @@ for (const separateReads of [false, true]) {
 
 for (const separateReads of [false, true]) {
   test(`quality measures each view once with explicit coverage (separate reads: ${separateReads})`, async t => {
-    const settings = { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" };
+    const settings = { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" };
     const server = await collector(t, settings);
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (video = "a", browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
@@ -466,7 +469,7 @@ for (const separateReads of [false, true]) {
 
 for (const separateReads of [false, true]) {
   test(`engagement uses all attempts and the selected final event (separate reads: ${separateReads})`, async t => {
-    const settings = { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" };
+    const settings = { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" };
     const server = await collector(t, settings);
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (video, browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({

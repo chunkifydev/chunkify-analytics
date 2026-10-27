@@ -334,7 +334,7 @@
       "post": {
         "operationId": "ingestEvent",
         "summary": "Ingest one native Chunkify event",
-        "description": "All records belong to the project resolved from the ingest key. Client-provided project or key IDs cannot override this scope. Project and installation rate and memory-buffer limits apply. Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with COLLECTOR_MAX_BODY_BYTES. Extra fields are preserved. Local storage acknowledges after the DuckDB transaction commits and enforces uniqueness by (project_id, event_id), including across keys and native/OTLP delivery. The first payload and context win. S3 acknowledges after Parquet uploads finish and stores repeated event IDs as separate rows without deduplication. A failed multi-object batch can leave some objects written.",
+        "description": "All records belong to the project resolved from the ingest key. Client-provided project or key IDs cannot override this scope. Project and installation rate and memory-buffer limits apply. Requires application/json; native gzip is unsupported. Default maximum body is 65536 bytes, configurable with server.max_body_bytes. Extra fields are preserved. Local storage acknowledges after the DuckDB transaction commits and enforces uniqueness by (project_id, event_id), including across keys and native/OTLP delivery. The first payload and context win. S3 acknowledges after Parquet uploads finish and stores repeated event IDs as separate rows without deduplication. A failed multi-object batch can leave some objects written.",
         "tags": [
           "Ingestion"
         ],
@@ -665,7 +665,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Optional browser origin. When supplied it must exactly match COLLECTOR_ALLOWED_ORIGINS. Origin-less server requests are allowed with the ingest key.",
+            "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the ingest key.",
             "required": true
           },
           {
@@ -1096,7 +1096,7 @@
             "schema": {
               "type": "string"
             },
-            "description": "Optional browser origin. When supplied it must exactly match COLLECTOR_ALLOWED_ORIGINS. Origin-less server requests are allowed with the ingest key.",
+            "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the ingest key.",
             "required": true
           },
           {
@@ -2003,7 +2003,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Optional browser origin. When supplied it must exactly match COLLECTOR_ALLOWED_ORIGINS. Origin-less server requests are allowed with the ingest key."
+        "description": "Optional browser origin. When supplied it must exactly match server.allowed_origins. Origin-less server requests are allowed with the ingest key."
       },
       "identity_encoding": {
         "name": "Content-Encoding",
@@ -2024,7 +2024,7 @@
             "gzip"
           ]
         },
-        "description": "Optional gzip. Both compressed and decompressed body sizes are bounded by COLLECTOR_MAX_BODY_BYTES, default 65536 bytes."
+        "description": "Optional gzip. Both compressed and decompressed body sizes are bounded by server.max_body_bytes, default 65536 bytes."
       },
       "timeseries_from": {
         "name": "from",
@@ -4203,7 +4203,7 @@
           }
         },
         "required": [],
-        "description": "OTLP/HTTP JSON logs only. An empty request is valid. Default maximum 100 log records across all resources/scopes, configurable with COLLECTOR_MAX_OTLP_RECORDS. Every log must normalize to AnalyticsEvent; JSON Schema alone cannot express this cross-format validation."
+        "description": "OTLP/HTTP JSON logs only. An empty request is valid. Default maximum 100 log records across all resources/scopes, configurable with server.max_otlp_records. Every log must normalize to AnalyticsEvent; JSON Schema alone cannot express this cross-format validation."
       },
       "StoredOtlpContext": {
         "type": "object",

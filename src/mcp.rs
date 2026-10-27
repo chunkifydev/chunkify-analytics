@@ -20,11 +20,11 @@ const INSTRUCTIONS: &str = "Read-only access to one authenticated Chunkify proje
 
 pub async fn run(settings: &crate::settings::Settings) -> Result<(), Box<dyn std::error::Error>> {
     let url = settings
-        .var("CHUNKIFY_MCP_COLLECTOR_URL")
-        .map_err(|_| "Set CHUNKIFY_MCP_COLLECTOR_URL for the MCP companion")?;
+        .var("mcp.collector_url")
+        .map_err(|_| "Set mcp.collector_url for the MCP companion")?;
     let token = settings
-        .var("CHUNKIFY_MCP_READ_TOKEN")
-        .map_err(|_| "Set CHUNKIFY_MCP_READ_TOKEN to a private project read token")?;
+        .var("mcp.read_token")
+        .map_err(|_| "Set mcp.read_token to a private project read token")?;
     let companion = Companion::new(&url, &token)?;
     // Bound entire protocol messages before parsing, not only tool arguments.
     // Invalid or oversized frames close the local connection without echoing input.
@@ -62,7 +62,7 @@ struct Companion {
 
 impl Companion {
     fn new(url: &str, token: &str) -> Result<Self, &'static str> {
-        let mut url = Url::parse(url).map_err(|_| "Invalid CHUNKIFY_MCP_COLLECTOR_URL")?;
+        let mut url = Url::parse(url).map_err(|_| "Invalid mcp.collector_url")?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -77,10 +77,10 @@ impl Companion {
         }
         if token.is_empty() || token.len() > 4096 || token.bytes().any(|c| c.is_ascii_whitespace())
         {
-            return Err("Invalid CHUNKIFY_MCP_READ_TOKEN");
+            return Err("Invalid mcp.read_token");
         }
         let mut authorization = header::HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| "Invalid CHUNKIFY_MCP_READ_TOKEN")?;
+            .map_err(|_| "Invalid mcp.read_token")?;
         authorization.set_sensitive(true);
         let mut headers = header::HeaderMap::new();
         headers.insert(header::AUTHORIZATION, authorization);

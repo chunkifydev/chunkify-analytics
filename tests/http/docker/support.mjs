@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
+import { configSource } from "../configuration.mjs";
 
 const execute = promisify(execFile);
 export const image = process.env.COLLECTOR_IMAGE ?? "chunkify-analytics:test";
@@ -28,7 +29,6 @@ export async function containerCollector({ settings = {}, resources = [], seed }
       await docker(["run", "-d", "--name", name, "--read-only", "--tmpfs", "/tmp:rw,nosuid,noexec,size=64m",
         "--cap-drop=ALL", "--security-opt=no-new-privileges", "-p", "127.0.0.1::4174",
         "--mount", `type=volume,src=${volume},dst=/data`,
-        ...Object.entries(settings).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
         ...resources, image]);
       const address = await docker(["port", name, "4174/tcp"]);
       server.url = `http://${address}`;
@@ -71,7 +71,10 @@ export async function containerCollector({ settings = {}, resources = [], seed }
   await docker(["volume", "create", volume]);
   try {
     if (seed) await copyVolume(seed, volume);
-    else await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data`, image, "init"]);
+    await docker(["run", "--rm", "--user=0:0", "--network=none", "--mount", `type=volume,src=${volume},dst=/data`,
+      "--entrypoint", "sh", image, "-c", 'umask 077; printf %s "$1" > /data/collector.toml; chown 10001:10001 /data/collector.toml',
+      "sh", configSource(settings)]);
+    if (!seed) await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data`, image, "init"]);
     // Local administrator access to the documented key file, never printed.
     server.keys = JSON.parse(await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data,readonly`,
       "--entrypoint", "cat", image, "/data/keys.json"]));

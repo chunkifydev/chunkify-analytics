@@ -27,7 +27,7 @@ test("benchmark distinguishes duplicate records from new events and verifies pla
 test("benchmark reports rate-limited OTLP records separately from accepted records", { timeout: 120000 }, async () => {
   const result = await measure({ name: "rejection-check", format: "otlp", batch_size: 5,
     rate: 40, rate_limit: 10, seconds: 2, profile: true,
-    write_settings: { COLLECTOR_EXPERIMENTAL_READ_WORKER: "true" } }, await captureWorkload());
+    write_settings: { "experimental.read_worker": "true" } }, await captureWorkload());
   assert.equal(result.requests.scheduled, 80);
   assert.equal(result.requests.sent + result.requests.skipped_late + result.requests.skipped_concurrency, 80);
   assert.ok(result.requests.failures[429] > 0);

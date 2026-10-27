@@ -48,7 +48,7 @@ Status shape `{"message":"..."}`, including authentication and rate-limit errors
 All records must pass validation before storage. Success is sent only after storage
 finishes. Local storage commits the batch atomically. S3 uploads are independent,
 so a storage failure can leave some objects written; retrying can repeat events.
-See [storage behavior](storage.md#parquet-layout-and-writes).
+See [storage behavior](storage.md#events-and-expiration).
 
 The raw-event API returns the canonical `event` and, for an event first received
 through OTLP, an additional `otlp` object:
@@ -97,41 +97,25 @@ verified identity. Only the collector supplies `peer_ip`, `client_ip`, and
 browser context is still available. Without either source, `event_context` is
 omitted. This context schema has its own `schema_version: 1`.
 
-`peer_ip` comes from the TCP connection. Without a trusted proxy, `client_ip`
-equals `peer_ip` and `client_ip_source` is `connection`. Browser-provided fields
-cannot replace this collector-derived context. IPv4-mapped IPv6 addresses are
-stored as IPv4. The collector makes no outbound IP lookup and does not infer
-viewer identity or location from the address.
+`peer_ip` identifies the HTTP sender. Without a trusted proxy, `client_ip` is the
+same address. With a proxy, configure its addresses under `[server]`:
 
-For a reverse proxy, configure only addresses or CIDRs you control. For example,
-`COLLECTOR_TRUSTED_PROXIES=10.20.1.2,2001:db8:abcd::/48`. Ensure each trusted proxy
-overwrites incoming `X-Forwarded-For` with the actual source IP, or correctly
-appends that source to the existing chain. Restrict direct access to the collector
-where possible. Broad trust ranges can allow clients to forge their address.
+```toml
+trusted_proxies = ["10.20.1.2", "2001:db8:abcd::/48"]
+```
 
-The collector reads `X-Forwarded-For` only when the direct peer is trusted. It
-combines all header lines in order, walks from right to left, skips configured
-trusted hops, and selects the first untrusted address. This follows the
-[trusted-proxy selection described by MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For#selecting_an_ip_address).
-Only literal IPv4 or bare IPv6 entries are accepted, with at most 32 addresses
-and 4096 bytes across the header values. Missing, malformed, excessive, or entirely
-trusted chains leave `client_ip` and `client_ip_source` null while retaining
-`peer_ip`. The event is still accepted. `Forwarded`, `X-Real-IP`, and
-`CF-Connecting-IP` are ignored; configure the proxy to supply `X-Forwarded-For`.
+Trusted proxies must supply the actual client through `X-Forwarded-For`.
+The collector selects the first untrusted address from the right. Missing or
+invalid forwarding information leaves `client_ip` unavailable; the event is
+still accepted. Other forwarding headers are ignored.
 
-The IP describes the HTTP sender. When a gateway batches multiple viewers' events,
-the request context describes that gateway for every event in the batch. It cannot
-recover those viewers' individual IPs. NAT, Docker networking and VPNs can also
-change the visible address. Supplied `viewer_id` remains the basis for unique-viewer
-counts. IP data is available only through the private raw-event API, with no IP
-filter or GeoIP enrichment in this stage.
+IP context describes the request sender, including gateways that batch events.
+It does not identify individual viewers. Set `store_ip = false` under `[server]`
+and restart to omit it from new events. This does not erase existing context or
+IP values supplied inside event payloads.
 
-Set `COLLECTOR_STORE_IP=false` and restart to omit IP fields for new events.
-Raw forwarding headers are neither stored nor logged, and normal request handling
-does not log IP values. Local storage preserves the first delivery's context,
-including whether context was collected; retries never add or replace it.
-S3 retains each delivery's context on its own row. Expiration removes an event's
-context with its row.
+Local storage keeps the first delivery's context. S3 keeps each delivery's
+context separately. Expiration removes context with its event.
 
 ### Filters and pagination
 
@@ -140,7 +124,7 @@ All read endpoints accept `from`, `to`, `video_id`, `viewer_id`, `browser_name`,
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
 
-Browser and OS names use exact, case-sensitive matching and accept 1–64 Unicode
+Browser and OS names use exact, case-sensitive matching and accept 1 to 64 Unicode
 characters. Device type accepts `desktop`, `mobile`, `tablet`, or `unknown`.
 Multiple filters combine with AND. Missing, null, and nonstring context values
 do not match an explicit filter. `device_type=unknown` matches only a stored
@@ -192,7 +176,7 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
 ### Hourly and daily charts
 
 `GET /v1/timeseries` returns the same metrics grouped by the time each view
-started. Supply `from`, `to` and `interval=hour` or `interval=day`. The existing
+started. Supply `from`, `to` and `interval=hour` or `interval=day`. The
 video, viewer, browser, OS and device filters also apply. The project is selected
 by the private read token.
 
@@ -233,10 +217,8 @@ curl --get 'http://127.0.0.1:4174/v1/engagement' \
 }
 ```
 
-This example represents four playback attempts, 120 seconds of total playing
-time, 30 seconds per attempt on average, and one attempt reaching the end: 25%.
 The average uses all selected attempts, including failed and ongoing views.
-It is not the average per unique viewer. Label it **Average watch time per attempt**.
+Label it **Average watch time per attempt**.
 
 The collector uses one final measurement per view, or the latest snapshot if
 there is no final event. Missing values contribute zero, as in summary. The
@@ -310,7 +292,3 @@ A final null value stays unknown. All filters select the first retained start;
 matching later measurements/errors contribute even after `to`. Start-only views
 have no startup/buffering sample. Views without a retained start are excluded.
 The MCP server provides the same result through `get_quality`.
-
-The server stores receipt time separately for retention and operations.
-Server operational messages use stdout/stderr and contain no keys. CLI commands
-that create or rotate project credentials return new secrets once on stdout.

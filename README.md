@@ -262,144 +262,56 @@ which events contribute to each report.
 A [sample dashboard](examples/dashboard/README.md) is included. For a native
 setup with synthetic events and a player, see the [local demo](examples/demo/README.md).
 
-## Connect Claude, Codex, or Cursor with MCP
+## Connect an MCP client
 
-MCP runs inside the collector process by default. Configure an MCP client that
-supports Streamable HTTP and a bearer-token header with:
+Connect an HTTP MCP client to `http://127.0.0.1:4174/mcp` with the header
+`Authorization: Bearer YOUR_PRIVATE_PROJECT_READ_TOKEN`. Use your deployed HTTPS
+address for remote access and add its hostname to `[mcp].allowed_hosts`.
 
-```text
-URL: http://127.0.0.1:4174/mcp
-Authorization: Bearer YOUR_PRIVATE_PROJECT_READ_TOKEN
-```
-
-Use the deployed HTTPS URL for a remote installation. When exposing a hostname
-such as `analytics.example.com`, add it to the MCP hostname allowlist in TOML:
-
-```toml
-[mcp]
-allowed_hosts = ["localhost", "127.0.0.1", "[::1]", "analytics.example.com"]
-```
-
-The MCP tools provide read-only access to the authenticated project's analytics.
-They cannot ingest events or administer projects. Set `enabled = false` under
-`[mcp]` to disable the endpoint.
-
-No second collector process is required. Clients that only support standard
-input/output can use the optional `chunkify-analytics mcp` adapter. See the
-[MCP setup guide](docs/mcp.md) for both connection methods and available tools.
+MCP tools read the authenticated project's analytics. See the
+[MCP guide](docs/mcp.md) for client setup and the optional stdio adapter.
 
 ## Configure the service
 
-Use `collector.toml` as your main configuration file, as shown in both installation
-guides. Environment variables and `.env` are optional overrides, useful for
-credentials and deployment-specific settings. Explicit CLI flags have the highest
-priority:
-
-```text
-CLI flags > process environment > .env > TOML > built-in defaults
-```
-
-A minimal `collector.toml` is shown below. The complete
-[example file](collector.toml.example) includes every setting.
-
-```toml
-data_dir = "./data"
-
-[server]
-bind = "127.0.0.1:4174"
-allowed_origins = ["http://localhost:3000"]
-store_ip = true
-
-[retention]
-seconds = 2592000
-
-[duckdb]
-threads = 1
-```
-
-The executable loads `collector.toml` and `.env` from its working directory when
-present. Select other files with `--config` and `--env-file`:
+Keep application settings in `collector.toml`. Use `--config` when running from
+another directory:
 
 ```sh
 chunkify-analytics --config /etc/chunkify/collector.toml config check
 chunkify-analytics --config /etc/chunkify/collector.toml serve
 ```
 
-Relative data paths in TOML resolve beside that file. Relative CLI and
-environment paths resolve from the working directory. Configuration changes
-apply when the process starts. `config check` validates server settings without
-creating or opening a database.
-
-The Docker guide mounts the file as `/data/collector.toml`, where the executable
-finds it automatically. For optional environment overrides, use `-e NAME=value`
-or Docker's `--env-file .env`. The image sets `COLLECTOR_DATA_DIR=/data` and
-`COLLECTOR_BIND=0.0.0.0:4174`; those environment values take priority over TOML.
-
-See the [configuration reference](docs/configuration.md) for every setting,
-accepted range, and advanced option.
+Relative TOML paths resolve beside that file. Restart after changing installation
+settings. The [configuration reference](docs/configuration.md) lists all fields
+and the small set of environment overrides for deployments and secrets.
 
 ## Manage projects and keys
 
-Run administration commands against the same data directory as the collector.
-With Docker, use the executable inside the container:
-
-```sh
-docker exec chunkify-analytics chunkify-analytics project list
-docker exec chunkify-analytics chunkify-analytics key create default read "Dashboard"
-docker exec chunkify-analytics chunkify-analytics project retention default 604800
-```
-
-The last command keeps the default project's events for seven days. Use `0` to
-keep them indefinitely or `inherit` to restore the installation default.
-
-On Linux and macOS, listing projects, changing retention, and managing keys work
-while the service is running. Stop it before creating or renaming a project,
-or replacing a project's full settings.
-
-For native installations, the same commands run directly:
+Give each customer or website a separate project and credentials:
 
 ```sh
 chunkify-analytics project create production --name "Production website"
-chunkify-analytics key create production ingest "Website"
-chunkify-analytics key rotate production KEY_ID
-chunkify-analytics key revoke production KEY_ID
+chunkify-analytics key create production read "Dashboard"
+chunkify-analytics project retention production 604800
 ```
 
-Creating or rotating a named key prints its new secret. Save it when returned;
-you cannot retrieve it later. Rotation replaces the old secret immediately. To
-switch clients without an interruption, create another key, update the clients,
-then revoke the old one.
+Save new secrets when returned. In Docker, run these commands through
+`docker exec chunkify-analytics chunkify-analytics …`. Key and retention changes
+work while serving on Linux and macOS. Stop the collector to create or rename
+projects or replace project settings. See [administration](docs/administration.md).
 
-Use `chunkify-analytics --help` or a command such as
-`chunkify-analytics project create --help` for arguments. The
-[administration guide](docs/administration.md) includes project settings,
-Docker commands and backup/restore procedures.
+## Storage and backups
 
-## Storage, retention, and backups
+Local storage is the default. Set `backend = "s3"` under `[storage]` for S3-compatible
+storage, including Cloudflare R2. S3 keeps events and credentials when a container
+is replaced. Run one collector per bucket prefix.
 
-Choose storage in one flat `[storage]` section. Local storage is the default:
+Expiration defaults to 30 days by receipt time. Projects can override it.
+Expired events stop contributing to reports. Local database files can reuse
+freed space without shrinking.
 
-```toml
-[storage]
-backend = "local"
-# Optional database file, relative to this TOML file:
-path = "./data/analytics.duckdb"
-```
-
-For S3 or Cloudflare R2, set `backend = "s3"` and supply the bucket URL and
-connection settings. Events and installation credentials persist in object
-storage, so a replacement ECS Fargate task can start with an empty local data
-directory. Run one collector task per bucket prefix. See the
-[storage guide](docs/storage.md) for a complete R2 example and deployment limits.
-
-Expiration defaults to 30 days by server receipt time, with cleanup at startup
-and hourly afterward. Projects can have different durations. Expiration also
-removes those events' contributions to reports. It limits age, not storage size.
-Local files can reuse space after cleanup; their disk size need not shrink.
-
-For local storage, back up the data directory and any custom database path while
-the collector is stopped. For S3, back up the configured prefix, including its
-`keys.json`. See [backup and restore](docs/administration.md#backup-and-restore).
+See [storage](docs/storage.md) for configuration and
+[backup and restore](docs/administration.md#backup-and-restore) before moving data.
 
 ## Troubleshooting
 

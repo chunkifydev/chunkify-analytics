@@ -32,15 +32,15 @@ impl Default for Backend {
 impl Backend {
     pub fn load(settings: &Settings) -> Result<Self> {
         match settings
-            .var("COLLECTOR_STORAGE_BACKEND")
+            .var("storage.backend")
             .as_deref()
             .unwrap_or("local")
         {
             "local" => Ok(Self::Local {
-                path: settings.var_os("COLLECTOR_LOCAL_PATH").map(PathBuf::from),
+                path: settings.var_os("storage.path").map(PathBuf::from),
             }),
             "s3" => Ok(Self::S3(S3Config::load(settings)?)),
-            _ => Err("COLLECTOR_STORAGE_BACKEND must be local or s3".into()),
+            _ => Err("storage.backend must be local or s3".into()),
         }
     }
 }
@@ -48,7 +48,7 @@ impl Backend {
 impl S3Config {
     fn load(settings: &Settings) -> Result<Self> {
         let optional = |name| settings.var(name).ok().filter(|value| !value.is_empty());
-        let url = optional("COLLECTOR_S3_URL").ok_or("S3 storage requires COLLECTOR_S3_URL")?;
+        let url = optional("storage.url").ok_or("S3 storage requires storage.url")?;
         let parsed = reqwest::Url::parse(&url).map_err(|_| "Invalid S3 storage URL")?;
         let bucket = parsed
             .host_str()
@@ -72,13 +72,13 @@ impl S3Config {
         {
             return Err("S3 storage URL must be s3://bucket/optional-prefix without credentials, escapes or wildcards".into());
         }
-        let access_key_id = optional("COLLECTOR_S3_ACCESS_KEY_ID");
-        let secret_access_key = optional("COLLECTOR_S3_SECRET_ACCESS_KEY");
+        let access_key_id = optional("storage.access_key_id");
+        let secret_access_key = optional("storage.secret_access_key");
         if access_key_id.is_some() != secret_access_key.is_some() {
             return Err("S3 access_key_id and secret_access_key must be provided together".into());
         }
-        let region = optional("COLLECTOR_S3_REGION").unwrap_or_else(|| "us-east-1".into());
-        let endpoint = optional("COLLECTOR_S3_ENDPOINT");
+        let region = optional("storage.region").unwrap_or_else(|| "us-east-1".into());
+        let endpoint = optional("storage.endpoint");
         if let Some(endpoint) = &endpoint
             && (endpoint.contains(['/', '@', '?', '#'])
                 || endpoint.parse::<axum::http::uri::Authority>().is_err())
@@ -88,12 +88,12 @@ impl S3Config {
                     .into(),
             );
         }
-        let url_style = optional("COLLECTOR_S3_URL_STYLE").unwrap_or_else(|| "path".into());
+        let url_style = optional("storage.url_style").unwrap_or_else(|| "path".into());
         if !matches!(url_style.as_str(), "path" | "vhost") {
             return Err("S3 url_style must be path or vhost".into());
         }
         let use_ssl = settings
-            .var("COLLECTOR_S3_USE_SSL")
+            .var("storage.use_ssl")
             .unwrap_or_else(|_| "true".into())
             .parse()
             .map_err(|_| "S3 use_ssl must be true or false")?;
@@ -108,7 +108,7 @@ impl S3Config {
             region,
             access_key_id,
             secret_access_key,
-            session_token: optional("COLLECTOR_S3_SESSION_TOKEN"),
+            session_token: optional("storage.session_token"),
             url_style,
             use_ssl,
         })

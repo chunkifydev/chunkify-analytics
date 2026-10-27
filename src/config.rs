@@ -71,7 +71,7 @@ impl Config {
         bind: Option<SocketAddr>,
     ) -> Result<Self> {
         let allowed_origins: Vec<String> = settings
-            .var("COLLECTOR_ALLOWED_ORIGINS")
+            .var("server.allowed_origins")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)
@@ -82,65 +82,65 @@ impl Config {
             validate_origin(origin)?;
         }
         let max_body_bytes = settings
-            .var("COLLECTOR_MAX_BODY_BYTES")
+            .var("server.max_body_bytes")
             .unwrap_or_else(|_| "65536".into())
             .parse()?;
         if max_body_bytes == 0 {
-            return Err("COLLECTOR_MAX_BODY_BYTES must be positive".into());
+            return Err("server.max_body_bytes must be positive".into());
         }
         let max_otlp_records = settings
-            .var("COLLECTOR_MAX_OTLP_RECORDS")
+            .var("server.max_otlp_records")
             .unwrap_or_else(|_| "100".into())
             .parse()?;
         if max_otlp_records == 0 {
-            return Err("COLLECTOR_MAX_OTLP_RECORDS must be positive".into());
+            return Err("server.max_otlp_records must be positive".into());
         }
         let ingest_per_second = settings
-            .var("COLLECTOR_INGEST_PER_SECOND")
+            .var("server.ingest_per_second")
             .unwrap_or_else(|_| "100".into())
             .parse()?;
         if ingest_per_second == 0 {
-            return Err("COLLECTOR_INGEST_PER_SECOND must be positive".into());
+            return Err("server.ingest_per_second must be positive".into());
         }
         let retention_seconds = settings
-            .var("COLLECTOR_RETENTION_SECONDS")
+            .var("retention.seconds")
             .unwrap_or_else(|_| "2592000".into())
             .parse::<u64>()
-            .map_err(|_| "COLLECTOR_RETENTION_SECONDS must be a non-negative whole number")?;
+            .map_err(|_| "retention.seconds must be a non-negative whole number")?;
         if retention_seconds > crate::retention::MAX_SECONDS {
-            return Err("COLLECTOR_RETENTION_SECONDS is too large".into());
+            return Err("retention.seconds is too large".into());
         }
         let retention_interval_seconds = settings
-            .var("COLLECTOR_RETENTION_INTERVAL_SECONDS")
+            .var("retention.interval_seconds")
             .unwrap_or_else(|_| "3600".into())
             .parse::<u64>()
-            .map_err(|_| "COLLECTOR_RETENTION_INTERVAL_SECONDS must be a positive whole number")?;
+            .map_err(|_| "retention.interval_seconds must be a positive whole number")?;
         if !(1..=86400).contains(&retention_interval_seconds) {
-            return Err("COLLECTOR_RETENTION_INTERVAL_SECONDS must be between 1 and 86400".into());
+            return Err("retention.interval_seconds must be between 1 and 86400".into());
         }
         let checkpoint_threshold_mib = settings
-            .var("COLLECTOR_CHECKPOINT_THRESHOLD_MIB")
+            .var("duckdb.checkpoint_threshold_mib")
             .unwrap_or_else(|_| "16".into())
             .parse::<u32>()
-            .map_err(|_| "COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024")?;
+            .map_err(|_| "duckdb.checkpoint_threshold_mib must be between 1 and 1024")?;
         if !(1..=1024).contains(&checkpoint_threshold_mib) {
-            return Err("COLLECTOR_CHECKPOINT_THRESHOLD_MIB must be between 1 and 1024".into());
+            return Err("duckdb.checkpoint_threshold_mib must be between 1 and 1024".into());
         }
         let duckdb_threads = settings
-            .var("COLLECTOR_DUCKDB_THREADS")
+            .var("duckdb.threads")
             .ok()
             .map(|value| -> Result<usize> {
                 let count = value
                     .parse::<usize>()
-                    .map_err(|_| "COLLECTOR_DUCKDB_THREADS must be between 1 and 256")?;
+                    .map_err(|_| "duckdb.threads must be between 1 and 256")?;
                 if !(1..=256).contains(&count) {
-                    return Err("COLLECTOR_DUCKDB_THREADS must be between 1 and 256".into());
+                    return Err("duckdb.threads must be between 1 and 256".into());
                 }
                 Ok(count)
             })
             .transpose()?;
         let mcp_allowed_hosts: Vec<String> = settings
-            .var("COLLECTOR_MCP_ALLOWED_HOSTS")
+            .var("mcp.allowed_hosts")
             .unwrap_or_else(|_| "localhost,127.0.0.1,[::1]".into())
             .split(',')
             .map(str::trim)
@@ -154,58 +154,55 @@ impl Config {
                     || host.parse::<axum::http::uri::Authority>().is_err()
             })
         {
-            return Err("COLLECTOR_MCP_ALLOWED_HOSTS must contain literal hostnames or host:port authorities".into());
+            return Err(
+                "mcp.allowed_hosts must contain literal hostnames or host:port authorities".into(),
+            );
         }
         let backend = crate::backend::Backend::load(settings)?;
         if matches!(backend, crate::backend::Backend::S3(_))
-            && settings
-                .var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
-                .as_deref()
-                == Ok("true")
+            && settings.var("experimental.read_worker").as_deref() == Ok("true")
         {
             return Err("S3 storage uses a single worker; disable read_worker".into());
         }
         Ok(Self {
             backend,
             mcp_enabled: settings
-                .var("COLLECTOR_MCP_ENABLED")
+                .var("mcp.enabled")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
-                .map_err(|_| "COLLECTOR_MCP_ENABLED must be true or false")?,
+                .map_err(|_| "mcp.enabled must be true or false")?,
             mcp_allowed_hosts,
             checkpoint_threshold_mib,
             duckdb_threads,
             batch: crate::writer::BatchConfig::load(settings)?,
             separate_reads: settings
-                .var("COLLECTOR_EXPERIMENTAL_READ_WORKER")
+                .var("experimental.read_worker")
                 .unwrap_or_else(|_| "false".into())
                 .parse()
-                .map_err(|_| "COLLECTOR_EXPERIMENTAL_READ_WORKER must be true or false")?,
+                .map_err(|_| "experimental.read_worker must be true or false")?,
             profile: settings
-                .var("COLLECTOR_PROFILE")
+                .var("profile")
                 .unwrap_or_else(|_| "false".into())
                 .parse()
-                .map_err(|_| "COLLECTOR_PROFILE must be true or false")?,
+                .map_err(|_| "profile must be true or false")?,
             trusted_proxies: crate::context::trusted_proxies(
-                &settings
-                    .var("COLLECTOR_TRUSTED_PROXIES")
-                    .unwrap_or_default(),
+                &settings.var("server.trusted_proxies").unwrap_or_default(),
             )?,
             store_ip: settings
-                .var("COLLECTOR_STORE_IP")
+                .var("server.store_ip")
                 .unwrap_or_else(|_| "true".into())
                 .parse()
-                .map_err(|_| "COLLECTOR_STORE_IP must be true or false")?,
+                .map_err(|_| "server.store_ip must be true or false")?,
             data_dir: data_dir.map(Path::to_path_buf).unwrap_or_else(|| {
                 settings
-                    .var_os("COLLECTOR_DATA_DIR")
+                    .var_os("data_dir")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| "data".into())
             }),
             bind: match bind {
                 Some(bind) => bind,
                 None => settings
-                    .var("COLLECTOR_BIND")
+                    .var("server.bind")
                     .unwrap_or_else(|_| "127.0.0.1:4174".into())
                     .parse()?,
             },

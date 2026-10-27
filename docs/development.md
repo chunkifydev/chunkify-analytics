@@ -18,10 +18,8 @@ npm run test:collector
 node --test examples/dashboard/*.test.* examples/demo/*.test.mjs
 ```
 
-The HTTP tests start real collector processes with temporary data directories
-and use the published analytics SDK. The MCP tests use the official Rust client
-against both the embedded HTTP endpoint and the stdio adapter. No external
-collector installation is required.
+Tests start temporary collectors and use the analytics SDK and MCP client.
+No separate collector installation is required.
 
 `COLLECTOR_BINARY` selects another executable for the Node integration tests.
 The optional database upgrade check requires `COLLECTOR_PREVIOUS_BINARY` and is
@@ -47,8 +45,7 @@ path addressing and HTTP. Override these with `COLLECTOR_S3_TEST_BUCKET`,
 `COLLECTOR_S3_TEST_REGION`, `COLLECTOR_S3_TEST_ACCESS_KEY_ID`,
 `COLLECTOR_S3_TEST_SECRET_ACCESS_KEY` and `COLLECTOR_S3_TEST_USE_SSL=true`.
 Without an endpoint, remote tests skip; the custom local-path test still runs.
-These tests check duplicate preservation, project isolation, OTLP context,
-expiration and replacement with an empty local data directory.
+
 
 ## DuckDB build and extensions
 
@@ -70,12 +67,10 @@ npm run test:collector:docker
 This builds `chunkify-analytics:test` and exercises the container lifecycle,
 credential management, persistence, and benchmark runner. The image runs as UID
 10001 and supports a read-only root filesystem with writable `/data` and `/tmp`.
-CI builds a local test image; the workflow does not publish one.
 
-The Docker build caches Cargo dependencies and compiled output. Changing source
-rebuilds the application; an empty or invalidated dependency cache can require
-recompiling DuckDB. Linux builds use the linker setting in `build.rs` to register
-the statically linked DuckDB extensions.
+
+Docker caches dependencies and build output. An empty cache recompiles DuckDB.
+Linux uses `build.rs` to register statically linked extensions.
 
 ## Run a benchmark
 
@@ -94,15 +89,11 @@ COLLECTOR_LOAD_REPORT=target/benchmarks/run.json npm run benchmark:collector
 
 Useful controls include `COLLECTOR_LOAD_CASES`, `COLLECTOR_LOAD_SECONDS`,
 `COLLECTOR_LOAD_CPUS`, `COLLECTOR_LOAD_MEMORY_MIB`, and
-`COLLECTOR_LOAD_CONCURRENCY`. The runner validates their ranges and records the
-selected workload and resource limits in its output. Use `--list` to inspect
-those limits before running.
+`COLLECTOR_LOAD_CONCURRENCY`. Use `--list` to inspect workloads and limits before running.
 
-The runner requires Docker and Linux resource counters, including pressure
-metrics. Some local Docker VMs do not expose all required counters. A resource
-accounting failure is not a performance result; use a supported environment.
-Results from short synthetic runs do not establish sustained production
-capacity. Measure with representative data, concurrent reads, and retention.
+Benchmarks require Linux cgroup v2 and pressure counters. Some Docker VMs lack
+these counters and cannot run the benchmark. Measure production capacity with
+representative traffic, reads and retention.
 
 Keep reusable tests and workload generators in Git. Keep generated reports,
 progress logs, local data, credentials, and build output out of commits.

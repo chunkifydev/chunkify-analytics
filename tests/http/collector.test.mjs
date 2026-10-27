@@ -13,6 +13,7 @@ import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
+import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
@@ -43,12 +44,15 @@ function postOtlp(server, body, headers = {}) {
 }
 
 async function runCommand(args, env) {
-  const child = spawn(binary, args, { env, cwd: tmpdir(), stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
+  const configuration = await mkdtemp(join(tmpdir(), "chunkify-command-config-"));
+  const config = await writeConfig(configuration, env);
+  const child = spawn(binary, ["--config", config, ...args], { env: collectorEnvironment(env), cwd: tmpdir(), stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   const [code] = await once(child, "close");
+  await rm(configuration, { recursive: true, force: true });
   return { code, stdout, stderr };
 }
 
@@ -56,10 +60,11 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
-    COLLECTOR_ALLOWED_ORIGINS: "https://player.example", COLLECTOR_STORE_IP: "true",
-    COLLECTOR_TRUSTED_PROXIES: "", ...settings };
-  const init = spawn(initialBinary, ["init"], { env, cwd: directory, stdio: "pipe" });
+  const env = { ...process.env, "data_dir": directory, "server.bind": "127.0.0.1:0",
+    "server.allowed_origins": "https://player.example", "server.store_ip": "true",
+    "server.trusted_proxies": "", ...settings };
+  await writeConfig(directory, env);
+  const init = spawn(initialBinary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
   let errors = "";
   init.stderr.on("data", (chunk) => { errors += chunk; });
   assert.equal((await once(init, "exit"))[0], 0, errors);
@@ -74,7 +79,8 @@ async function collector(t, settings = {}, initialBinary = binary) {
       Object.assign(keys, JSON.parse(await readFile(join(directory, "keys.json"), "utf8")));
     },
     async start(executable = binary, overrides = {}) {
-      child = spawn(executable, ["serve"], { cwd: directory, env: { ...env, ...overrides }, stdio: "pipe" });
+      await writeConfig(directory, { ...env, ...overrides });
+      child = spawn(executable, ["serve"], { cwd: directory, env: collectorEnvironment(env), stdio: "pipe" });
       // Drain stdout/stderr as well as waiting for the process to exit.
       exited = once(child, "close");
       let output = "";
@@ -187,7 +193,7 @@ test("real SDK events survive a collector restart and duplicate delivery", async
 });
 
 test("optional profiling reports database work on shutdown without event data or credentials", async (t) => {
-  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INSERT_MODE: "row" });
+  const server = await collector(t, { "profile": "true", "retention.seconds": "0", "batch.insert_mode": "row" });
   const events = sdkEvents("private-video", "private-viewer");
   await server.send(events[0]);
   await server.send(events[0]);
@@ -217,14 +223,14 @@ test("optional profiling reports database work on shutdown without event data or
   for (const secret of [server.keys.ingest_key, server.keys.read_token, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
     assert.ok(!JSON.stringify(profiles(server)).includes(secret), "profiles must contain only aggregate measurements");
   }
-  await server.start(binary, { COLLECTOR_PROFILE: "false" });
+  await server.start(binary, { "profile": "false" });
   assert.equal((await server.get("/v1/events")).events.length, 2);
   await server.stop();
   assert.ok(!server.logs().includes('"collector_profile"'));
 });
 
 test("checkpoint configuration is applied and acknowledged native and OTLP events survive a crash", async (t) => {
-  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_CHECKPOINT_THRESHOLD_MIB: "64" });
+  const server = await collector(t, { "profile": "true", "duckdb.checkpoint_threshold_mib": "64" });
   const events = sdkEvents("checkpoint");
   await server.send(events[0]);
   await server.sendOtlp(events.at(-1));
@@ -238,15 +244,15 @@ test("checkpoint configuration is applied and acknowledged native and OTLP event
   assert.ok(profile.database.threads > 0);
   assert.ok(profile.database.version.startsWith("v"));
   for (const value of ["0", "1025", "no", "1; DROP TABLE events"]) {
-    const result = await server.command(["serve"], { COLLECTOR_CHECKPOINT_THRESHOLD_MIB: value });
+    const result = await server.command(["serve"], { "duckdb.checkpoint_threshold_mib": value });
     assert.notEqual(result.code, 0);
-    assert.ok(result.stderr.includes("COLLECTOR_CHECKPOINT_THRESHOLD_MIB"), result.stderr);
+    assert.match(result.stderr, /duckdb.checkpoint_threshold_mib|Invalid TOML configuration/);
   }
 });
 
 test("concurrent native and OTLP requests share bounded transactions and preserve their data", async (t) => {
-  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_RETENTION_SECONDS: "0",
-    COLLECTOR_BATCH_MAX_EVENTS: "8", COLLECTOR_BATCH_DELAY_MS: "100", COLLECTOR_INSERT_MODE: "row" });
+  const server = await collector(t, { "profile": "true", "retention.seconds": "0",
+    "batch.max_events": "8", "batch.delay_ms": "100", "batch.insert_mode": "row" });
   const events = Array.from({ length: 12 }, (_, index) => sdkEvents(`batch-${index}`)[0]);
   const envelopes = await otlpRequests(events);
   await Promise.all(events.map(async (event, index) => {
@@ -272,7 +278,7 @@ test("concurrent native and OTLP requests share bounded transactions and preserv
 });
 
 test("a lone event flushes by the collection deadline and keeps its earlier receipt time", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "250", COLLECTOR_RETENTION_SECONDS: "0" });
+  const server = await collector(t, { "batch.delay_ms": "250", "retention.seconds": "0" });
   const before = Date.now();
   await server.send(sdkEvents()[0]);
   const responded = Date.now();
@@ -283,8 +289,8 @@ test("a lone event flushes by the collection deadline and keeps its earlier rece
 });
 
 test("oversized write requests are rejected atomically and a full byte budget recovers", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384",
-    COLLECTOR_BATCH_DELAY_MS: "250", COLLECTOR_BATCH_MAX_EVENTS: "2", COLLECTOR_INGEST_PER_SECOND: "1000" });
+  const server = await collector(t, { "batch.max_bytes": "16384", "batch.queue_max_bytes": "16384",
+    "batch.delay_ms": "250", "batch.max_events": "2", "server.ingest_per_second": "1000" });
   const events = Array.from({ length: 3 }, (_, i) => sdkEvents(`limits-${i}`)[0]);
   const envelopes = await otlpRequests(events);
   const batch = { resourceLogs: [{ scopeLogs: [{ logRecords: envelopes.map((e) => e.resourceLogs[0].scopeLogs[0].logRecords[0]) }] }] };
@@ -303,7 +309,7 @@ test("oversized write requests are rejected atomically and a full byte budget re
 });
 
 test("bulk writes keep the first event and envelope and return per-request duplicate results", async (t) => {
-  const server = await collector(t, { COLLECTOR_INSERT_MODE: "bulk", COLLECTOR_PROFILE: "true", COLLECTOR_BATCH_DELAY_MS: "100" });
+  const server = await collector(t, { "batch.insert_mode": "bulk", "profile": "true", "batch.delay_ms": "100" });
   const playback = sdkEvents("bulk");
   const events = [playback[0], playback.at(-1)];
   const envelopes = await otlpRequests([events[0], { ...events[0], replaced: true }, events[1]]);
@@ -334,7 +340,7 @@ test("bulk writes keep the first event and envelope and return per-request dupli
 });
 
 test("a failed batch commit never acknowledges or retains any of its requests", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_BATCH_DELAY_MS: "200" });
+  const server = await collector(t, { "retention.seconds": "0", "batch.delay_ms": "200" });
   // A clean checkpoint removes the WAL. Prevent its recreation to exercise a
   // real commit failure through the deployment filesystem, without DB access.
   await server.stop();
@@ -358,7 +364,7 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
 });
 
 test("zero collection delay commits each request separately, including empty OTLP requests", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "0", COLLECTOR_PROFILE: "true" });
+  const server = await collector(t, { "batch.delay_ms": "0", "profile": "true" });
   await Promise.all(Array.from({ length: 12 }, (_, i) => i % 2
     ? server.send(sdkEvents(`zero-${i}`)[0])
     : postOtlp(server, JSON.stringify({ resourceLogs: [] })).then((r) => assert.equal(r.status, 200))));
@@ -371,8 +377,8 @@ test("zero collection delay commits each request separately, including empty OTL
 });
 
 test("shared-worker reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0",
-    COLLECTOR_EXPERIMENTAL_READ_WORKER: "false" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0",
+    "experimental.read_worker": "false" });
   let acknowledged = false;
   const writing = server.send(sdkEvents("read-barrier")[0]).then(() => { acknowledged = true; });
   await delay(100);
@@ -393,8 +399,8 @@ test("shared-worker reads flush pending writes and graceful shutdown drains an i
 });
 
 test("separate reads return committed data without flushing unacknowledged writes", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0",
-    COLLECTOR_EXPERIMENTAL_READ_WORKER: "true" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0",
+    "experimental.read_worker": "true" });
   let acknowledged = false;
   const writing = server.send(sdkEvents("independent-read")[0]).then(() => { acknowledged = true; });
   await delay(100);
@@ -408,7 +414,7 @@ test("separate reads return committed data without flushing unacknowledged write
 });
 
 test("a concurrent native duplicate has exactly one acknowledged owner", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "100" });
+  const server = await collector(t, { "batch.delay_ms": "100" });
   const event = sdkEvents()[0];
   const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => fetch(`${server.url}/v1/events`, {
     method: "POST", body: JSON.stringify({ ...event, delivery: i }),
@@ -423,12 +429,12 @@ test("a concurrent native duplicate has exactly one acknowledged owner", async (
 test("invalid batch settings fail startup with the setting name", async (t) => {
   const server = await collector(t);
   await server.stop();
-  for (const [name, value] of Object.entries({ COLLECTOR_BATCH_MAX_EVENTS: "0", COLLECTOR_BATCH_DELAY_MS: "not-a-number",
-    COLLECTOR_QUEUE_MAX_BYTES: "100", COLLECTOR_QUEUE_MAX_REQUESTS: "0", COLLECTOR_INSERT_MODE: "unknown",
-    COLLECTOR_EXPERIMENTAL_READ_WORKER: "invalid" })) {
+  for (const [name, value] of Object.entries({ "batch.max_events": "0", "batch.delay_ms": "not-a-number",
+    "batch.queue_max_bytes": "100", "batch.queue_max_requests": "0", "batch.insert_mode": "unknown",
+    "experimental.read_worker": "invalid" })) {
     const result = await server.command(["serve"], { [name]: value });
     assert.notEqual(result.code, 0);
-    assert.ok(result.stderr.includes(name), result.stderr);
+    assert.ok((result.stderr.includes(name) || result.stderr.includes("Invalid TOML configuration")), result.stderr);
   }
 });
 
@@ -449,14 +455,14 @@ test("connection IP is stored separately and cannot be replaced by event fields 
 });
 
 test("IP collection can be disabled without rewriting earlier events or enriching retries", async (t) => {
-  const server = await collector(t, { COLLECTOR_STORE_IP: "false" });
+  const server = await collector(t, { "server.store_ip": "false" });
   const events = sdkEvents();
   await server.send(events[0]);
   await server.sendOtlp(events[1]);
   const withoutIp = (await server.get("/v1/events")).events;
   assert.ok(withoutIp.every((record) => !Object.hasOwn(record, "event_context")));
   await server.stop();
-  await server.start(binary, { COLLECTOR_STORE_IP: "true" });
+  await server.start(binary, { "server.store_ip": "true" });
   for (const event of events) await server.send(event);
   const added = sdkEvents("with-ip")[0];
   await server.send(added);
@@ -464,7 +470,7 @@ test("IP collection can be disabled without rewriting earlier events or enrichin
   assert.deepEqual(withIp.slice(0, 2), withoutIp);
   assert.equal(withIp[2].event_context.client_ip, "127.0.0.1");
   await server.stop();
-  await server.start(binary, { COLLECTOR_STORE_IP: "false" });
+  await server.start(binary, { "server.store_ip": "false" });
   await server.send(added);
   assert.deepEqual((await server.get("/v1/events")).events, withIp);
   await server.sendOtlp(sdkEvents("disabled-again")[0]);
@@ -487,7 +493,7 @@ test("flat event context copies browser fields and reserves IP fields for the co
     peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
   });
   await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_STORE_IP: "false" });
+  await server.start(binary, { "server.store_ip": "false" });
   const withoutIp = { ...sdkEvents()[0], browser_context: event.browser_context };
   await server.sendOtlp(withoutIp);
   const records = (await server.get("/v1/events")).events;
@@ -499,7 +505,7 @@ test("flat event context copies browser fields and reserves IP fields for the co
 });
 
 test("trusted proxies resolve the first untrusted address from the right", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1,10.20.0.0/16,2001:db8:abcd::/48" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1,10.20.0.0/16,2001:db8:abcd::/48" });
   const event = sdkEvents()[0];
   await server.send(event, { "X-Forwarded-For": "203.0.113.99, 198.51.100.8, 10.20.1.2, 2001:db8:abcd::1" });
   const stored = (await server.get("/v1/events")).events;
@@ -513,7 +519,7 @@ test("trusted proxies resolve the first untrusted address from the right", async
 });
 
 test("proxy headers are ignored unless the connection peer matches the configured trust list", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "10.0.0.0/8,::1" });
+  const server = await collector(t, { "server.trusted_proxies": "10.0.0.0/8,::1" });
   await server.sendOtlp(sdkEvents()[0], { headers: { "X-Forwarded-For": "203.0.113.10, 10.1.2.3" } });
   const context = (await server.get("/v1/events")).events[0].event_context;
   assert.equal(context.client_ip, "127.0.0.1");
@@ -521,7 +527,7 @@ test("proxy headers are ignored unless the connection peer matches the configure
 });
 
 test("trusted forwarding accepts literal IPs and leaves invalid or missing client addresses unresolved", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.0/8,10.20.0.0/16,2001:db8:abcd::/48" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.0/8,10.20.0.0/16,2001:db8:abcd::/48" });
   const cases = [
     ["198.51.100.2", "198.51.100.2"],
     ["2001:db8:beef::5, 2001:db8:abcd::1", "2001:db8:beef::5"],
@@ -548,7 +554,7 @@ test("trusted forwarding accepts literal IPs and leaves invalid or missing clien
 });
 
 test("multiple X-Forwarded-For header lines form one ordered chain", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1,10.20.0.0/16" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1,10.20.0.0/16" });
   const body = JSON.stringify(sdkEvents()[0]);
   const status = await new Promise((resolveStatus, reject) => {
     const request = httpRequest(`${server.url}/v1/events`, { method: "POST", headers: [
@@ -564,13 +570,13 @@ test("multiple X-Forwarded-For header lines form one ordered chain", async (t) =
 });
 
 test("IPv6 connection addresses are captured and can be trusted explicitly", async (t) => {
-  const server = await collector(t, { COLLECTOR_BIND: "[::1]:0" });
+  const server = await collector(t, { "server.bind": "[::1]:0" });
   await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
   assert.deepEqual((await server.get("/v1/events")).events[0].event_context, {
     schema_version: 1, peer_ip: "::1", client_ip: "::1", client_ip_source: "connection",
   });
   await server.stop();
-  await server.start(binary, { COLLECTOR_TRUSTED_PROXIES: "::1/128" });
+  await server.start(binary, { "server.trusted_proxies": "::1/128" });
   await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
   assert.deepEqual((await server.get("/v1/events")).events.at(-1).event_context, {
     schema_version: 1, peer_ip: "::1", client_ip: "2001:db8::4", client_ip_source: "x_forwarded_for",
@@ -584,17 +590,17 @@ test("invalid IP configuration fails at startup without changing events or crede
   const keys = { ...server.keys };
   await server.stop();
   for (const settings of [
-    ...["0", "1", "yes", "FALSE", ""].map((value) => ({ COLLECTOR_STORE_IP: value })),
+    ...["0", "1", "yes", "FALSE", ""].map((value) => ({ "server.store_ip": value })),
     ...["*", "localhost", "127.0.0.1:80", "127.0.0.1/33", "::1/129", "127.0.0.1,", "::ffff:127.0.0.0/104"]
-      .map((value) => ({ COLLECTOR_TRUSTED_PROXIES: value })),
+      .map((value) => ({ "server.trusted_proxies": value })),
   ]) {
     const result = await server.command(["serve"], settings);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, new RegExp(Object.keys(settings)[0]));
+    assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
   await server.reloadKeys();
   assert.deepEqual(server.keys, keys);
-  await server.start(binary, { COLLECTOR_TRUSTED_PROXIES: " ::ffff:127.0.0.1 , 2001:db8::/32 " });
+  await server.start(binary, { "server.trusted_proxies": " ::ffff:127.0.0.1 , 2001:db8::/32 " });
   assert.deepEqual(await server.get("/v1/events"), before);
   await server.send(sdkEvents()[0], { "X-Forwarded-For": "198.51.100.11" });
   assert.equal((await server.get("/v1/events")).events.at(-1).event_context.client_ip, "198.51.100.11");
@@ -616,7 +622,7 @@ test("the browser Chunkify adapter persists context through authenticated ingest
   fixture.listen(0, "127.0.0.1");
   await once(fixture, "listening");
   const origin = `http://127.0.0.1:${fixture.address().port}`;
-  const server = await collector(t, { COLLECTOR_ALLOWED_ORIGINS: origin });
+  const server = await collector(t, { "server.allowed_origins": origin });
   browser = await chromium.launch();
   const page = await browser.newPage({ locale: "fr-FR", timezoneId: "Europe/Paris", viewport: { width: 960, height: 540 } });
   await page.goto(origin);
@@ -669,7 +675,7 @@ test("the browser Chunkify adapter persists context through authenticated ingest
 });
 
 test("retention expires native and OTLP events by receipt time and updates summaries", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "2", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const server = await collector(t, { "retention.seconds": "2", "retention.interval_seconds": "1" });
   const past = { ...sdkEvents("past-video")[0], occurred_at: "2000-01-01T00:00:00Z" };
   const future = { ...sdkEvents("future-video")[0], occurred_at: "2099-01-01T00:00:00Z" };
   await server.send(past);
@@ -685,7 +691,7 @@ test("retention expires native and OTLP events by receipt time and updates summa
   await server.sendOtlp(future);
   assert.equal((await server.get("/v1/events")).events.length, 1);
   await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "0" });
+  await server.start(binary, { "retention.seconds": "0" });
   assert.equal((await server.get("/v1/summary")).views, 1);
 });
 
@@ -696,12 +702,12 @@ test("retention defaults to 30 days, can be disabled, and purges at startup", as
   await server.sendOtlp(event);
   await server.stop();
   await delay(1200);
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   assert.match(server.output, /Retention: disabled/);
   await delay(1200);
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
   await server.stop();
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "1" });
   assert.deepEqual((await server.get("/v1/events")).events, []);
   assert.equal((await server.get("/v1/summary")).views, 0);
 });
@@ -794,7 +800,7 @@ test("a stopped data-directory backup restores events, OTLP context, summaries a
   const restoredKeys = JSON.parse(await readFile(join(restored, "keys.json"), "utf8"));
   assert.deepEqual(restoredKeys, originalKeys);
   Object.assign(server.keys, restoredKeys);
-  await server.start(binary, { COLLECTOR_DATA_DIR: restored });
+  await server.start(binary, { "data_dir": restored });
   assert.deepEqual(await server.get("/v1/events"), originalEvents);
   assert.deepEqual(await server.get("/v1/summary"), originalSummary);
   await server.sendOtlp(events[0]);
@@ -810,16 +816,16 @@ test("invalid retention settings fail clearly without changing stored events or 
   const keys = { ...server.keys };
   await server.stop();
   for (const settings of [
-    { COLLECTOR_RETENTION_SECONDS: "-1" },
-    { COLLECTOR_RETENTION_SECONDS: "1.5" },
-    { COLLECTOR_RETENTION_SECONDS: "18446744073709551615" },
-    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "0" },
-    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "-1" },
-    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "86401" },
+    { "retention.seconds": "-1" },
+    { "retention.seconds": "1.5" },
+    { "retention.seconds": "18446744073709551615" },
+    { "retention.interval_seconds": "0" },
+    { "retention.interval_seconds": "-1" },
+    { "retention.interval_seconds": "86401" },
   ]) {
     const result = await server.command(["serve"], settings);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, new RegExp(Object.keys(settings)[0]));
+    assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
   await server.reloadKeys();
   assert.deepEqual(server.keys, keys);
@@ -828,7 +834,7 @@ test("invalid retention settings fail clearly without changing stored events or 
 });
 
 test("ingestion validates SDK payloads and separates browser writes from private reads", async (t) => {
-  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "8192" });
+  const server = await collector(t, { "server.max_body_bytes": "8192" });
   const event = sdkEvents()[0];
   const post = (body, headers = {}) => fetch(`${server.url}/v1/events`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, ...headers },
@@ -940,7 +946,7 @@ test("summaries count views and viewers and use final or latest cumulative playt
 test("ingestion rate limits reject excess requests without storing more events", async (t) => {
   const event = sdkEvents()[0];
   const [envelope] = await otlpRequests([event]);
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1" });
+  const server = await collector(t, { "server.ingest_per_second": "1" });
   const responses = await Promise.all(Array.from({ length: 8 }, (_, index) => fetch(`${server.url}/v1/${index % 2 ? "logs" : "events"}`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
     body: JSON.stringify(index % 2 ? envelope : event),
@@ -1044,7 +1050,7 @@ test("OTLP gzip batches retain resource and scope context and deduplicate within
     ] },
     { scopeLogs: [{ logRecords: [...logs.slice(3), logs[0]] }] },
   ] };
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
   const response = await postOtlp(server, gzipSync(JSON.stringify(batch)), {
     "Content-Encoding": "gzip", "X-Forwarded-For": "198.51.100.50",
   });
@@ -1092,9 +1098,9 @@ test("large OTLP batches decode promptly and preserve each scope's original meta
     });
     return { ...metadata, logRecords };
   });
-  const server = await collector(t, { COLLECTOR_MAX_OTLP_RECORDS: "1000", COLLECTOR_BATCH_MAX_EVENTS: "1000",
-    COLLECTOR_MAX_BODY_BYTES: "16777216", COLLECTOR_BATCH_MAX_BYTES: "16777216",
-    COLLECTOR_QUEUE_MAX_BYTES: "67108864" });
+  const server = await collector(t, { "server.max_otlp_records": "1000", "batch.max_events": "1000",
+    "server.max_body_bytes": "16777216", "batch.max_bytes": "16777216",
+    "batch.queue_max_bytes": "67108864" });
   // A generous request deadline catches repeated whole-batch copies before persistence.
   // Kill a failed test server promptly rather than waiting for the expensive decode.
   try {
@@ -1121,7 +1127,7 @@ test("large OTLP batches decode promptly and preserve each scope's original meta
 });
 
 test("OTLP rejects invalid or excessive exports atomically with protocol errors", async (t) => {
-  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "32768", COLLECTOR_MAX_OTLP_RECORDS: "2" });
+  const server = await collector(t, { "server.max_body_bytes": "32768", "server.max_otlp_records": "2" });
   const event = sdkEvents()[0];
   const [envelope] = await otlpRequests([event]);
   const log = envelope.resourceLogs[0].scopeLogs[0].logRecords[0];
@@ -1186,8 +1192,8 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
 
 test("separate reader serves committed SDK events with stable pagination", async (t) => {
   await t.test("direct", async (t) => {
-    const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: "true",
-      COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_PROFILE: "true" });
+    const server = await collector(t, { "experimental.read_worker": "true",
+      "retention.seconds": "0", "profile": "true" });
     const events = Array.from({ length: 8 }, (_, index) => {
       const view = sdkEvents(`video-${index % 2}`, `viewer-${index % 3}`);
       view.at(-1).playing_time_ms = 1000;
@@ -1242,9 +1248,9 @@ function projectPost(server, key, event, headers = {}) {
 }
 
 for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cursors (${mode})`, async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INGEST_PER_SECOND: "1000",
-    COLLECTOR_INSERT_MODE: mode === "row" ? "row" : "bulk",
-    COLLECTOR_BATCH_DELAY_MS: "100" });
+  const server = await collector(t, { "retention.seconds": "0", "server.ingest_per_second": "1000",
+    "batch.insert_mode": mode === "row" ? "row" : "bulk",
+    "batch.delay_ms": "100" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live", "--name", "Production website"]);
   const second = await projectCommand(server, ["key", "create", "live", "ingest", "Mobile app"]);
@@ -1338,7 +1344,7 @@ test("project credentials rotate and revoke independently without changing owner
 });
 
 test("project retention updates live, preserves other settings, and persists across restart", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const server = await collector(t, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
   const settings = join(server.directory, "live-settings.json");
@@ -1375,7 +1381,7 @@ test("project retention updates live, preserves other settings, and persists acr
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").effective_retention_seconds, 0);
   assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
   // The running server's default is authoritative, even if the CLI has a different environment.
-  const inherited = await server.command(["project", "retention", "live", "inherit"], { COLLECTOR_RETENTION_SECONDS: "1" });
+  const inherited = await server.command(["project", "retention", "live", "inherit"], { "retention.seconds": "1" });
   assert.equal(inherited.code, 0, inherited.stderr);
   assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 0);
   assert.equal(JSON.parse(inherited.stdout).retention_seconds, null);
@@ -1388,7 +1394,7 @@ test("project retention updates live, preserves other settings, and persists acr
 });
 
 test("startup retention uses inherited, longer, shorter and disabled project policies", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0" });
+  const server = await collector(t, { "retention.seconds": "0" });
   await server.stop();
   const projects = [];
   for (const id of ["short", "long", "keep"]) projects.push(await projectCommand(server, ["project", "create", id]));
@@ -1401,19 +1407,19 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
     assert.equal((await projectCommand(server, ["project", "retention", id, seconds])).restart_required, true);
   }
   await delay(1200);
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "1" });
   assert.equal((await server.get("/v1/events")).events.length, 0);
   for (const project of projects) assert.equal((await server.get("/v1/events", project.read_token)).events.length, project.project_id === "short" ? 0 : 1);
   await server.stop();
   // Removing an override makes existing data eligible under the inherited policy at startup.
   await projectCommand(server, ["project", "retention", "long", "inherit"]);
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "1" });
   assert.equal((await server.get("/v1/events", projects[1].read_token)).events.length, 0);
   assert.equal((await server.get("/v1/events", projects[2].read_token)).events.length, 1);
 });
 
 test("invalid or unpersisted project retention changes preserve policy and data", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const server = await collector(t, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   await server.send(sdkEvents()[0]);
   const file = join(server.directory, "keys.json");
   const before = await readFile(file, "utf8");
@@ -1440,7 +1446,7 @@ test("invalid or unpersisted project retention changes preserve policy and data"
 });
 
 test("project origin policies and rate quotas apply across all of its keys", async (t) => {
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1000" });
+  const server = await collector(t, { "server.ingest_per_second": "1000" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
   const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Another integration"]);
@@ -1461,8 +1467,8 @@ test("project origin policies and rate quotas apply across all of its keys", asy
 });
 
 test("a busy project leaves admission slots for another project", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_QUEUE_MAX_REQUESTS: "4",
-    COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "batch.queue_max_requests": "4",
+    "server.ingest_per_second": "1000", "retention.seconds": "0" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
   await server.start();
@@ -1608,7 +1614,7 @@ test("live key administration supports a deeply nested data directory", async (t
   const server = await collector(t);
   await server.stop();
   const directory = join(server.directory, "nested-".repeat(24));
-  const settings = { COLLECTOR_DATA_DIR: directory };
+  const settings = { "data_dir": directory };
   const init = await server.command(["init"], settings);
   assert.equal(init.code, 0, init.stderr);
   await server.start(binary, settings);

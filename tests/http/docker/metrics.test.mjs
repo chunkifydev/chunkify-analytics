@@ -7,7 +7,7 @@ import { containerCollector } from './support.mjs';
 const contract = JSON.parse(await readFile(new URL('../../../openapi.json', import.meta.url), 'utf8'));
 
 test('packaged metrics work without a writable home or downloaded extensions', async t => {
-  const server = await containerCollector({ settings: { COLLECTOR_RETENTION_SECONDS: '0', COLLECTOR_DUCKDB_THREADS: '1' } });
+  const server = await containerCollector({ settings: { "retention.seconds": '0', "duckdb.threads": '1' } });
   t.after(() => server.close());
   const empty = await server.get('/v1/quality');
   assert.equal(empty.views, 0);
@@ -31,7 +31,7 @@ test('packaged metrics work without a writable home or downloaded extensions', a
 });
 
 test('time buckets reject unrepresentable playing-time totals', async t => {
-  const server = await containerCollector({ settings: { COLLECTOR_RETENTION_SECONDS: '0', COLLECTOR_DUCKDB_THREADS: '1' } });
+  const server = await containerCollector({ settings: { "retention.seconds": '0', "duckdb.threads": '1' } });
   t.after(() => server.close());
   for (let i = 0; i < 2; i++) {
     const start = { ...contract.paths['/v1/events'].post.requestBody.content['application/json'].example,

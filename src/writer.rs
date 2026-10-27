@@ -45,30 +45,28 @@ impl BatchConfig {
             }
             Ok(value)
         }
-        let max_bytes = number(settings, "COLLECTOR_BATCH_MAX_BYTES", 1048576, 1, 67108864)?;
+        let max_bytes = number(settings, "batch.max_bytes", 1048576, 1, 67108864)?;
         Ok(Self {
             bulk: match settings
-                .var("COLLECTOR_INSERT_MODE")
+                .var("batch.insert_mode")
                 .as_deref()
                 .unwrap_or("bulk")
             {
                 "bulk" => true,
                 "row" => false,
-                _ => return Err("COLLECTOR_INSERT_MODE must be bulk or row".into()),
+                _ => return Err("batch.insert_mode must be bulk or row".into()),
             },
-            max_events: number(settings, "COLLECTOR_BATCH_MAX_EVENTS", 100, 1, 10000)?,
+            max_events: number(settings, "batch.max_events", 100, 1, 10000)?,
             max_bytes,
-            delay: Duration::from_millis(
-                number(settings, "COLLECTOR_BATCH_DELAY_MS", 10, 0, 1000)? as u64,
-            ),
+            delay: Duration::from_millis(number(settings, "batch.delay_ms", 10, 0, 1000)? as u64),
             queue_bytes: number(
                 settings,
-                "COLLECTOR_QUEUE_MAX_BYTES",
+                "batch.queue_max_bytes",
                 16777216,
                 max_bytes,
                 268435456,
             )?,
-            queue_requests: number(settings, "COLLECTOR_QUEUE_MAX_REQUESTS", 256, 1, 4096)?,
+            queue_requests: number(settings, "batch.queue_max_requests", 256, 1, 4096)?,
         })
     }
 }

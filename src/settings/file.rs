@@ -121,19 +121,19 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         };
         settings
             .values
-            .insert("COLLECTOR_LOCAL_PATH".into(), path.into_os_string());
+            .insert("storage.path".into(), path.into_os_string());
     }
     for (name, value) in [
-        ("COLLECTOR_STORAGE_BACKEND", storage.backend),
-        ("COLLECTOR_S3_URL", storage.url),
-        ("COLLECTOR_S3_ENDPOINT", storage.endpoint),
-        ("COLLECTOR_S3_REGION", storage.region),
-        ("COLLECTOR_S3_ACCESS_KEY_ID", storage.access_key_id),
-        ("COLLECTOR_S3_SECRET_ACCESS_KEY", storage.secret_access_key),
-        ("COLLECTOR_S3_SESSION_TOKEN", storage.session_token),
-        ("COLLECTOR_S3_URL_STYLE", storage.url_style),
+        ("storage.backend", storage.backend),
+        ("storage.url", storage.url),
+        ("storage.endpoint", storage.endpoint),
+        ("storage.region", storage.region),
+        ("storage.access_key_id", storage.access_key_id),
+        ("storage.secret_access_key", storage.secret_access_key),
+        ("storage.session_token", storage.session_token),
+        ("storage.url_style", storage.url_style),
         (
-            "COLLECTOR_S3_USE_SSL",
+            "storage.use_ssl",
             storage.use_ssl.map(|value| value.to_string()),
         ),
     ] {
@@ -151,130 +151,122 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         };
         settings
             .values
-            .insert("COLLECTOR_DATA_DIR".into(), directory.into_os_string());
+            .insert("data_dir".into(), directory.into_os_string());
     }
     if let Some(value) = config.profile {
         settings
             .values
-            .insert("COLLECTOR_PROFILE".into(), value.to_string().into());
+            .insert("profile".into(), value.to_string().into());
     }
     if let Some(value) = config.server.bind {
-        settings
-            .values
-            .insert("COLLECTOR_BIND".into(), value.into());
+        settings.values.insert("server.bind".into(), value.into());
     }
     if let Some(value) = config.server.allowed_origins {
         settings
             .values
-            .insert("COLLECTOR_ALLOWED_ORIGINS".into(), value.join(",").into());
+            .insert("server.allowed_origins".into(), value.join(",").into());
     }
     if let Some(value) = config.server.trusted_proxies {
         settings
             .values
-            .insert("COLLECTOR_TRUSTED_PROXIES".into(), value.join(",").into());
+            .insert("server.trusted_proxies".into(), value.join(",").into());
     }
     if let Some(value) = config.server.store_ip {
         settings
             .values
-            .insert("COLLECTOR_STORE_IP".into(), value.to_string().into());
+            .insert("server.store_ip".into(), value.to_string().into());
     }
     if let Some(value) = config.server.max_body_bytes {
         settings
             .values
-            .insert("COLLECTOR_MAX_BODY_BYTES".into(), value.to_string().into());
+            .insert("server.max_body_bytes".into(), value.to_string().into());
     }
     if let Some(value) = config.server.max_otlp_records {
-        settings.values.insert(
-            "COLLECTOR_MAX_OTLP_RECORDS".into(),
-            value.to_string().into(),
-        );
+        settings
+            .values
+            .insert("server.max_otlp_records".into(), value.to_string().into());
     }
     if let Some(value) = config.server.ingest_per_second {
-        settings.values.insert(
-            "COLLECTOR_INGEST_PER_SECOND".into(),
-            value.to_string().into(),
-        );
+        settings
+            .values
+            .insert("server.ingest_per_second".into(), value.to_string().into());
     }
     if let Some(value) = config.retention.seconds {
-        settings.values.insert(
-            "COLLECTOR_RETENTION_SECONDS".into(),
-            value.to_string().into(),
-        );
+        settings
+            .values
+            .insert("retention.seconds".into(), value.to_string().into());
     }
     if let Some(value) = config.retention.interval_seconds {
         settings.values.insert(
-            "COLLECTOR_RETENTION_INTERVAL_SECONDS".into(),
+            "retention.interval_seconds".into(),
             value.to_string().into(),
         );
     }
     if let Some(value) = config.batch.max_events {
-        settings.values.insert(
-            "COLLECTOR_BATCH_MAX_EVENTS".into(),
-            value.to_string().into(),
-        );
+        settings
+            .values
+            .insert("batch.max_events".into(), value.to_string().into());
     }
     if let Some(value) = config.batch.max_bytes {
         settings
             .values
-            .insert("COLLECTOR_BATCH_MAX_BYTES".into(), value.to_string().into());
+            .insert("batch.max_bytes".into(), value.to_string().into());
     }
     if let Some(value) = config.batch.delay_ms {
         settings
             .values
-            .insert("COLLECTOR_BATCH_DELAY_MS".into(), value.to_string().into());
+            .insert("batch.delay_ms".into(), value.to_string().into());
     }
     if let Some(value) = config.batch.queue_max_bytes {
         settings
             .values
-            .insert("COLLECTOR_QUEUE_MAX_BYTES".into(), value.to_string().into());
+            .insert("batch.queue_max_bytes".into(), value.to_string().into());
     }
     if let Some(value) = config.batch.queue_max_requests {
-        settings.values.insert(
-            "COLLECTOR_QUEUE_MAX_REQUESTS".into(),
-            value.to_string().into(),
-        );
+        settings
+            .values
+            .insert("batch.queue_max_requests".into(), value.to_string().into());
     }
     if let Some(value) = config.batch.insert_mode {
         settings
             .values
-            .insert("COLLECTOR_INSERT_MODE".into(), value.into());
+            .insert("batch.insert_mode".into(), value.into());
     }
     if let Some(value) = config.duckdb.threads {
         settings
             .values
-            .insert("COLLECTOR_DUCKDB_THREADS".into(), value.to_string().into());
+            .insert("duckdb.threads".into(), value.to_string().into());
     }
     if let Some(value) = config.duckdb.checkpoint_threshold_mib {
         settings.values.insert(
-            "COLLECTOR_CHECKPOINT_THRESHOLD_MIB".into(),
+            "duckdb.checkpoint_threshold_mib".into(),
             value.to_string().into(),
         );
     }
     if let Some(value) = config.experimental.read_worker {
-        settings.values.insert(
-            "COLLECTOR_EXPERIMENTAL_READ_WORKER".into(),
-            value.to_string().into(),
-        );
+        settings
+            .values
+            .insert("experimental.read_worker".into(), value.to_string().into());
     }
     if let Some(value) = config.mcp.enabled {
         settings
             .values
-            .insert("COLLECTOR_MCP_ENABLED".into(), value.to_string().into());
+            .insert("mcp.enabled".into(), value.to_string().into());
     }
     if let Some(value) = config.mcp.allowed_hosts {
         settings
             .values
-            .insert("COLLECTOR_MCP_ALLOWED_HOSTS".into(), value.join(",").into());
+            .insert("mcp.allowed_hosts".into(), value.join(",").into());
     }
     if let Some(value) = config.mcp.collector_url {
         settings
             .values
-            .insert("CHUNKIFY_MCP_COLLECTOR_URL".into(), value.into());
+            .insert("mcp.collector_url".into(), value.into());
     }
     if let Some(value) = config.mcp.read_token {
         settings
             .values
-            .insert("CHUNKIFY_MCP_READ_TOKEN".into(), value.into());
+            .insert("mcp.read_token".into(), value.into());
     }
     Ok(settings)
 }

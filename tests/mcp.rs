@@ -646,6 +646,90 @@ async fn exercise_project_queries(http: bool) {
 }
 
 #[tokio::test]
+async fn video_pages_accept_a_thousand_rows_while_events_keep_their_smaller_limit() {
+    let collector = Collector::start();
+    let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    let example = &contract["paths"]["/v1/events"]["post"]["requestBody"]["content"]["application/json"]
+        ["example"];
+    let http = reqwest::Client::new();
+    for index in 0..1001 {
+        let mut event = example.clone();
+        event["event_id"] = json!(uuid::Uuid::new_v4().to_string());
+        event["view_id"] = json!(uuid::Uuid::new_v4().to_string());
+        event["video_id"] = json!(format!("video-{index:04}"));
+        let response = http
+            .post(format!("{}/v1/events", collector.url))
+            .header(
+                "X-Chunkify-Ingest-Key",
+                collector.keys["public_key"].as_str().unwrap(),
+            )
+            .json(&event)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
+    }
+    let token = collector.keys["secret_key"].as_str().unwrap();
+    let expected = collector.get("/v1/videos?limit=1000", token).await;
+    for http in [false, true] {
+        let client = connect_mode(&collector.url, token, true, http).await;
+        let tools = client.list_tools(None).await.unwrap().tools;
+        for (name, maximum) in [("list_video_metrics", 1000), ("list_events", 100)] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            let limit = &tool.input_schema["properties"]["limit"];
+            assert_eq!(limit["default"], 10);
+            assert_eq!(limit["maximum"], maximum);
+            assert!(
+                tool.description
+                    .as_ref()
+                    .unwrap()
+                    .contains(&format!("at most {maximum}."))
+            );
+        }
+        let overview = call(&client, "describe_api", json!({}), false).await;
+        assert_eq!(
+            overview["limits"],
+            json!({
+                "default_page_size": 10,
+                "max_page_size": {"list_events": 100, "list_video_metrics": 1000},
+                "max_response_bytes": 1048576,
+                "max_filter_json_bytes": 4096,
+                "timeout_seconds": 15,
+                "concurrent_queries": 4
+            })
+        );
+        for (tool, key) in [("list_video_metrics", "videos"), ("list_events", "events")] {
+            let page = call(&client, tool, json!({}), false).await;
+            assert_eq!(page["data"][key].as_array().unwrap().len(), 10);
+            assert_eq!(page["coverage"]["has_more"], true);
+        }
+        let first = call(&client, "list_video_metrics", json!({"limit":1000}), false).await;
+        assert_eq!(first["data"], expected);
+        assert_eq!(first["data"]["videos"].as_array().unwrap().len(), 1000);
+        assert_eq!(first["coverage"]["has_more"], true);
+        let last = call(
+            &client,
+            "list_video_metrics",
+            json!({"limit":1000, "cursor":first["data"]["next_cursor"]}),
+            false,
+        )
+        .await;
+        assert_eq!(last["data"]["videos"].as_array().unwrap().len(), 1);
+        assert_eq!(last["data"]["videos"][0]["video_id"], "video-1000");
+        assert_eq!(last["coverage"]["has_more"], false);
+        let events = call(&client, "list_events", json!({"limit":100}), false).await;
+        assert_eq!(events["data"]["events"].as_array().unwrap().len(), 100);
+        for (tool, limit) in [("list_video_metrics", 1001), ("list_events", 101)] {
+            assert_eq!(
+                call(&client, tool, json!({"limit":limit}), true).await["error"]["code"],
+                "invalid_arguments"
+            );
+        }
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn unicode_filters_and_long_stored_ids_never_return_unusable_cursors() {
     let collector = Collector::start();
     let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
@@ -765,6 +849,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
     let follow_counter = followed.clone();
     let router = Router::new()
         .route("/prefix/v1/summary", get(handler))
+        .route("/prefix/v1/videos", get(handler))
         .route(
             "/should-not-follow",
             get(move || async move {
@@ -791,6 +876,16 @@ async fn bounded_http_failures_cancellation_and_timeout() {
         assert!(!result.to_string().contains("test-secret-never-return"));
     }
     assert_eq!(followed.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        call(
+            &client,
+            "list_video_metrics",
+            json!({"video_id":"large", "limit":1000}),
+            true
+        )
+        .await["error"]["code"],
+        "response_too_large"
+    );
     let mut pending = Vec::new();
     for _ in 0..4 {
         pending.push(

@@ -151,8 +151,9 @@ playback outside that time bucket. See [metric definitions](api.md#metric-defini
 
 ## Limits
 
-Calls have a 15-second deadline and return at most 1 MiB of query data. Pages
-accept 1 to 100 rows, defaulting to 10. Use a smaller page if a response is too large.
+Calls have a 15-second deadline and return at most 1 MiB of query data.
+`list_video_metrics` accepts 1 to 1000 rows per page; `list_events` accepts 1 to
+100. Both default to 10 rows. Use a smaller page if a response is too large.
 Each adapter and the embedded endpoint allow up to four concurrent queries.
 Timeseries returns at most 1000 UTC buckets and has no pagination.
 

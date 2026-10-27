@@ -85,9 +85,13 @@ credential management, persistence, and benchmark runner. The image runs as UID
 The image includes the shared DuckDB library and requires no host installation.
 The workflow runs one job per pull request or push to `main`, and cancels older
 runs for the same PR or branch. It builds the collector and Rust test executables
-together with `cargo test --release --no-run`. The tests then reuse those
-artifacts. Native API tests and container tests exercise the same release
+together with `cargo test --profile ci --no-run`. The tests then reuse those
+artifacts. Native API tests and container tests exercise the same
 executable. Playwright is installed once for real-browser SDK coverage.
+
+The `ci` profile inherits development checks and uses optimization level 1 to
+keep builds fast and the load smoke tests practical. Normal Docker builds use
+the fully optimized release profile.
 
 CI builds on Ubuntu 22.04 so the executable's glibc requirement is compatible
 with the Debian Bookworm runtime image. A Docker named build context replaces

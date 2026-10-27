@@ -38,3 +38,8 @@ rmcp = { version = "3.5.1", default-features = false, features = ["client", "tra
 
 [profile.dev]
 debug = 0
+
+# Keep functional CI checks fast while optimizing enough for the load smoke tests.
+[profile.ci]
+inherits = "dev"
+opt-level = 1

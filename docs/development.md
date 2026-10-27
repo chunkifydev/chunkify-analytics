@@ -96,7 +96,8 @@ the fully optimized release profile.
 CI builds on Ubuntu 22.04 so the executable's glibc requirement is compatible
 with the Debian Bookworm runtime image. A Docker named build context replaces
 the compiler stage with that tested executable and its DuckDB library. The
-regular Docker build still compiles from source. Docker's GitHub Actions cache
+regular Docker build still compiles the collector from source and retains local
+Cargo cache mounts between source edits. Docker's GitHub Actions cache
 stores runtime layers directly, without copying Cargo cache mounts into extra
 images.
 

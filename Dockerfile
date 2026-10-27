@@ -10,7 +10,11 @@ COPY .cargo ./.cargo
 COPY src ./src
 COPY openapi.json ./
 ARG BUILD_JOBS=2
-RUN cargo build --locked --release --jobs "$BUILD_JOBS" \
+# Local builders retain these mounts between source edits. CI replaces this
+# stage with its tested executable, so it never copies or exports these mounts.
+RUN --mount=type=cache,id=collector-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=collector-linked-target-${TARGETARCH},target=/app/target \
+    cargo build --locked --release --jobs "$BUILD_JOBS" \
     && cp target/release/chunkify-analytics /usr/local/bin/chunkify-analytics
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587

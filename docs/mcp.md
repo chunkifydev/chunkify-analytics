@@ -136,13 +136,20 @@ Set those variables before starting Codex. See the
 | `get_engagement` | Average watch time and observed reached-end rate. |
 | `get_quality` | Startup, buffering and fatal-error metrics with sample counts. |
 | `get_timeseries` | Hourly or daily metrics for a bounded date range. |
-| `list_video_metrics` | One page of per-video totals, ordered by video ID. |
+| `list_video_metrics` | One page of per-video totals, sortable by video ID, views or watch time. |
 | `list_events` | One page of original events and context. |
 
 Query tools accept the [HTTP API's filters](api.md#filters-and-pagination).
 Results contain `data` and `coverage`. Follow `data.next_cursor` with the same
 filters to continue a page; `coverage.has_more` identifies more results.
 For the latest events, use `list_events` with `{"order":"desc","limit":10}`.
+For the ten videos with the most views, use `list_video_metrics` with
+`{"sort_by":"views","order":"desc","limit":10}`. Use
+`"sort_by":"total_playing_time_ms"` for total watch time. Sorting applies to
+all matching videos before pagination. Defaults are video ID ascending; metric
+ties use video ID ascending in either direction. Keep sorting and filters
+unchanged with each cursor. Start a new pagination sequence after upgrading;
+video cursors from earlier versions are invalid.
 
 Use summary totals rather than adding unique viewers across videos or days.
 Null measurements mean unavailable. Ratios are fractions; multiply by 100 for

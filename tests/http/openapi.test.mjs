@@ -140,7 +140,7 @@ test("documented native requests, read responses, filters and pagination match t
   await server.get(`/v1/events?${filters}&cursor=${encodeURIComponent(descCursor)}`, 400);
   await server.get(`/v1/events?${filters}&order=desc&cursor=${encodeURIComponent(firstCursor)}`, 400);
   for (const query of ['order=sideways', 'order=asc&order=desc']) await server.get(`/v1/events?${query}`, 400);
-  for (const route of ['summary', 'videos', 'quality', 'engagement']) await server.get(`/v1/${route}?order=desc`, 400);
+  for (const route of ['summary', 'quality', 'engagement']) await server.get(`/v1/${route}?order=desc`, 400);
 
   assert.equal(received[0].event_context.browser_name, "Chrome");
   assert.equal(received[0].event_context.client_ip, "127.0.0.1");
@@ -510,3 +510,76 @@ for (const separateReads of [false, true]) {
     await server.get("/v1/engagement?video_id=overflow", 500);
   });
 }
+
+for (const separateReads of [false, true]) test(`video sorting ranks the full cohort and paginates ties (separate reads: ${separateReads})`, async t => {
+  const server = await collector(t, { "experimental.read_worker": String(separateReads) });
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  function attempt(videoId, playingTime, browser = "Chrome") {
+    const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(),
+      video_id: videoId, sequence: 1, occurred_at: "2026-10-19T12:00:00Z",
+      browser_context: { schema_version: 1, browser_name: browser, os_name: "Linux", device_type: "desktop" } };
+    const end = { ...start, event_id: randomUUID(), event_name: "chunkify.video.view_ended", sequence: 2,
+      occurred_at: "2026-10-19T12:00:01Z", playing_time_ms: playingTime, reason: "destroyed" };
+    return [start, end];
+  }
+  const fractional = attempt("g", 4000.5);
+  const records = [...attempt("a", 2000), ...attempt("a", 2000),
+    ...attempt("b", 300), ...attempt("b", 300), ...attempt("b", 400),
+    ...attempt("c", 2000), ...attempt("c", 2000), attempt("d", 0)[0], attempt("e", 0)[0],
+    ...attempt("f", 5000, "Firefox"), ...fractional];
+  for (const event of records) await server.post("/v1/events", JSON.stringify(event), 201);
+  const get = params => server.get(`/v1/videos?${new URLSearchParams(params)}`);
+  const ids = page => page.videos.map(video => video.video_id);
+  async function remaining(first, params) {
+    const result = [...first.videos];
+    let page = first;
+    while (page.next_cursor) {
+      page = await get({ ...params, cursor: page.next_cursor, limit: "1" });
+      result.push(...page.videos);
+    }
+    return result;
+  }
+  for (const [sort_by, order, expected] of [
+    ["video_id", "asc", ["a", "b", "c", "d", "e", "f", "g"]],
+    ["video_id", "desc", ["g", "f", "e", "d", "c", "b", "a"]],
+    ["views", "asc", ["d", "e", "f", "g", "a", "c", "b"]],
+    ["views", "desc", ["b", "a", "c", "d", "e", "f", "g"]],
+    ["total_playing_time_ms", "asc", ["d", "e", "b", "a", "c", "g", "f"]],
+    ["total_playing_time_ms", "desc", ["f", "g", "a", "c", "b", "d", "e"]],
+  ]) {
+    const params = { sort_by, order, limit: "2" };
+    const all = await get({ sort_by, order });
+    assert.deepEqual(ids(all), expected);
+    assert.deepEqual(await remaining(await get(params), params), all.videos, `${sort_by} ${order}`);
+  }
+  const filtered = { sort_by: "total_playing_time_ms", order: "desc", browser_name: "Chrome", limit: "1" };
+  assert.deepEqual(ids(await get(filtered)), ["g"], "filter before ranking the full cohort");
+  assert.deepEqual(ids(await get({ sort_by: "views", order: "desc", video_id: "missing" })), []);
+  assert.deepEqual(ids(await get({})), ["a", "b", "c", "d", "e", "f", "g"]);
+  const defaults = await get({ limit: "1" });
+  assert.deepEqual(ids(await get({ sort_by: "video_id", order: "asc", limit: "1", cursor: defaults.next_cursor })), ["b"]);
+  const views = { sort_by: "views", order: "desc", limit: "1" };
+  const watch = { sort_by: "total_playing_time_ms", order: "desc", limit: "1" };
+  const firstViews = await get(views), firstWatch = await get(watch);
+  for (const changed of [{ ...views, order: "asc" }, watch, {}, { ...views, browser_name: "Chrome" }]) {
+    await server.get(`/v1/videos?${new URLSearchParams({ ...changed, cursor: firstViews.next_cursor })}`, 400);
+  }
+  await server.get(`/v1/events?cursor=${encodeURIComponent(firstViews.next_cursor)}`, 400);
+  const invalidPosition = JSON.parse(Buffer.from(firstWatch.next_cursor, "base64url"));
+  invalidPosition.after.total_playing_time_ms = -1;
+  await server.get(`/v1/videos?${new URLSearchParams({ ...watch, cursor: Buffer.from(JSON.stringify(invalidPosition)).toString("base64url") })}`, 400);
+  for (const query of ["sort_by=watch_time", "sort_by=", "sort_by=views%3BDROP%20TABLE%20events", "order=sideways",
+    "sort_by=views&sort_by=video_id", "order=asc&order=desc"]) await server.get(`/v1/videos?${query}`, 400);
+  for (const route of ["events", "summary", "quality", "engagement", "timeseries"]) {
+    await server.get(`/v1/${route}?sort_by=views`, 400);
+  }
+  for (const event of [...attempt("d", 10), ...attempt("d", 10),
+    { ...fractional[1], event_id: randomUUID(), sequence: 3, playing_time_ms: 100000 }]) {
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  assert.deepEqual((await remaining(firstViews, views)).map(video => video.video_id), ["b", "a", "c", "d", "e", "f", "g"]);
+  const frozenWatch = await remaining(firstWatch, watch);
+  assert.deepEqual(frozenWatch.map(video => video.video_id), ["f", "g", "a", "c", "b", "d", "e"]);
+  assert.equal(frozenWatch.find(video => video.video_id === "g").total_playing_time_ms, 4000.5);
+  assert.equal((await get(watch)).videos[0].video_id, "g", "a fresh sequence sees the later watch time");
+});

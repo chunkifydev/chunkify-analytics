@@ -243,3 +243,37 @@ test("S3 project deletion survives replacement and expires retained events with 
   assert.equal(saved.settings.retention_seconds, 1);
   assert.equal((await fetch(`${app.url}/v1/events`, { headers: { authorization: `Bearer ${customer.secret_key}` } })).status, 401);
 });
+
+test("S3 video rankings preserve metric ties and cursors across task replacement", {
+  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, s3Settings());
+  await app.command(["init"]);
+  await app.start();
+  const other = JSON.parse(await app.command(["project", "create", "Other rankings"]));
+  async function playback(videoId, playingTime, key) {
+    const records = events().map(event => ({ ...event, video_id: videoId }));
+    records.at(-1).playing_time_ms = playingTime;
+    for (const event of records) await app.send(event, key);
+  }
+  for (const [video, count, playing] of [["a", 2, 1000], ["b", 3, 100], ["c", 1, 5000.25], ["d", 1, 5000.25]]) {
+    for (let view = 0; view < count; view++) await playback(video, playing);
+  }
+  await playback("a", 9999999, other.public_key);
+  const query = params => `/v1/videos?${new URLSearchParams(params)}`;
+  const views = { sort_by: "views", order: "desc", limit: "1" };
+  const watch = { sort_by: "total_playing_time_ms", order: "desc", limit: "1" };
+  const firstViews = await app.get(query(views)), firstWatch = await app.get(query(watch));
+  await app.replaceTask();
+  for (const [params, first, expected] of [[views, firstViews, ["b", "a", "c", "d"]], [watch, firstWatch, ["c", "d", "a", "b"]]]) {
+    let page = first;
+    const rows = [...page.videos];
+    while (page.next_cursor) {
+      page = await app.get(query({ ...params, cursor: page.next_cursor }));
+      rows.push(...page.videos);
+    }
+    assert.deepEqual(rows.map(video => video.video_id), expected);
+    assert.equal(rows.find(video => video.video_id === "a").total_playing_time_ms, 2000);
+    assert.equal(rows.find(video => video.video_id === "c").total_playing_time_ms, 5000.25);
+  }
+});

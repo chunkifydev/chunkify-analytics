@@ -798,7 +798,7 @@
       "get": {
         "operationId": "listVideoMetrics",
         "summary": "Read paginated totals by video",
-        "description": "List per-video totals. Unique viewer counts cannot be added across videos.",
+        "description": "List per-video totals. Sort the entire filtered cohort by video_id, views or total_playing_time_ms before pagination. sort_by defaults to video_id and order defaults to asc. Metric ties use video_id ascending in either direction. Unique viewer counts cannot be added across videos. Keep sort_by, order and filters unchanged with a cursor.",
         "tags": [
           "Queries"
         ],
@@ -829,6 +829,12 @@
           },
           {
             "$ref": "#/components/parameters/cursor"
+          },
+          {
+            "$ref": "#/components/parameters/sort_by"
+          },
+          {
+            "$ref": "#/components/parameters/order"
           }
         ],
         "responses": {
@@ -2157,7 +2163,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Use next_cursor from the previous page. Keep the same filters and order."
+        "description": "Use next_cursor from the previous page. Keep the same filters, sort_by and order. Video cursors from earlier versions are invalid; start a new pagination sequence after upgrading."
       },
       "origin": {
         "name": "Origin",
@@ -2221,7 +2227,21 @@
           ],
           "default": "asc"
         },
-        "description": "Event receipt order: asc for oldest first, desc for newest first."
+        "description": "Sort direction, defaulting to asc. Events sort by server ingestion sequence; videos sort by sort_by. Video metric ties use video_id ascending in either direction. Keep the same order with each cursor."
+      },
+      "sort_by": {
+        "name": "sort_by",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "video_id",
+            "views",
+            "total_playing_time_ms"
+          ],
+          "default": "video_id"
+        },
+        "description": "Videos only. Rank all matching videos by this field before pagination. Watch time is total_playing_time_ms. Metric ties use video_id ascending. Keep the same sort_by with each cursor."
       }
     },
     "schemas": {

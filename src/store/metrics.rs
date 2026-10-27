@@ -1,5 +1,13 @@
 use super::*;
-use crate::query::TimeseriesQuery;
+use crate::query::{TimeseriesQuery, VideoSort};
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VideoPosition {
+    video_id: String,
+    views: i64,
+    total_playing_time_ms: f64,
+}
 
 impl Store {
     pub async fn summary(
@@ -9,18 +17,31 @@ impl Store {
         per_video: bool,
     ) -> Result<Value, ApiError> {
         if query.event_name.is_some()
-            || query.order.is_some()
-            || (!per_video && (query.cursor.is_some() || query.limit.is_some()))
+            || (!per_video
+                && (query.cursor.is_some()
+                    || query.limit.is_some()
+                    || query.order.is_some()
+                    || query.sort_by.is_some()))
         {
             return Err(ApiError::bad("Unsupported summary query parameter"));
         }
         let filters = query.filters()?;
         let limit = query.limit()?;
+        let sort = query.sort_by.unwrap_or_default();
+        let order = query.order.unwrap_or_default();
+        let kind = format!("videos_{}_{}", sort.column(), order.as_str());
         let cursor = query
             .cursor
             .as_deref()
-            .map(|value| Cursor::<String>::decode(value, "videos", &filters, &project))
+            .map(|value| Cursor::<VideoPosition>::decode(value, &kind, &filters, &project))
             .transpose()?;
+        if cursor.as_ref().is_some_and(|cursor| {
+            cursor.after.views < 1
+                || !cursor.after.total_playing_time_ms.is_finite()
+                || cursor.after.total_playing_time_ms < 0.0
+        }) {
+            return Err(ApiError::bad("Invalid video cursor position"));
+        }
         self.read(if per_video { "videos" } else { "summary" }, project.clone(), move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
@@ -33,25 +54,59 @@ impl Store {
                     })))?;
                 return Ok(result);
             }
-            let after = cursor.map_or(String::new(), |c| c.after);
-            values.extend([SqlValue::Text(after.clone()), SqlValue::BigInt((limit + 1) as i64)]);
+            let (direction, comparison) = match order {
+                SortOrder::Asc => ("ASC", ">"),
+                SortOrder::Desc => ("DESC", "<"),
+            };
+            let column = sort.column();
+            let tie_breaker = if matches!(sort, VideoSort::VideoId) { "" } else { ", video_id ASC" };
+            let mut continuation = "TRUE".to_owned();
+            if let Some(cursor) = cursor {
+                let after = cursor.after;
+                if matches!(sort, VideoSort::VideoId) {
+                    continuation = format!("video_id {comparison} ?");
+                    values.push(SqlValue::Text(after.video_id));
+                } else {
+                    continuation = format!("({column} {comparison} ? OR ({column} = ? AND video_id > ?))");
+                    let metric = match sort {
+                        VideoSort::Views => SqlValue::BigInt(after.views),
+                        VideoSort::TotalPlayingTimeMs => SqlValue::Double(after.total_playing_time_ms),
+                        VideoSort::VideoId => unreachable!(),
+                    };
+                    values.extend([metric.clone(), metric, SqlValue::Text(after.video_id)]);
+                }
+            }
+            values.push(SqlValue::BigInt((limit + 1) as i64));
+            // Aggregate the entire filtered cohort before ranking or applying
+            // the cursor. Only fixed enum values become SQL identifiers.
+            // A fixed summation order keeps floating-point sort keys stable
+            // when the next page recomputes the same cohort.
             let mut statement = connection.prepare(&format!("{sql}
-                SELECT video_id, COUNT(*), COUNT(DISTINCT viewer_id), SUM(playing_time_ms) FROM view_metrics
-                WHERE video_id > ? GROUP BY video_id ORDER BY video_id LIMIT ?"))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((row.get::<_, String>(0)?, json!({
+                , video_metrics AS (
+                    SELECT video_id, COUNT(*) AS views, COUNT(DISTINCT viewer_id) AS unique_viewers,
+                        SUM(playing_time_ms ORDER BY view_id) AS total_playing_time_ms FROM view_metrics GROUP BY video_id
+                )
+                SELECT video_id, views, unique_viewers, total_playing_time_ms FROM video_metrics
+                WHERE {continuation} ORDER BY {column} {direction}{tie_breaker} LIMIT ?"))?;
+            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((VideoPosition {
+                video_id: row.get(0)?, views: row.get(1)?, total_playing_time_ms: row.get(3)?,
+            }, json!({
                 "video_id": row.get::<_, String>(0)?, "views": row.get::<_, i64>(1)?,
                 "unique_viewers": row.get::<_, i64>(2)?, "total_playing_time_ms": row.get::<_, f64>(3)?
             }))))?;
             let mut videos = Vec::new();
-            let mut last = after;
+            let mut last = None;
             let mut next_cursor = None;
             for row in rows {
-                let (id, video) = row?;
+                let (position, video) = row?;
+                if !position.total_playing_time_ms.is_finite() {
+                    return Err(ApiError::internal());
+                }
                 if videos.len() == limit {
-                    next_cursor = Some(Cursor { version: 1, project_id: project.clone(), kind: "videos".into(), after: last, through, filters: filters.clone() }.encode()?);
+                    next_cursor = Some(Cursor { version: 1, project_id: project.clone(), kind: kind.clone(), after: last.expect("nonempty video page"), through, filters: filters.clone() }.encode()?);
                     break;
                 }
-                last = id;
+                last = Some(position);
                 videos.push(video);
             }
             Ok(json!({ "videos": videos, "next_cursor": next_cursor }))
@@ -60,6 +115,7 @@ impl Store {
 
     pub async fn engagement(&self, project: String, query: Query) -> Result<Value, ApiError> {
         if query.event_name.is_some()
+            || query.sort_by.is_some()
             || query.cursor.is_some()
             || query.limit.is_some()
             || query.order.is_some()
@@ -101,6 +157,7 @@ impl Store {
 
     pub async fn quality(&self, project: String, query: Query) -> Result<Value, ApiError> {
         if query.event_name.is_some()
+            || query.sort_by.is_some()
             || query.cursor.is_some()
             || query.limit.is_some()
             || query.order.is_some()
@@ -286,7 +343,7 @@ fn view_cohort(
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT occurred_at_ms, video_id, viewer_id, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

@@ -242,7 +242,7 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | Endpoint | Returns |
 | --- | --- |
 | `GET /v1/summary` | Views, distinct supplied viewer IDs, and total playing time. |
-| `GET /v1/videos` | A paginated list of videos and their totals. |
+| `GET /v1/videos` | A paginated list of videos and their totals, sortable by views or watch time. |
 | `GET /v1/timeseries` | Hourly or daily metrics for a requested date range. |
 | `GET /v1/engagement` | Average watch time and observed reached-end rates. |
 | `GET /v1/quality` | Startup timing, buffering, and fatal-error metrics. |
@@ -251,6 +251,10 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 Secret keys grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before
 calling the collector.
+
+For the ten videos with the most views, query
+`/v1/videos?sort_by=views&order=desc&limit=10`. Use
+`sort_by=total_playing_time_ms` to rank by total watch time.
 
 Use the summary endpoints for totals instead of adding event snapshots together.
 Watch time is cumulative, and unique viewer IDs cannot be summed across videos

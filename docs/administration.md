@@ -26,7 +26,7 @@ for customers, websites or environments.
 chunkify-analytics project create "Production website"
 chunkify-analytics project rename PROJECT_ID "Customer website"
 chunkify-analytics key create PROJECT_ID public "Website"
-chunkify-analytics key create PROJECT_ID secret "Dashboard"
+chunkify-analytics key create PROJECT_ID secret "Dashboard" --read-only
 chunkify-analytics key rotate PROJECT_ID KEY_ID
 chunkify-analytics key revoke PROJECT_ID KEY_ID
 ```
@@ -37,9 +37,20 @@ named key returns its `key_id`, `permission` and `key`. Save the secret when ret
 key secrets cannot be retrieved later. `project list` shows settings and key IDs
 without secrets.
 
-Public keys start with `ck_public_` and send events. Secret keys start with
-`ck_secret_` and read analytics, update origins and rotate keys. Each key belongs
-to one project. Multiple keys for that project share its limits and events.
+Public keys start with `ck_public_` and send events. Private keys are called
+`secret` in the CLI and start with `ck_secret_`. Each key belongs to one project;
+multiple keys for that project share its limits and events.
+
+Add `--read-only` when creating a private key for a dashboard or MCP client.
+It can query all six analytics endpoints and connect through HTTP or stdio MCP.
+It cannot submit events, list or rotate keys, update or delete a project, or
+create projects. A valid read-only key receives 403 on project and key management
+routes. The flag is rejected for public keys.
+
+Private keys created without the flag keep full project access, including
+project and key management. Existing keys remain full-access. Key creation,
+rotation and listings include a `read_only` boolean, and rotation preserves it.
+Create a new key to choose a different access level.
 Rotation keeps the key ID and immediately replaces its secret. For an update
 without interruption, create a second key, switch clients, then revoke the old key.
 
@@ -117,8 +128,8 @@ to project analytics or MCP. The installation supports up to 1024 active project
 
 ## Live project API
 
-Use a project's secret key as `Authorization: Bearer SECRET_KEY`.
-It can manage only that project.
+Use a project's full-access private key as `Authorization: Bearer SECRET_KEY`.
+It can manage only that project. Read-only private keys cannot use these routes.
 
 | Endpoint | Use |
 | --- | --- |

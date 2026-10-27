@@ -191,6 +191,7 @@ impl Controller {
         // Recheck under the mutation lock so a revoked or rotated token cannot
         // authorize another queued change.
         let resolved = self.registry.authorize(secret, Permission::Secret)?;
+        resolved.require_write()?;
         let id = resolved.project.id.clone();
         let project = projects::projects(&keys)
             .into_iter()
@@ -199,7 +200,7 @@ impl Controller {
         let request = match action {
             ProjectAction::Keys => {
                 return Ok(
-                    serde_json::json!({"project_id": id, "keys": project.keys.iter().map(|key| serde_json::json!({"id": key.id, "name": key.name, "permission": key.permission})).collect::<Vec<_>>() }),
+                    serde_json::json!({"project_id": id, "keys": project.keys.iter().map(projects::Credential::metadata).collect::<Vec<_>>() }),
                 );
             }
             ProjectAction::Delete => Request {
@@ -607,6 +608,52 @@ mod tests {
             command: command.into(),
             args: args.iter().map(|value| (*value).into()).collect(),
         }
+    }
+
+    #[test]
+    fn controller_rejects_read_only_keys_before_project_or_key_management() {
+        let mut fixture = Fixture::new();
+        let readonly = execute(
+            &fixture.config,
+            &mut fixture.keys,
+            Some(&fixture.registry),
+            &request("key-create", &["default", "secret", "MCP", "read-only"]),
+        )
+        .unwrap();
+        assert_eq!(readonly["restart_required"], false);
+        let token = readonly["key"].as_str().unwrap();
+        let resolved = fixture
+            .registry
+            .authorize(token, projects::Permission::Secret)
+            .ok()
+            .unwrap();
+        assert!(resolved.read_only);
+        let controller = Controller::new(
+            fixture.config.clone(),
+            fixture.registry.clone(),
+            fixture.keys.clone(),
+        );
+        let before = fs::read(fixture.directory.join("keys.json")).unwrap();
+        for action in [
+            ProjectAction::Keys,
+            ProjectAction::Update(
+                serde_json::from_value(serde_json::json!({"name": "Forbidden"})).unwrap(),
+            ),
+            ProjectAction::RotateKey(readonly["key_id"].as_str().unwrap().into()),
+            ProjectAction::Delete,
+        ] {
+            let error = controller.project(token, action).err().unwrap();
+            assert_eq!(error.0, axum::http::StatusCode::FORBIDDEN);
+        }
+        assert_eq!(
+            fs::read(fixture.directory.join("keys.json")).unwrap(),
+            before
+        );
+        assert!(
+            controller
+                .project(&fixture.keys.secret_key, ProjectAction::Keys)
+                .is_ok()
+        );
     }
 
     #[test]

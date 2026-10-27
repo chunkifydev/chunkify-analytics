@@ -7,10 +7,10 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
 | `POST /v1/projects` | `Authorization: Bearer COLLECTOR_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
-| `DELETE /v1/project` | `Authorization: Bearer SECRET_KEY` | Delete the project and revoke all its keys. Events expire under the existing retention policy. |
-| `PATCH /v1/project` | `Authorization: Bearer SECRET_KEY` | Update the project name or additional origins immediately. |
-| `GET /v1/project/keys` | `Authorization: Bearer SECRET_KEY` | Key IDs, names and permissions, without key values. |
-| `POST /v1/project/keys/{key_id}/rotate` | `Authorization: Bearer SECRET_KEY` | New key value; the previous value stops working immediately. |
+| `DELETE /v1/project` | Full-access `Authorization: Bearer SECRET_KEY` | Delete the project and revoke all its keys. Events expire under the existing retention policy. |
+| `PATCH /v1/project` | Full-access `Authorization: Bearer SECRET_KEY` | Update the project name or additional origins immediately. |
+| `GET /v1/project/keys` | Full-access `Authorization: Bearer SECRET_KEY` | Key IDs, names, permissions and `read_only`, without key values. |
+| `POST /v1/project/keys/{key_id}/rotate` | Full-access `Authorization: Bearer SECRET_KEY` | New key value with its access level; the previous value stops working immediately. |
 | `GET /v1/events` | `Authorization: Bearer SECRET_KEY` | `{"events":[{"project_id":"default","ingest_key_id":"primary-public","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer SECRET_KEY` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
 | `GET /v1/engagement` | `Authorization: Bearer SECRET_KEY` | Average playing time per attempt and observed reached-end count/rate. |
@@ -28,7 +28,14 @@ Read endpoints are intended for the customer's backend and do not enable CORS.
 Keys are never accepted in a query string. Responses are marked `no-store`.
 
 Public keys start with `ck_public_`; secret keys start with `ck_secret_`.
-Secret keys can read analytics, update the name or origins, manage keys and delete their own project.
+Both full-access and read-only private keys can read analytics and use MCP.
+Full-access private keys can also update the name or origins, manage keys and
+delete their own project. Create a read-only private key with
+`key create PROJECT_ID secret "Dashboard" --read-only`. These keys receive 403
+on project and key management routes, including key listings. Key metadata
+includes `read_only`, which remains unchanged when rotating a key. Existing
+private keys retain full access.
+
 Project creation requires the separate `COLLECTOR_ADMIN_KEY` environment secret.
 See [project creation](administration.md#create-projects-through-the-api) and [live project management](administration.md#live-project-api) for requests.
 

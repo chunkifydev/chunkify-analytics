@@ -148,7 +148,21 @@ async fn access(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        Some(app.projects.authorize(secret, Permission::Secret)?)
+        let resolved = app.projects.authorize(secret, Permission::Secret)?;
+        let analytics_read = matches!(*request.method(), Method::GET | Method::HEAD)
+            && matches!(
+                request.uri().path(),
+                "/v1/events"
+                    | "/v1/summary"
+                    | "/v1/videos"
+                    | "/v1/timeseries"
+                    | "/v1/quality"
+                    | "/v1/engagement"
+            );
+        if !mcp && !analytics_read {
+            resolved.require_write()?;
+        }
+        Some(resolved)
     } else {
         None
     };

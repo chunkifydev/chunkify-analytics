@@ -1372,7 +1372,7 @@
       "get": {
         "operationId": "listProjectKeys",
         "summary": "List project keys",
-        "description": "List key IDs, names, and types. Key values are not returned.",
+        "description": "List key IDs, names, and types. Key values are not returned. Requires a full-access private key; read-only keys receive 403.",
         "tags": [
           "Projects"
         ],
@@ -1427,6 +1427,23 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1435,7 +1452,7 @@
       "post": {
         "operationId": "rotateProjectKey",
         "summary": "Rotate a project key",
-        "description": "Replace a key in this project. The old value stops working immediately. Save the returned replacement.",
+        "description": "Replace a key in this project. The old value stops working immediately. Save the returned replacement. Requires a full-access private key; read-only keys receive 403.",
         "tags": [
           "Projects"
         ],
@@ -1522,6 +1539,23 @@
           },
           "503": {
             "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1730,7 +1764,7 @@
       "patch": {
         "operationId": "updateProject",
         "summary": "Update your project",
-        "description": "Update the name or additional origins of your project. Omitted fields stay unchanged.",
+        "description": "Update the name or additional origins of your project. Omitted fields stay unchanged. Requires a full-access private key; read-only keys receive 403.",
         "tags": [
           "Projects"
         ],
@@ -1869,6 +1903,23 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       },
@@ -1878,7 +1929,7 @@
         ],
         "operationId": "deleteProject",
         "summary": "Delete your project",
-        "description": "Revoke all project keys. Stored events remain until their retention expires.",
+        "description": "Revoke all project keys. Stored events remain until their retention expires. Requires a full-access private key; read-only keys receive 403.",
         "responses": {
           "200": {
             "description": "Project deleted and all its keys revoked.",
@@ -1964,6 +2015,23 @@
                 }
               }
             }
+          },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
         }
       }
@@ -1980,7 +2048,7 @@
       "secretKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Secret key starting with ck_secret_. Reads analytics and manages one project. Keep it on your backend."
+        "description": "Private key starting with ck_secret_. Full-access keys read analytics and manage one project. Read-only private keys access analytics and MCP only. Keep all private keys out of browser code."
       },
       "adminKey": {
         "type": "http",
@@ -4486,12 +4554,17 @@
               "public",
               "secret"
             ]
+          },
+          "read_only": {
+            "type": "boolean",
+            "description": "True for a private key limited to analytics reads through HTTP and MCP. Public keys always report false. Rotation preserves this setting."
           }
         },
         "required": [
           "id",
           "name",
-          "permission"
+          "permission",
+          "read_only"
         ]
       },
       "ProjectKeys": {
@@ -4538,6 +4611,10 @@
               "public",
               "secret"
             ]
+          },
+          "read_only": {
+            "type": "boolean",
+            "description": "True for a private key limited to analytics reads through HTTP and MCP. Public keys always report false. Rotation preserves this setting."
           }
         },
         "required": [
@@ -4545,7 +4622,8 @@
           "key_id",
           "key",
           "permission",
-          "restart_required"
+          "restart_required",
+          "read_only"
         ]
       },
       "CreateProjectRequest": {

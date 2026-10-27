@@ -14,7 +14,17 @@ Authorization: Bearer YOUR_PRIVATE_SECRET_KEY
 ```
 
 Use a deployed HTTPS URL for remote access. Each secret key selects one project;
-keep it private. Public keys cannot read analytics.
+keep it private. Public keys cannot read analytics. Create a read-only private
+key for the MCP client:
+
+```sh
+chunkify-analytics key create PROJECT_ID secret "MCP" --read-only
+```
+
+Use the returned `key` as the bearer token, including for the stdio fallback.
+It can also read analytics through the HTTP API. Project and key management
+requires a full-access private key. Creation and rotation take effect immediately
+while the collector runs; no restart is needed.
 
 MCP is enabled by default. Add your public hostname to the allowlist:
 

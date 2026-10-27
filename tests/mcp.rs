@@ -193,6 +193,20 @@ impl Collector {
         }
     }
 
+    fn admin(&self, args: &[&str]) -> Value {
+        let output = clean_command()
+            .args(args)
+            .env("COLLECTOR_DATA_DIR", &self.directory)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+
     async fn seed(&self) {
         let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
         let example = &contract["paths"]["/v1/events"]["post"]["requestBody"]["content"]["application/json"]
@@ -304,7 +318,10 @@ async fn embedded_http_mcp_matches_api_and_isolates_projects() {
 async fn exercise_project_queries(http: bool) {
     let collector = Collector::start();
     collector.seed().await;
-    let token = collector.keys["secret_key"].as_str().unwrap();
+    let created = collector.admin(&["key", "create", "default", "secret", "MCP", "--read-only"]);
+    assert_eq!(created["read_only"], true);
+    assert_eq!(created["restart_required"], false);
+    let token = created["key"].as_str().unwrap();
     let client = connect_mode(&collector.url, token, false, http).await;
     let live = connect_mode(
         &collector.url,
@@ -1009,28 +1026,17 @@ async fn embedded_http_authentication_origins_hosts_and_message_limits() {
 #[tokio::test]
 async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation() {
     let collector = Collector::start();
-    let admin = |args: &[&str]| {
-        let output = clean_command()
-            .args(args)
-            .env("COLLECTOR_DATA_DIR", &collector.directory)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        serde_json::from_slice::<Value>(&output.stdout).unwrap()
-    };
-    let created = admin(&["key", "create", "default", "secret", "MCP"]);
+    let created = collector.admin(&["key", "create", "default", "secret", "MCP", "--read-only"]);
     let client = connect_http(&collector.url, created["key"].as_str().unwrap(), true).await;
     assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
-    let rotated = admin(&[
+    let rotated = collector.admin(&[
         "key",
         "rotate",
         "default",
         created["key_id"].as_str().unwrap(),
     ]);
+    assert_eq!(rotated["read_only"], true);
+    assert_eq!(rotated["restart_required"], false);
     assert!(client.list_tools(None).await.is_err());
     client.cancel().await.unwrap();
     let client = connect_http(&collector.url, rotated["key"].as_str().unwrap(), false).await;
@@ -1038,7 +1044,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
         call(&client, "get_summary", json!({}), false).await["data"]["views"],
         0
     );
-    admin(&[
+    collector.admin(&[
         "key",
         "revoke",
         "default",

@@ -140,7 +140,9 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   assert.equal(live.restart_required, false);
   assert.deepEqual((await app.get("/v1/events")).events, []);
   assert.equal((await app.get("/v1/summary")).views, 0);
-  const dashboard = JSON.parse(await app.command(["key", "create", "default", "secret", "S3 dashboard"]));
+  const dashboard = JSON.parse(await app.command(["key", "create", "default", "secret", "S3 dashboard", "--read-only"]));
+  assert.equal(dashboard.read_only, true);
+  assert.equal(dashboard.restart_required, false);
   const records = events();
   for (const event of records) await app.send(event);
   await app.send(records[0]);
@@ -168,6 +170,14 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   assert.deepEqual(app.keys.projects.find(project => project.id === live.project_id).settings.allowed_origins, ["https://s3-customer.example"]);
   assert.equal((await fetch(`${app.url}/v1/project/keys`, { headers: { authorization: `Bearer ${oldSecret}` } })).status, 401);
   assert.equal((await app.get("/v1/events", dashboard.key)).events.length, records.length + 1);
+  assert.equal(app.keys.projects.find(project => project.id === "default").keys.find(key => key.id === dashboard.key_id).read_only, true);
+  const denied = await fetch(`${app.url}/v1/project`, { method: "DELETE", headers: { authorization: `Bearer ${dashboard.key}` } });
+  assert.equal(denied.status, 403);
+  const rotatedDashboard = await app.manage(`/keys/${dashboard.key_id}/rotate`, "POST");
+  assert.equal(rotatedDashboard.read_only, true);
+  assert.equal(rotatedDashboard.restart_required, false);
+  assert.equal((await fetch(`${app.url}/v1/events`, { headers: { authorization: `Bearer ${dashboard.key}` } })).status, 401);
+  assert.equal((await app.get("/v1/events", rotatedDashboard.key)).events.length, records.length + 1);
   const next = await app.get(`/v1/events?limit=100&cursor=${encodeURIComponent(first.next_cursor)}`);
   assert.equal(next.events.length, records.length);
   await app.send(records[0]);

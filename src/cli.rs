@@ -82,6 +82,9 @@ pub enum KeyCommand {
         project: String,
         permission: Permission,
         name: String,
+        /// Limit a secret key to analytics reads through HTTP and MCP
+        #[arg(long)]
+        read_only: bool,
     },
     /// Replace a credential's secret, retaining its key ID
     Rotate { project: String, key_id: String },
@@ -116,10 +119,14 @@ impl KeyCommand {
                 project,
                 permission,
                 name,
-            } => (
-                "key-create",
-                vec![project, permission.as_str().into(), name],
-            ),
+                read_only,
+            } => {
+                let mut args = vec![project, permission.as_str().into(), name];
+                if read_only {
+                    args.push("read-only".into());
+                }
+                ("key-create", args)
+            }
             Self::Rotate { project, key_id } => ("key-rotate", vec![project, key_id]),
             Self::Revoke { project, key_id } => ("key-revoke", vec![project, key_id]),
             Self::RotatePrimary { permission } => ("rotate-key", vec![permission.as_str().into()]),

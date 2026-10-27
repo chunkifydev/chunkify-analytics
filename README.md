@@ -117,7 +117,7 @@ The initial `default` project has two credentials:
 | Credential | Use |
 | --- | --- |
 | `public_key` | Starts with `ck_public_`. Use it in the player to send events. |
-| `secret_key` | Starts with `ck_secret_`. Read analytics, update or delete the project, and manage keys. Keep it on your backend. |
+| `secret_key` | Starts with `ck_secret_`. Full project access: read analytics, update or delete the project, and manage keys. Keep it on your backend. |
 
 Save these values privately. You can create separate named keys for each
 integration and revoke them independently.
@@ -229,7 +229,8 @@ error responses, or inspect the [OpenAPI specification](openapi.json).
 
 ## Read analytics
 
-Use a private secret key from your backend:
+Use a private secret key from your backend. For dashboards and MCP, create a
+read-only private key with `key create PROJECT_ID secret "Dashboard" --read-only`:
 
 ```sh
 export SECRET_KEY='YOUR_PRIVATE_SECRET_KEY'
@@ -288,9 +289,12 @@ Give each customer or website a separate project and credentials:
 
 ```sh
 chunkify-analytics project create "Production website"
-chunkify-analytics key create PROJECT_ID secret "Dashboard"
+chunkify-analytics key create PROJECT_ID secret "Dashboard" --read-only
 chunkify-analytics project retention PROJECT_ID 604800
 ```
+
+Read-only private keys can query analytics through HTTP and MCP. Existing and
+new private keys without `--read-only` keep full project access.
 
 Use the returned `project_id` in later commands. Save new secrets when returned.
 In Docker, run these commands through

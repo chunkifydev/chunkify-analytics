@@ -42,7 +42,18 @@ pub struct Credential {
     pub id: String,
     pub name: String,
     pub permission: Permission,
+    #[serde(default)]
+    pub read_only: bool,
     pub hash: String,
+}
+
+impl Credential {
+    pub fn metadata(&self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id, "name": self.name, "permission": self.permission,
+            "read_only": self.read_only,
+        })
+    }
 }
 
 pub fn hash(secret: &str) -> String {
@@ -73,6 +84,7 @@ pub fn credential(name: &str, permission: Permission) -> (Credential, String) {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
             permission,
+            read_only: false,
             hash: hash(&secret),
         },
         secret,
@@ -161,12 +173,14 @@ pub fn projects(keys: &Keys) -> Vec<Project> {
                     id: "primary-public".into(),
                     name: "Primary public".into(),
                     permission: Permission::Public,
+                    read_only: false,
                     hash: hash(&keys.public_key),
                 },
                 Credential {
                     id: "primary-secret".into(),
                     name: "Primary secret".into(),
                     permission: Permission::Secret,
+                    read_only: false,
                     hash: hash(&keys.secret_key),
                 },
             ],
@@ -218,6 +232,9 @@ pub fn validate(projects: &[Project]) -> Result<(), String> {
             return Err("At most 64 keys per project".into());
         }
         for key in &project.keys {
+            if key.read_only && key.permission != Permission::Secret {
+                return Err("Only secret keys support read-only access".into());
+            }
             if key.id.is_empty()
                 || key.id.len() > 64
                 || key.name.is_empty()
@@ -366,6 +383,19 @@ pub struct Registry {
 pub struct Resolved {
     pub project: Arc<Access>,
     pub key_id: String,
+    pub read_only: bool,
+}
+
+impl Resolved {
+    pub fn require_write(&self) -> Result<(), ApiError> {
+        if self.read_only {
+            return Err(ApiError(
+                axum::http::StatusCode::FORBIDDEN,
+                "Read-only keys cannot manage projects or keys".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Registry {
@@ -405,6 +435,7 @@ impl Registry {
                         Resolved {
                             project: access.clone(),
                             key_id: key.id,
+                            read_only: key.read_only,
                         },
                     ),
                 );
@@ -471,11 +502,13 @@ pub fn apply_command(
     args: &[String],
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let mut list = projects(keys);
+    // Offline changes apply on startup; live administration clears this after
+    // persisting the changes and updating the running registry.
     let mut output = serde_json::json!({"restart_required": true});
     match (command, args) {
             ("project-list", []) => {
                 return Ok(serde_json::json!(list.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "deleted": p.deleted, "settings": p.settings,
-                    "keys": p.keys.iter().map(|k| serde_json::json!({"id": k.id, "name": k.name, "permission": k.permission})).collect::<Vec<_>>() })).collect::<Vec<_>>()));
+                    "keys": p.keys.iter().map(Credential::metadata).collect::<Vec<_>>() })).collect::<Vec<_>>()));
             }
             ("rotate-key", [kind]) => {
                 let permission = Permission::parse(kind)?;
@@ -531,10 +564,20 @@ pub fn apply_command(
                 let project = active_project_mut(&mut list, id)?;
                 project.settings = serde_json::from_slice(&std::fs::read(file)?)?;
             }
-            ("key-create", [id, kind, name]) => {
+            ("key-create", [id, kind, name]) | ("key-create", [id, kind, name, _]) => {
+                let read_only = match args.get(3).map(String::as_str) {
+                    None => false,
+                    Some("read-only") => true,
+                    _ => return Err("Expected read-only key option".into()),
+                };
+                let permission = Permission::parse(kind)?;
+                if read_only && permission != Permission::Secret {
+                    return Err("Only secret keys support read-only access".into());
+                }
                 let project = active_project_mut(&mut list, id)?;
-                let (key, secret) = credential(name, Permission::parse(kind)?);
-                output = serde_json::json!({"project_id": id, "key_id": key.id, "key": secret, "permission": key.permission, "restart_required": true});
+                let (mut key, secret) = credential(name, permission);
+                key.read_only = read_only;
+                output = serde_json::json!({"project_id": id, "key_id": key.id, "key": secret, "permission": key.permission, "read_only": key.read_only, "restart_required": true});
                 project.keys.push(key);
             }
             ("key-revoke", [id, key_id]) => {
@@ -549,9 +592,9 @@ pub fn apply_command(
                 old.hash = new.hash;
                 if id == DEFAULT_PROJECT && key_id == "primary-public" { keys.public_key = secret.clone(); }
                 if id == DEFAULT_PROJECT && key_id == "primary-secret" { keys.secret_key = secret.clone(); }
-                output = serde_json::json!({"project_id": id, "key_id": key_id, "key": secret, "permission": old.permission, "restart_required": true});
+                output = serde_json::json!({"project_id": id, "key_id": key_id, "key": secret, "permission": old.permission, "read_only": old.read_only, "restart_required": true});
             }
-            _ => return Err("Expected project list | project create <name> | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <public|secret> <name> | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
+            _ => return Err("Expected project list | project create <name> | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <public|secret> <name> [--read-only] | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
         }
     validate(&list)?;
     keys.projects = Some(list);

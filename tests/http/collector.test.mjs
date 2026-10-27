@@ -1469,7 +1469,7 @@ test("secret keys list and rotate only their own project keys", async t => {
   const list = await response.json();
   assert.equal(list.project_id, live.project_id);
   assert.deepEqual(list.keys.map(key => key.permission).sort(), ["public", "secret"]);
-  for (const key of list.keys) assert.deepEqual(Object.keys(key).sort(), ["id", "name", "permission"]);
+  for (const key of list.keys) assert.deepEqual(Object.keys(key).sort(), ["id", "name", "permission", "read_only"]);
   assert.equal((await projectApi(server, "/keys", { token: live.public_key })).status, 401);
   const foreign = (await (await projectApi(server, "/keys")).json()).keys[0].id;
   assert.equal((await projectApi(server, `/keys/${foreign}/rotate`, { ...options, method: "POST" })).status, 404);
@@ -1688,4 +1688,64 @@ test("DELETE project revokes all keys, preserves retention and isolates other pr
   assert.equal((await server.get("/v1/events")).events.length, 1);
   listing = await projectCommand(server, ["project", "list"]);
   assert.equal(listing.find(p => p.id === customer.project_id).deleted, true);
+});
+
+test("read-only private keys read analytics live and cannot manage projects or keys", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { "retention.seconds": "0", COLLECTOR_ADMIN_KEY: adminKey });
+  const project = await projectCommand(server, ["project", "create", "Read-only customer"]);
+  const created = await projectCommand(server, ["key", "create", project.project_id, "secret", "Dashboard", "--read-only"]);
+  assert.equal(created.restart_required, false);
+  assert.equal(created.permission, "secret");
+  assert.equal(created.read_only, true);
+  assert.match(created.key, /^ck_secret_[0-9a-f]{64}$/);
+  const events = sdkEvents("readonly-video");
+  for (const event of events) assert.equal((await projectPost(server, project.public_key, event)).status, 201);
+  const from = events[0].occurred_at;
+  const to = new Date(Date.parse(from) + 86400000).toISOString();
+  const routes = ["/v1/events", "/v1/summary", "/v1/videos", "/v1/quality", "/v1/engagement",
+    `/v1/timeseries?${new URLSearchParams({ from, to, interval: "day" })}`];
+  for (const route of routes) {
+    assert.deepEqual(await server.get(route, created.key), await server.get(route, project.secret_key));
+    const head = await fetch(`${server.url}${route}`, { method: "HEAD", headers: { authorization: `Bearer ${created.key}` } });
+    assert.equal(head.status, 200);
+  }
+  assert.equal((await server.get("/v1/events")).events.length, 0, "read-only access stays in its project");
+  const list = await (await projectApi(server, "/keys", { token: project.secret_key })).json();
+  const metadata = list.keys.find(key => key.id === created.key_id);
+  component("ProjectKey", metadata);
+  assert.equal(metadata.read_only, true);
+  assert.ok(list.keys.filter(key => key.id !== created.key_id).every(key => key.read_only === false));
+  for (const [path, method, body] of [["/keys", "GET"], ["", "PATCH", { name: "Forbidden" }], ["", "DELETE"],
+    [`/keys/${created.key_id}/rotate`, "POST"], ["/keys/primary-secret/rotate", "POST"], ["/keys/foreign/rotate", "POST"]]) {
+    const response = await projectApi(server, path, { method, body, token: created.key });
+    assert.equal(response.status, 403, `${method} ${path}`);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    component("Error", await response.json());
+  }
+  assert.deepEqual(await (await projectApi(server, "/keys", { token: project.secret_key })).json(), list);
+  assert.equal((await projectPost(server, created.key, events[0])).status, 401);
+  assert.equal((await createProject(server, { name: "Forbidden" }, created.key)).status, 401);
+  const rotatedResponse = await projectApi(server, `/keys/${created.key_id}/rotate`, { method: "POST", token: project.secret_key });
+  assert.equal(rotatedResponse.status, 200);
+  const rotated = await rotatedResponse.json();
+  component("RotatedProjectKey", rotated);
+  assert.equal(rotated.read_only, true);
+  assert.equal(rotated.restart_required, false);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${created.key}` } })).status, 401);
+  assert.equal((await server.get("/v1/summary", rotated.key)).views, 1);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.equal((await server.get("/v1/summary", rotated.key)).views, 1);
+  assert.equal((await projectApi(server, "", { method: "DELETE", token: rotated.key })).status, 403);
+  const projects = await projectCommand(server, ["project", "list"]);
+  const saved = projects.find(p => p.id === project.project_id);
+  assert.equal(saved.name, "Read-only customer");
+  assert.equal(saved.keys.find(key => key.id === created.key_id).read_only, true);
+  const rejected = await server.command(["key", "create", project.project_id, "public", "Invalid", "--read-only"]);
+  assert.notEqual(rejected.code, 0);
+  assert.match(rejected.stderr, /Only secret keys support read-only access/);
+  await projectCommand(server, ["key", "revoke", project.project_id, created.key_id]);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${rotated.key}` } })).status, 401);
+  assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
 });

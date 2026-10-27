@@ -119,3 +119,86 @@ fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn private_key_access_defaults_to_full_and_read_only_survives_rotation() {
+    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
+    let path = directory.to_str().unwrap();
+    let command = |args: &[&str]| {
+        let mut arguments = vec!["--data-dir", path];
+        arguments.extend_from_slice(args);
+        let output = run(&arguments);
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    assert!(run(&["--data-dir", path, "init"]).status.success());
+    let original = command(&["project", "list"]);
+    assert!(
+        original[0]["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|key| key["read_only"] == false)
+    );
+    let full = command(&["key", "create", "default", "secret", "Administration"]);
+    assert_eq!(full["read_only"], false);
+    let readonly = command(&["key", "create", "default", "secret", "MCP", "--read-only"]);
+    assert_eq!(readonly["read_only"], true);
+    assert_eq!(
+        readonly["restart_required"], true,
+        "offline changes apply on startup"
+    );
+    let rotated = command(&[
+        "key",
+        "rotate",
+        "default",
+        readonly["key_id"].as_str().unwrap(),
+    ]);
+    assert_eq!(rotated["key_id"], readonly["key_id"]);
+    assert_eq!(rotated["read_only"], true);
+    assert_ne!(rotated["key"], readonly["key"]);
+
+    let filename = directory.join("keys.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&filename).unwrap()).unwrap();
+    let keys = saved["projects"][0]["keys"].as_array_mut().unwrap();
+    keys.iter_mut()
+        .find(|key| key["id"] == full["key_id"])
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("read_only");
+    std::fs::write(&filename, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let listing = command(&["project", "list"]);
+    let keys = listing[0]["keys"].as_array().unwrap();
+    assert_eq!(
+        keys.iter().find(|key| key["id"] == full["key_id"]).unwrap()["read_only"],
+        false
+    );
+    assert_eq!(
+        keys.iter()
+            .find(|key| key["id"] == readonly["key_id"])
+            .unwrap()["read_only"],
+        true
+    );
+    let rejected = run(&[
+        "--data-dir",
+        path,
+        "key",
+        "create",
+        "default",
+        "public",
+        "Invalid",
+        "--read-only",
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("Only secret keys support read-only access")
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&std::fs::read(filename).unwrap()).unwrap(),
+        saved
+    );
+    std::fs::remove_dir_all(directory).unwrap();
+}

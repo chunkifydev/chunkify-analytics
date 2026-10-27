@@ -43,3 +43,8 @@ debug = 0
 [profile.ci]
 inherits = "dev"
 opt-level = 1
+
+# Test harnesses and the collector do not need LLVM optimization for CI's
+# functional checks; DuckDB and Rust dependencies remain optimized.
+[profile.ci.package.chunkify-analytics]
+opt-level = 0

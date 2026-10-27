@@ -39,6 +39,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: linked-duckdb-ci-ubuntu22-v1
+          cache-on-failure: true
       - name: Install prebuilt DuckDB
         run: sh scripts/install-duckdb.sh
       # cargo test also builds the real executable for integration tests. Build
@@ -49,7 +50,9 @@ jobs:
         run: cargo test --locked --profile ci
       - run: cargo clippy --locked --profile ci --all-targets -- -D warnings
       - name: Install browser test runtime
-        run: npx playwright install --with-deps --only-shell chromium
+        # The runner already has Chromium's runtime libraries. SDK tests do not
+        # need the optional font packages installed by --with-deps.
+        run: npx playwright install --only-shell chromium
       - name: Test native demo, HTTP API and browser adapters
         run: node --test examples/demo/*.test.mjs tests/http/*.test.mjs
       - name: Prepare tested executable for Docker

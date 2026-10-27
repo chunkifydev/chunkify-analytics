@@ -89,9 +89,12 @@ together with `cargo test --profile ci --no-run`. The tests then reuse those
 artifacts. Native API tests and container tests exercise the same
 executable. Playwright is installed once for real-browser SDK coverage.
 
-The `ci` profile inherits development checks and uses optimization level 1 to
-keep builds fast and the load smoke tests practical. Normal Docker builds use
-the fully optimized release profile.
+The `ci` profile inherits development checks. Rust dependencies use optimization
+level 1; the collector and test harnesses use level 0 for fast compilation.
+DuckDB uses its optimized upstream library. Normal Docker builds use the fully
+optimized release profile. The runner already includes Chromium's shared
+libraries, so browser setup downloads only the headless browser, without
+reinstalling system packages and optional fonts.
 
 CI builds on Ubuntu 22.04 so the executable's glibc requirement is compatible
 with the Debian Bookworm runtime image. A Docker named build context replaces

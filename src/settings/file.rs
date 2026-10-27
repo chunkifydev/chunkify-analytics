@@ -27,7 +27,6 @@ struct Server {
     trusted_proxies: Option<Vec<String>>,
     store_ip: Option<bool>,
     max_body_bytes: Option<usize>,
-    max_otlp_records: Option<usize>,
     ingest_per_second: Option<u32>,
 }
 
@@ -180,11 +179,6 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         settings
             .values
             .insert("server.max_body_bytes".into(), value.to_string().into());
-    }
-    if let Some(value) = config.server.max_otlp_records {
-        settings
-            .values
-            .insert("server.max_otlp_records".into(), value.to_string().into());
     }
     if let Some(value) = config.server.ingest_per_second {
         settings

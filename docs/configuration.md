@@ -71,8 +71,7 @@ See [storage](storage.md) for local and S3/R2 examples.
 
 | TOML field | Default | Meaning |
 | --- | --- | --- |
-| `server.max_body_bytes` | `65536` | Maximum request body size in bytes. OTLP gzip requests must fit this limit both before and after decompression. Must be positive. |
-| `server.max_otlp_records` | `100` | Maximum log records per OTLP request, across all resource and scope groups, including duplicates. Must be positive. |
+| `server.max_body_bytes` | `65536` | Maximum JSON request body size in bytes. Must be positive. |
 | `server.ingest_per_second` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
 | `batch.queue_max_bytes` | `16777216` | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
 | `batch.queue_max_requests` | `256` | Database channel capacity, shared by writes, reads and maintenance. Range 1..4096. The byte budget also applies to writes. |
@@ -99,9 +98,8 @@ See [storage](storage.md) for local and S3/R2 examples.
 ### Batching and overload
 
 Concurrent writes share batches up to the event, byte or delay limit. Reads can
-flush a pending batch early. An OTLP request is never split; a request larger
-than either batch limit returns 413. Increase both limits when accepting larger
-exports.
+flush a pending batch early. A request larger than either batch limit returns
+413. Increase both limits when accepting larger events.
 
 Rate limits return 429 with `Retry-After: 1`. Full request or write-buffer budgets
 return 503. The byte budget covers prepared writes, not total process memory.

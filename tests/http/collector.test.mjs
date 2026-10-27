@@ -6,41 +6,19 @@ import { once } from "node:events";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer, request as httpRequest } from "node:http";
-import { gzipSync } from "node:zlib";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { component } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
-// Capture the public adapter's actual HTTP output for tests of gateway batching.
-async function otlpRequests(events, options) {
-  const requests = [];
-  const receiver = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
-    response.writeHead(200, { "Content-Type": "application/json" }).end("{}");
-  });
-  receiver.listen(0, "127.0.0.1");
-  await once(receiver, "listening");
-  try {
-    const adapter = createOtlpAdapter(`http://127.0.0.1:${receiver.address().port}/v1/logs`, options);
-    for (const event of events) await adapter.send(event);
-    return requests;
-  } finally {
-    await new Promise((resolveClose) => receiver.close(resolveClose));
-  }
-}
-
-function postOtlp(server, body, headers = {}) {
-  return fetch(`${server.url}/v1/logs`, { method: "POST", body,
+function postEvent(server, body, headers = {}) {
+  return fetch(`${server.url}/v1/events`, { method: "POST", body,
     headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, ...headers },
   });
 }
@@ -115,11 +93,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
     async send(event, headers = {}) {
       await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.public_key, ...headers } }).send(event);
     },
-    async sendOtlp(event, options = {}) {
-      await createOtlpAdapter(`${server.url}/v1/logs`, {
-        ...options, headers: { "X-Chunkify-Ingest-Key": keys.public_key, ...options.headers },
-      }).send(event);
-    },
+
   };
   await server.start(initialBinary);
   return server;
@@ -199,7 +173,7 @@ test("optional profiling reports database work on shutdown without event data or
   const events = sdkEvents("private-video", "private-viewer");
   await server.send(events[0]);
   await server.send(events[0]);
-  await server.sendOtlp(events[1]);
+  await server.send(events[1]);
   await server.get("/v1/events");
   await server.get("/v1/summary");
   await server.get("/v1/videos");
@@ -221,7 +195,7 @@ test("optional profiling reports database work on shutdown without event data or
     assert.equal(profile.ingest_stages[name].count, 3);
     assert.ok(profile.ingest_stages[name].total_ms >= profile.ingest_stages[name].max_ms);
   }
-  assert.equal(profile.ingest_stages.insert_otlp.count, 1);
+  assert.equal(profile.ingest_stages.insert_otlp, undefined);
   for (const secret of [server.keys.public_key, server.keys.secret_key, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
     assert.ok(!JSON.stringify(profiles(server)).includes(secret), "profiles must contain only aggregate measurements");
   }
@@ -231,11 +205,11 @@ test("optional profiling reports database work on shutdown without event data or
   assert.ok(!server.logs().includes('"collector_profile"'));
 });
 
-test("checkpoint configuration is applied and acknowledged native and OTLP events survive a crash", async (t) => {
+test("checkpoint configuration is applied and acknowledged events survive a crash", async (t) => {
   const server = await collector(t, { "profile": "true", "duckdb.checkpoint_threshold_mib": "64" });
   const events = sdkEvents("checkpoint");
   await server.send(events[0]);
-  await server.sendOtlp(events.at(-1));
+  await server.send(events.at(-1));
   const records = (await server.get("/v1/events")).events;
   await server.stop("SIGKILL");
   await server.start();
@@ -252,21 +226,17 @@ test("checkpoint configuration is applied and acknowledged native and OTLP event
   }
 });
 
-test("concurrent native and OTLP requests share bounded transactions and preserve their data", async (t) => {
+test("concurrent event requests share bounded transactions and preserve their data", async (t) => {
   const server = await collector(t, { "profile": "true", "retention.seconds": "0",
     "batch.max_events": "8", "batch.delay_ms": "100", "batch.insert_mode": "row" });
   const events = Array.from({ length: 12 }, (_, index) => sdkEvents(`batch-${index}`)[0]);
-  const envelopes = await otlpRequests(events);
-  await Promise.all(events.map(async (event, index) => {
-    if (index % 2 === 0) await server.send(event);
-    else assert.equal((await postOtlp(server, JSON.stringify(envelopes[index]))).status, 200);
-  }));
+  await Promise.all(events.map(event => server.send(event)));
   const records = (await server.get("/v1/events")).events;
   assert.deepEqual(new Set(records.map((r) => r.event.event_id)), new Set(events.map((e) => e.event_id)));
   for (const record of records) {
     const index = events.findIndex((event) => event.event_id === record.event.event_id);
     assert.deepEqual(record.event, events[index]);
-    assert.equal(Boolean(record.otlp), index % 2 === 1);
+    assert.equal(record.otlp, undefined);
     assert.equal(record.event_context.client_ip, "127.0.0.1");
   }
   await server.stop();
@@ -294,9 +264,7 @@ test("oversized write requests are rejected atomically and a full byte budget re
   const server = await collector(t, { "batch.max_bytes": "16384", "batch.queue_max_bytes": "16384",
     "batch.delay_ms": "250", "batch.max_events": "2", "server.ingest_per_second": "1000" });
   const events = Array.from({ length: 3 }, (_, i) => sdkEvents(`limits-${i}`)[0]);
-  const envelopes = await otlpRequests(events);
-  const batch = { resourceLogs: [{ scopeLogs: [{ logRecords: envelopes.map((e) => e.resourceLogs[0].scopeLogs[0].logRecords[0]) }] }] };
-  assert.equal((await postOtlp(server, JSON.stringify(batch))).status, 413);
+  assert.equal((await postEvent(server, JSON.stringify(events))).status, 400);
   assert.equal((await server.get("/v1/events")).events.length, 0);
   const post = (event) => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
     headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } });
@@ -310,13 +278,11 @@ test("oversized write requests are rejected atomically and a full byte budget re
   assert.equal((await post(events[0])).status, 201, "completed and rejected requests must release their budget");
 });
 
-test("bulk writes keep the first event and envelope and return per-request duplicate results", async (t) => {
+test("bulk writes keep the first event and return per-request duplicate results", async (t) => {
   const server = await collector(t, { "batch.insert_mode": "bulk", "profile": "true", "batch.delay_ms": "100" });
   const playback = sdkEvents("bulk");
   const events = [playback[0], playback.at(-1)];
-  const envelopes = await otlpRequests([events[0], { ...events[0], replaced: true }, events[1]]);
-  const body = { resourceLogs: [{ scopeLogs: [{ logRecords: envelopes.map((e) => e.resourceLogs[0].scopeLogs[0].logRecords[0]) }] }] };
-  assert.equal((await postOtlp(server, JSON.stringify(body))).status, 200);
+  for (const event of events) await server.send(event);
   const responses = await Promise.all(Array.from({ length: 6 }, () => fetch(`${server.url}/v1/events`, {
     method: "POST", body: JSON.stringify({ ...events[0], replaced: true }),
     headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
@@ -327,12 +293,12 @@ test("bulk writes keep the first event and envelope and return per-request dupli
   }
   const records = (await server.get("/v1/events")).events;
   assert.deepEqual(records.map((r) => r.event), events);
-  assert.deepEqual(records[0].otlp.log_record, envelopes[0].resourceLogs[0].scopeLogs[0].logRecords[0]);
+  assert.ok(records.every(record => record.otlp === undefined));
   await server.stop();
   const profile = writerProfile(server);
   assert.ok(profile.ingest_stages.append_events?.count > 0, "bulk writes must use the measured bulk path");
   assert.equal(profile.ingest.inserted_records, 2);
-  assert.equal(profile.ingest.requests, 7);
+  assert.equal(profile.ingest.requests, 8);
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events, records);
   await server.send(sdkEvents("after-bulk")[0]);
@@ -349,12 +315,9 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
   await server.start();
   assert.ok(!(await readdir(server.directory)).some((name) => name.endsWith(".wal")));
   const events = Array.from({ length: 8 }, (_, i) => sdkEvents(`failed-${i}`)[0]);
-  const envelopes = await otlpRequests(events);
   await chmod(server.directory, 0o500);
   try {
-    const responses = await Promise.all(events.map((event, i) => i % 2
-      ? postOtlp(server, JSON.stringify(envelopes[i]))
-      : fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
+    const responses = await Promise.all(events.map((event) => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
         headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } })));
     assert.ok(responses.every((r) => r.status === 500), `failed writes returned ${responses.map((r) => r.status)}`);
   } finally { await chmod(server.directory, 0o700); }
@@ -365,17 +328,15 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
   assert.equal((await server.get("/v1/events")).events.length, 1);
 });
 
-test("zero collection delay commits each request separately, including empty OTLP requests", async (t) => {
+test("zero collection delay commits each event request separately", async (t) => {
   const server = await collector(t, { "batch.delay_ms": "0", "profile": "true" });
-  await Promise.all(Array.from({ length: 12 }, (_, i) => i % 2
-    ? server.send(sdkEvents(`zero-${i}`)[0])
-    : postOtlp(server, JSON.stringify({ resourceLogs: [] })).then((r) => assert.equal(r.status, 200))));
+  await Promise.all(Array.from({ length: 12 }, (_, i) => server.send(sdkEvents(`zero-${i}`)[0])));
   await server.stop();
   const profile = writerProfile(server);
   assert.equal(profile.ingest.requests, 12);
   assert.equal(profile.ingest.transactions, 12);
   assert.equal(profile.ingest.max_requests, 1);
-  assert.equal(profile.ingest.inserted_records, 6);
+  assert.equal(profile.ingest.inserted_records, 12);
 });
 
 test("shared-worker reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
@@ -390,10 +351,7 @@ test("shared-worker reads flush pending writes and graceful shutdown drains an i
   await writing;
   assert.ok(Date.now() - before < 800, "a queued read should flush the batch before its one-second deadline");
   const events = Array.from({ length: 6 }, (_, i) => sdkEvents(`shutdown-${i}`)[0]);
-  const envelopes = await otlpRequests(events);
-  const pending = Promise.all(events.map((event, i) => i % 2
-    ? postOtlp(server, JSON.stringify(envelopes[i])).then((r) => assert.equal(r.status, 200))
-    : server.send(event)));
+  const pending = Promise.all(events.map(event => server.send(event)));
   await delay(100);
   await Promise.all([server.stop(), pending]);
   await server.start();
@@ -450,7 +408,7 @@ test("connection IP is stored separately and cannot be replaced by event fields 
   assert.deepEqual(stored.events[0].event_context, {
     schema_version: 1, peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
   });
-  await server.sendOtlp(event);
+  await server.send(event);
   await server.stop("SIGKILL");
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), stored);
@@ -460,7 +418,7 @@ test("IP collection can be disabled without rewriting earlier events or enrichin
   const server = await collector(t, { "server.store_ip": "false" });
   const events = sdkEvents();
   await server.send(events[0]);
-  await server.sendOtlp(events[1]);
+  await server.send(events[1]);
   const withoutIp = (await server.get("/v1/events")).events;
   assert.ok(withoutIp.every((record) => !Object.hasOwn(record, "event_context")));
   await server.stop();
@@ -475,7 +433,7 @@ test("IP collection can be disabled without rewriting earlier events or enrichin
   await server.start(binary, { "server.store_ip": "false" });
   await server.send(added);
   assert.deepEqual((await server.get("/v1/events")).events, withIp);
-  await server.sendOtlp(sdkEvents("disabled-again")[0]);
+  await server.send(sdkEvents("disabled-again")[0]);
   assert.equal((await server.get("/v1/events")).events.at(-1).event_context, undefined);
 });
 
@@ -497,7 +455,7 @@ test("flat event context copies browser fields and reserves IP fields for the co
   await server.stop("SIGKILL");
   await server.start(binary, { "server.store_ip": "false" });
   const withoutIp = { ...sdkEvents()[0], browser_context: event.browser_context };
-  await server.sendOtlp(withoutIp);
+  await server.send(withoutIp);
   const records = (await server.get("/v1/events")).events;
   assert.deepEqual(records[0], stored);
   assert.deepEqual(records[1].event, withoutIp);
@@ -515,14 +473,14 @@ test("trusted proxies resolve the first untrusted address from the right", async
   assert.deepEqual(stored[0].event_context, {
     schema_version: 1, peer_ip: "127.0.0.1", client_ip: "198.51.100.8", client_ip_source: "x_forwarded_for",
   });
-  await server.sendOtlp(event, { headers: { "X-Forwarded-For": "203.0.113.33" } });
+  await server.send(event, { "X-Forwarded-For": "203.0.113.33" });
   assert.deepEqual((await server.get("/v1/events")).events, stored, "a retry cannot replace the first request context");
   assert.ok(!server.logs().includes("198.51.100.8"));
 });
 
 test("proxy headers are ignored unless the connection peer matches the configured trust list", async (t) => {
   const server = await collector(t, { "server.trusted_proxies": "10.0.0.0/8,::1" });
-  await server.sendOtlp(sdkEvents()[0], { headers: { "X-Forwarded-For": "203.0.113.10, 10.1.2.3" } });
+  await server.send(sdkEvents()[0], { "X-Forwarded-For": "203.0.113.10, 10.1.2.3" });
   const context = (await server.get("/v1/events")).events[0].event_context;
   assert.equal(context.client_ip, "127.0.0.1");
   assert.equal(context.client_ip_source, "connection");
@@ -676,12 +634,12 @@ test("the browser Chunkify adapter persists context through authenticated ingest
   assert.deepEqual(await server.get("/v1/events"), stored);
 });
 
-test("retention expires native and OTLP events by receipt time and updates summaries", async (t) => {
+test("retention expires events by receipt time and updates summaries", async (t) => {
   const server = await collector(t, { "retention.seconds": "2", "retention.interval_seconds": "1" });
   const past = { ...sdkEvents("past-video")[0], occurred_at: "2000-01-01T00:00:00Z" };
   const future = { ...sdkEvents("future-video")[0], occurred_at: "2099-01-01T00:00:00Z" };
   await server.send(past);
-  await server.sendOtlp(future);
+  await server.send(future);
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [past, future]);
   assert.equal((await server.get("/v1/summary")).views, 2);
   const deadline = Date.now() + 7000;
@@ -690,7 +648,7 @@ test("retention expires native and OTLP events by receipt time and updates summa
   assert.deepEqual(await server.get("/v1/summary"), { views: 0, unique_viewers: 0, total_playing_time_ms: 0 });
   assert.deepEqual((await server.get("/v1/videos")).videos, []);
   // Expired event IDs can be received again, with a new retention lifetime.
-  await server.sendOtlp(future);
+  await server.send(future);
   assert.equal((await server.get("/v1/events")).events.length, 1);
   await server.stop("SIGKILL");
   await server.start(binary, { "retention.seconds": "0" });
@@ -701,7 +659,7 @@ test("retention defaults to 30 days, can be disabled, and purges at startup", as
   const server = await collector(t);
   assert.match(server.output, /Retention: 2592000 seconds/);
   const event = { ...sdkEvents()[0], occurred_at: "2000-01-01T00:00:00Z" };
-  await server.sendOtlp(event);
+  await server.send(event);
   await server.stop();
   await delay(1200);
   await server.start(binary, { "retention.seconds": "0", "retention.interval_seconds": "1" });
@@ -754,9 +712,9 @@ test("offline key rotation replaces each credential independently without exposi
     body: JSON.stringify(event),
   });
   assert.equal(deniedWrite.status, 401);
-  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.public_key })).status, 401);
+  assert.equal((await postEvent(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.public_key })).status, 401);
   const rotatedIngest = server.keys.public_key;
-  await server.sendOtlp(sdkEvents("after-ingest-rotation")[0]);
+  await server.send(sdkEvents("after-ingest-rotation")[0]);
   await server.stop("SIGKILL");
   const read = await server.command(["key", "rotate-primary", "secret"]);
   assert.equal(read.code, 0, read.stderr);
@@ -775,14 +733,13 @@ test("offline key rotation replaces each credential independently without exposi
   assert.equal((await server.get("/v1/summary")).views, 3);
 });
 
-test("a stopped data-directory backup restores events, OTLP context, summaries and keys", async (t) => {
+test("a stopped data-directory backup restores events, summaries and keys", async (t) => {
   const events = sdkPlayback(t);
   const server = await collector(t);
   const backups = await mkdtemp(join(tmpdir(), "chunkify-collector-backup-test-"));
   t.after(async () => { await server.stop(); await rm(backups, { recursive: true, force: true }); });
   for (const [index, event] of events.entries()) {
-    if (index % 2) await server.sendOtlp(event);
-    else await server.send(event);
+    await server.send(event);
   }
   const originalKeys = { ...server.keys };
   const originalEvents = await server.get("/v1/events");
@@ -805,7 +762,7 @@ test("a stopped data-directory backup restores events, OTLP context, summaries a
   await server.start(binary, { "data_dir": restored });
   assert.deepEqual(await server.get("/v1/events"), originalEvents);
   assert.deepEqual(await server.get("/v1/summary"), originalSummary);
-  await server.sendOtlp(events[0]);
+  await server.send(events[0]);
   assert.deepEqual(await server.get("/v1/events"), originalEvents);
   await server.send(sdkEvents("after-restore")[0]);
   assert.equal((await server.get("/v1/summary")).views, 2);
@@ -947,23 +904,22 @@ test("summaries count views and viewers and use final or latest cumulative playt
 
 test("ingestion rate limits reject excess requests without storing more events", async (t) => {
   const event = sdkEvents()[0];
-  const [envelope] = await otlpRequests([event]);
   const server = await collector(t, { "server.ingest_per_second": "1" });
-  const responses = await Promise.all(Array.from({ length: 8 }, (_, index) => fetch(`${server.url}/v1/${index % 2 ? "logs" : "events"}`, {
+  const responses = await Promise.all(Array.from({ length: 8 }, () => fetch(`${server.url}/v1/events`, {
     method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
-    body: JSON.stringify(index % 2 ? envelope : event),
+    body: JSON.stringify(event),
   })));
   assert.equal(responses.filter((response) => response.ok).length, 1);
   assert.equal(responses.filter((response) => response.status === 429).length, 7);
   assert.equal(responses.find((response) => response.status === 429).headers.get("retry-after"), "1");
-  for (const response of responses.filter((response) => response.status === 429 && response.url.endsWith("/v1/logs"))) {
-    assert.equal(typeof (await response.json()).message, "string");
+  for (const response of responses.filter((response) => response.status === 429)) {
+    assert.equal(typeof (await response.json()).error, "string");
   }
   assert.equal((await server.get("/v1/events")).events.length, 1);
   assert.deepEqual(await (await fetch(`${server.url}/healthz`)).json(), { status: "ok" });
 });
 
-test("upgrading a previous collector preserves events and keys and accepts OTLP", {
+test("upgrading a previous collector preserves events and keys and accepts new events", {
   skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
 }, async (t) => {
   const server = await collector(t, {}, process.env.COLLECTOR_PREVIOUS_BINARY);
@@ -988,10 +944,10 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   const afterPage = await server.get(`/v1/events?limit=2&cursor=${encodeURIComponent(beforePage.next_cursor)}`);
   assert.deepEqual(afterPage.events, expected.events.slice(2, 4), "pre-upgrade cursors retain their event ordering");
   assert.deepEqual(await server.get("/v1/summary"), summary);
-  for (const event of events) await server.sendOtlp(event);
+  for (const event of events) await server.send(event);
   assert.deepEqual(await server.get("/v1/events"), expected, "migration must not invent IP context for old events, even on retry");
   const added = sdkEvents("after-upgrade")[0];
-  await server.sendOtlp(added);
+  await server.send(added);
   await server.stop("SIGKILL");
   await server.start();
   const upgraded = (await server.get("/v1/events")).events;
@@ -999,197 +955,6 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   assert.deepEqual(upgraded.slice(0, events.length), expected.events);
   assert.equal(upgraded.at(-1).event_context.client_ip, "127.0.0.1");
   assert.equal((await server.get("/v1/summary")).views, 2);
-});
-
-test("the OTLP adapter preserves all seven SDK events and produces the same reports as native ingestion", async (t) => {
-  const events = sdkPlayback(t);
-  const native = await collector(t);
-  const otlp = await collector(t);
-  for (const event of events) {
-    await native.send(event);
-    await otlp.sendOtlp(event);
-  }
-  const records = (await otlp.get("/v1/events")).events;
-  assert.deepEqual(records.map((record) => record.event), events);
-  for (const record of records) {
-    assert.equal(record.otlp.log_record.eventName, record.event.event_name);
-    assert.equal(record.otlp.scope_logs.scope.name, "@chunkify/analytics");
-    assert.deepEqual(record.otlp.resource_logs, {});
-  }
-  for (const path of ["/v1/summary", "/v1/videos", "/v1/summary?video_id=video-a&viewer_id=viewer-a"]) {
-    assert.deepEqual(await otlp.get(path), await native.get(path));
-  }
-  // First delivery wins, whichever transport arrives first.
-  for (const event of events) {
-    await native.sendOtlp(event);
-    await otlp.send(event);
-    await otlp.sendOtlp(event);
-  }
-  assert.equal((await native.get("/v1/events")).events.length, events.length);
-  assert.deepEqual((await otlp.get("/v1/events")).events, records);
-  await otlp.stop("SIGKILL");
-  await otlp.start();
-  assert.deepEqual((await otlp.get("/v1/events")).events, records);
-});
-
-test("OTLP gzip batches retain resource and scope context and deduplicate within a batch", async (t) => {
-  const events = [...sdkEvents("video-a"), ...sdkEvents("video-b")]
-    .map((event, index) => ({ ...event, browser_context: { schema_version: 1, browser_name: index < 2 ? "Firefox" : "Safari" } }));
-  const extra = { enabled: true, fraction: 0.060875000000010004, tags: ["demo", "customer"], details: { count: 4 } };
-  const envelopes = await otlpRequests(events, { mapAttributes: (event) => ({ ...event, extra }) });
-  const logs = envelopes.map((envelope) => envelope.resourceLogs[0].scopeLogs[0].logRecords[0]);
-  // ProtoJSON permits int64 values as JSON numbers as well as decimal strings.
-  for (const log of logs) {
-    const sequence = log.attributes.find((attribute) => attribute.key === "sequence");
-    sequence.value.intValue = Number(sequence.value.intValue);
-  }
-  const resource = { attributes: [{ key: "service.name", value: { stringValue: "customer-player" } }] };
-  const scope = { name: "customer-gateway", version: "1.0" };
-  const batch = { futureField: true, resourceLogs: [
-    { resource, schemaUrl: "https://example.com/resource", scopeLogs: [
-      { scope, schemaUrl: "https://example.com/scope", logRecords: logs.slice(0, 2) },
-      { logRecords: logs.slice(2, 3) },
-    ] },
-    { scopeLogs: [{ logRecords: [...logs.slice(3), logs[0]] }] },
-  ] };
-  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
-  const response = await postOtlp(server, gzipSync(JSON.stringify(batch)), {
-    "Content-Encoding": "gzip", "X-Forwarded-For": "198.51.100.50",
-  });
-  assert.equal(response.status, 200, await response.clone().text());
-  assert.deepEqual(await response.json(), {});
-  const stored = (await server.get("/v1/events")).events;
-  assert.deepEqual(stored.map((record) => record.event), events.map((event) => ({ ...event, extra })));
-  assert.ok(stored.every((record) => record.event_context.client_ip === "198.51.100.50"),
-    "the request IP describes the gateway while per-event browser contexts remain distinct");
-  assert.deepEqual(stored[0].otlp, {
-    resource_logs: { resource, schemaUrl: "https://example.com/resource" },
-    scope_logs: { scope, schemaUrl: "https://example.com/scope" }, log_record: logs[0],
-  });
-  assert.deepEqual(stored[2].otlp.scope_logs, {});
-  assert.deepEqual(stored[3].otlp.resource_logs, {});
-  assert.deepEqual(await server.get("/v1/summary"), { views: 2, unique_viewers: 1, total_playing_time_ms: 0 });
-  assert.equal((await postOtlp(server, JSON.stringify(batch))).status, 200);
-  assert.deepEqual((await server.get("/v1/events")).events, stored);
-  await server.stop("SIGKILL");
-  await server.start();
-  assert.deepEqual((await server.get("/v1/events")).events, stored);
-});
-
-test("large OTLP batches decode promptly and preserve each scope's original metadata", async (t) => {
-  const event = { ...sdkEvents()[0], browser_context: {
-    schema_version: 1, browser_name: "Chrome", browser_version: "130.0.0.0",
-    os_name: "macOS", os_version: "14.6", device_type: "desktop", language: "fr-FR",
-    timezone: "Europe/Paris", screen_width_px: 1920, screen_height_px: 1080,
-  } };
-  const [template] = await otlpRequests([event]);
-  const log = template.resourceLogs[0].scopeLogs[0].logRecords[0];
-  const resource = { resource: { attributes: [{ key: "service.name", value: { stringValue: "batch-test" } }] },
-    schemaUrl: "https://example.test/resource", future_field: { retained: true } };
-  const expected = new Map();
-  const scopeLogs = ["first", "second"].map((name) => {
-    const metadata = { scope: { name, version: "1" }, schemaUrl: `https://example.test/${name}`,
-      future_field: { retained: name } };
-    const logRecords = Array.from({ length: 500 }, () => {
-      const event_id = crypto.randomUUID();
-      const record = { ...log, attributes: log.attributes.map((attribute) => attribute.key === "event_id"
-        ? { key: "event_id", value: { stringValue: event_id } } : attribute) };
-      expected.set(event_id, { event: { ...event, event_id },
-        otlp: { resource_logs: resource, scope_logs: metadata, log_record: record } });
-      return record;
-    });
-    return { ...metadata, logRecords };
-  });
-  const server = await collector(t, { "server.max_otlp_records": "1000", "batch.max_events": "1000",
-    "server.max_body_bytes": "16777216", "batch.max_bytes": "16777216",
-    "batch.queue_max_bytes": "67108864" });
-  // A generous request deadline catches repeated whole-batch copies before persistence.
-  // Kill a failed test server promptly rather than waiting for the expensive decode.
-  try {
-    const response = await fetch(`${server.url}/v1/logs`, { method: "POST",
-      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
-      body: JSON.stringify({ resourceLogs: [{ ...resource, scopeLogs }] }), signal: AbortSignal.timeout(10000) });
-    assert.equal(response.status, 200, await response.clone().text());
-    assert.deepEqual(await response.json(), {});
-  } catch (error) {
-    await server.stop("SIGKILL");
-    throw error;
-  }
-  const records = await server.get("/v1/events?limit=1000");
-  assert.equal(records.next_cursor, null);
-  assert.equal(records.events.length, expected.size);
-  for (const record of records.events) {
-    const original = expected.get(record.event.event_id);
-    assert.deepEqual(record.event, original.event);
-    assert.deepEqual(record.otlp, original.otlp);
-  }
-  await server.stop();
-  await server.start();
-  assert.deepEqual(await server.get("/v1/events?limit=1000"), records);
-});
-
-test("OTLP rejects invalid or excessive exports atomically with protocol errors", async (t) => {
-  const server = await collector(t, { "server.max_body_bytes": "32768", "server.max_otlp_records": "2" });
-  const event = sdkEvents()[0];
-  const [envelope] = await otlpRequests([event]);
-  const log = envelope.resourceLogs[0].scopeLogs[0].logRecords[0];
-  const body = JSON.stringify(envelope);
-  const batch = (logs) => JSON.stringify({ resourceLogs: [{ scopeLogs: [{ logRecords: logs }] }] });
-  async function rejected(payload, status, headers = {}) {
-    const response = await postOtlp(server, payload, headers);
-    assert.equal(response.status, status, await response.clone().text());
-    assert.match(response.headers.get("content-type"), /^application\/json/);
-    assert.equal(response.headers.get("cache-control"), "no-store");
-    const error = await response.json();
-    assert.equal(typeof error.message, "string");
-    assert.ok(error.message.length > 0);
-    assert.equal(error.error, undefined);
-    assert.deepEqual((await server.get("/v1/events")).events, []);
-    assert.equal((await server.get("/v1/summary")).views, 0);
-  }
-  await rejected(body, 401, { "X-Chunkify-Ingest-Key": "" });
-  await rejected(body, 401, { "X-Chunkify-Ingest-Key": server.keys.secret_key });
-  await rejected(body, 403, { Origin: "https://elsewhere.example" });
-  await rejected(body, 415, { "Content-Type": "application/x-protobuf" });
-  await rejected(body, 415, { "Content-Encoding": "br" });
-  await rejected("{", 400);
-  await rejected("null", 400);
-  await rejected('{"resourceLogs":{}}', 400);
-  await rejected(Buffer.from("not gzip"), 400, { "Content-Encoding": "gzip" });
-  await rejected(gzipSync(body).subarray(0, -8), 400, { "Content-Encoding": "gzip" });
-  await rejected(" ".repeat(32769), 413);
-  await rejected(gzipSync(" ".repeat(32769)), 413, { "Content-Encoding": "gzip" });
-  await rejected(batch([log, log, log]), 413);
-  const invalidAttributes = [
-    log.attributes.filter((attribute) => attribute.key !== "video_id"),
-    log.attributes.map((attribute) => attribute.key === "schema_version" ? { ...attribute, value: { intValue: "2" } } : attribute),
-    log.attributes.map((attribute) => attribute.key === "event_name" ? { ...attribute, value: { stringValue: "unknown" } } : attribute),
-    [...log.attributes, log.attributes[0]],
-    [...log.attributes, { key: 3, value: { stringValue: "invalid key" } }],
-    [...log.attributes, { key: "extra", value: { intValue: "one" } }],
-    [...log.attributes, { key: "extra", value: { stringValue: "x", boolValue: true } }],
-  ];
-  for (const attributes of invalidAttributes) {
-    await rejected(batch([log, { ...log, attributes }]), 400);
-  }
-  await assert.rejects(server.sendOtlp(event, { mapAttributes: () => ({ video_id: "only-one-field" }) }));
-  assert.deepEqual((await server.get("/v1/events")).events, []);
-  for (const empty of [{}, { resourceLogs: [] }, { resourceLogs: [{ scopeLogs: [{ logRecords: [] }] }] }]) {
-    const response = await postOtlp(server, JSON.stringify(empty));
-    assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), {});
-  }
-  const preflight = await fetch(`${server.url}/v1/logs`, { method: "OPTIONS", headers: {
-    Origin: "https://player.example", "Access-Control-Request-Method": "POST",
-    "Access-Control-Request-Headers": "content-type,content-encoding,x-chunkify-ingest-key",
-  } });
-  assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://player.example");
-  assert.match(preflight.headers.get("access-control-allow-headers"), /content-encoding/i);
-  const accepted = await postOtlp(server, body, { Origin: "https://player.example" });
-  assert.equal(accepted.status, 200);
-  assert.equal(accepted.headers.get("access-control-allow-origin"), "https://player.example");
-  assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
 });
 
 test("separate reader serves committed SDK events with stable pagination", async (t) => {
@@ -1202,7 +967,7 @@ test("separate reader serves committed SDK events with stable pagination", async
       return view;
     }).flat();
     await Promise.all([
-      Promise.all(events.map((event, index) => index % 2 ? server.sendOtlp(event) : server.send(event))),
+      Promise.all(events.map(event => server.send(event))),
       (async () => {
         for (let i = 0; i < 3; i++) {
           await Promise.all([server.get("/v1/summary"), server.get("/v1/videos"), server.get("/v1/events")]);
@@ -1272,8 +1037,7 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   liveEvents.at(-1).playing_time_ms = 5400;
   await Promise.all([
     ...events.map(event => server.send(event)),
-    ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key },
-      resourceAttributes: { "service.name": "production" } })),
+    ...liveEvents.map(event => server.send(event, { "X-Chunkify-Ingest-Key": live.public_key })),
   ]);
   // Retrying via another key must keep first delivery.
   await server.stop();
@@ -1286,7 +1050,7 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   assert.equal(defaultRows.length, events.length);
   assert.equal(liveRows.length, events.length);
   assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-public" && !r.otlp));
-  assert.ok(liveRows.every(r => r.project_id === live.project_id && r.ingest_key_id === firstKey && r.otlp));
+  assert.ok(liveRows.every(r => r.project_id === live.project_id && r.ingest_key_id === firstKey && !r.otlp));
   assert.deepEqual(await server.get("/v1/summary"), { views: 1, unique_viewers: 1, total_playing_time_ms: 1200 });
   assert.deepEqual(await server.get("/v1/summary", live.secret_key), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
   assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.secret_key)).videos[0].total_playing_time_ms, 5400);
@@ -1358,7 +1122,7 @@ test("project retention updates live, preserves other settings, and persists acr
   events.at(-1).playing_time_ms = 1200;
   for (const event of events) {
     await server.send(event);
-    await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
+    await server.send(event, { "X-Chunkify-Ingest-Key": live.public_key });
   }
   await delay(1200);
   const result = await projectCommand(server, ["project", "retention", live.project_id, "1"]);
@@ -1375,7 +1139,7 @@ test("project retention updates live, preserves other settings, and persists acr
   assert.equal(server.url, url, "retention change must not restart the HTTP server");
   // A retry after expiration is new data. Disable expiry before resending it.
   await projectCommand(server, ["project", "retention", live.project_id, "0"]);
-  for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
+  for (const event of events) await server.send(event, { "X-Chunkify-Ingest-Key": live.public_key });
   await delay(2200);
   assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   await server.stop("SIGKILL");
@@ -1403,7 +1167,7 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   await server.start();
   const event = sdkEvents()[0];
   await server.send(event);
-  for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.public_key } });
+  for (const project of projects) await server.send(event, { "X-Chunkify-Ingest-Key": project.public_key });
   await server.stop();
   for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
     assert.equal((await projectCommand(server, ["project", "retention", projects.find(project => project.name === id).project_id, seconds])).restart_required, true);
@@ -1526,8 +1290,8 @@ test("live keys update ingestion and read access immediately and survive a crash
   assert.equal(rotated.restart_required, false);
   assert.equal(rotated.key_id, first.key_id);
   assert.equal((await projectPost(server, first.key, events[1])).status, 401);
-  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": first.key })).status, 401);
-  for (const event of events.slice(1)) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": rotated.key } });
+  assert.equal((await postEvent(server, "{}", { "X-Chunkify-Ingest-Key": first.key })).status, 401);
+  for (const event of events.slice(1)) await server.send(event, { "X-Chunkify-Ingest-Key": rotated.key });
   const stored = (await server.get("/v1/events", read.key)).events;
   assert.ok(stored.every(row => row.ingest_key_id === first.key_id && row.project_id === "default"));
   assert.deepEqual(stored.map(row => row.event), events);

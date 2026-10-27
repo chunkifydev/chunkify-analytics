@@ -45,23 +45,17 @@ if (insertMode !== undefined) {
   write_settings["batch.insert_mode"] = insertMode;
 }
 const cases = [
-  ...[100, 200, 400, 500, 750, 800, 1000, 1600, 2000, 3000, 4000].map((rate) => ({ name: `native-${rate}`, format: "native", rate })),
-  ...[750, 1000, 2000, 3000].map((rate) => ({ name: `preloaded-native-${rate}`, format: "native", rate, preload })),
-  ...[100, 200, 400, 800, 1000].map((rate) => ({ name: `otlp-${rate}`, format: "otlp", rate })),
-  { name: "otlp-batch10", format: "otlp", batch_size: 10, rate: 100 },
-  { name: "otlp-batch25", format: "otlp", batch_size: 25, rate: 100 },
-  { name: "otlp-batch10-low", format: "otlp", batch_size: 10, rate: 25 },
-  { name: "otlp-batch25-low", format: "otlp", batch_size: 25, rate: 10 },
-  { name: "otlp-batch25-gzip", format: "otlp", batch_size: 25, gzip: true, rate: 100, shutdown: "kill" },
-  { name: "mixed", format: "mixed", batch_size: 10, duplicate_every: 5, rate: 100 },
-  { name: "mixed-large", format: "mixed", batch_size: 10, large_every: 4, gzip: true, duplicate_every: 5, rate: 50 },
-  { name: "preloaded-mixed", format: "mixed", batch_size: 10, duplicate_every: 5, rate: 100, preload },
-  { name: "burst-recovery", format: "native", phases: [
+  ...[100, 200, 400, 500, 750, 800, 1000, 1600, 2000, 3000, 4000].map((rate) => ({ name: `native-${rate}`, rate })),
+  ...[750, 1000, 2000, 3000].map((rate) => ({ name: `preloaded-native-${rate}`, rate, preload })),
+  { name: "duplicates", duplicate_every: 5, rate: 100 },
+  { name: "large", large_every: 4, duplicate_every: 5, rate: 50 },
+  { name: "preloaded-duplicates", duplicate_every: 5, rate: 100, preload },
+  { name: "burst-recovery", phases: [
     { name: "warm", rate: 100, seconds: seconds * 0.2 },
     { name: "burst", rate: 1600, seconds: seconds * 0.4 },
     { name: "recovery", rate: 100, seconds: seconds * 0.4 },
   ] },
-  { name: "rate-cap", format: "otlp", batch_size: 10, rate: 400, rate_limit: 100 },
+  { name: "rate-cap", rate: 400, rate_limit: 100 },
 ];
 const selected = process.env.COLLECTOR_LOAD_CASES?.split(",");
 for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure COLLECTOR_LOAD_* environment variables.`);
@@ -96,7 +90,7 @@ if (process.argv.includes("--list")) {
     collector_files_sha256[file] = createHash("sha256").update(await readFile(file)).digest("hex");
   }
   const report = {
-    report_version: 6, measured_at: new Date().toISOString(), generator_runtime,
+    report_version: 7, measured_at: new Date().toISOString(), generator_runtime,
     source: { git_head: await git("rev-parse", "HEAD"),
       collector_source_commit: await git("log", "-1", "--format=%H", "--", "src"),
       collector_source_modified: Boolean(await git("status", "--porcelain", "--", "src", "Cargo.lock")),
@@ -114,8 +108,7 @@ if (process.argv.includes("--list")) {
       "Shared host workloads may affect results; no other containers are stopped.",
       "SDK events and adapter wire output are recorded once, then replayed with new identities.",
       "Verification retains encoded replay descriptions, releases them page by page and accumulates per-view summaries; every complete payload is reconstructed and checked after restart.",
-      "OTLP batching and gzip model a gateway; SDK adapters still send one event per request.",
-      "Request latency starts after serialization/compression; preparation and schedule lag are reported separately.",
+      "Request latency starts after serialization; preparation and schedule lag are reported separately.",
       "Resource sampling includes Docker exec overhead and may miss peaks. Container memory includes filesystem cache.",
       "Scheduled retention scans run every five seconds with a 30-day TTL; these runs do not measure deletion of expired data.",
       "Optional aggregate profiling covers the process lifetime, including preload, health checks and startup retention, but excludes schema initialization and final checkpoint. It is unavailable after SIGKILL. Queue depth and internal timing percentiles are not measured.",

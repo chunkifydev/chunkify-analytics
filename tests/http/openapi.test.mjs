@@ -3,14 +3,12 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
@@ -104,27 +102,6 @@ function sdkPlayback(t, videoId = "contract-a") {
   }
 }
 
-async function otlpPayload(events) {
-  const requests = [];
-  const receiver = createServer(async (request, response) => {
-    const chunks = [];
-    for await (const chunk of request) chunks.push(chunk);
-    requests.push(JSON.parse(Buffer.concat(chunks)));
-    response.writeHead(200, { "Content-Type": "application/json" }).end("{}");
-  });
-  receiver.listen(0, "127.0.0.1");
-  await once(receiver, "listening");
-  try {
-    const adapter = createOtlpAdapter(`http://127.0.0.1:${receiver.address().port}/v1/logs`);
-    for (const event of events) await adapter.send(event);
-    const batch = { resourceLogs: requests.flatMap(request => request.resourceLogs) };
-    assertRequest("/v1/logs", "post", batch);
-    return batch;
-  } finally {
-    await new Promise(resolveClose => receiver.close(resolveClose));
-  }
-}
-
 const browserContext = {
   schema_version: 1, user_agent: "Contract test", browser_name: "Chrome", browser_version: "130.0",
   os_name: "macOS", os_version: "15.0", device_type: "desktop", device_family: null, language: "en-US",
@@ -137,7 +114,6 @@ test("documented native requests, read responses, filters and pagination match t
   component("BrowserContext", browserContext);
   const server = await collector(t);
   await server.get("/healthz", 200, {});
-  assert.deepEqual(await server.get("/v1/ingestion"), { mode: "direct" });
   for (const event of events) {
     assertRequest("/v1/events", "post", event);
     assert.deepEqual(await server.post("/v1/events", JSON.stringify(event), 201), { accepted: true, duplicate: false });
@@ -188,52 +164,37 @@ test("documented native requests, read responses, filters and pagination match t
   }
 });
 
-test("OTLP gzip, all seven SDK events and cross-transport duplicates match the contract", async t => {
-  const events = sdkPlayback(t);
-  const batch = await otlpPayload(events);
-  // ProtoJSON nulls are preserved in the original log context. Nullable event
-  // fields still normalize to the same canonical SDK payload.
-  for (const resource of batch.resourceLogs) {
-    resource.resource = null;
-    resource.schemaUrl = null;
-    for (const scope of resource.scopeLogs) {
-      scope.scope = null;
-      scope.schemaUrl = null;
-      for (const log of scope.logRecords) {
-        log.attributes.push({ key: "environment", value: { stringValue: null, bytesValue: null } });
-        log.attributes.find(attribute => attribute.key === "viewer_id").value.boolValue = null;
+test("removed ingestion routes return 404 without accepting events", async t => {
+  const server = await collector(t);
+  for (const headers of [{}, {
+    Authorization: `Bearer ${server.keys.secret_key}`,
+    "X-Chunkify-Ingest-Key": server.keys.public_key,
+    Origin: "https://player.example",
+    "Access-Control-Request-Method": "POST",
+    "Access-Control-Request-Headers": "content-type, x-chunkify-ingest-key",
+  }]) {
+    for (const [path, methods] of [["/v1/logs", ["GET", "POST", "OPTIONS"]], ["/v1/ingestion", ["GET"]]]) {
+      for (const method of methods) {
+        const response = await fetch(`${server.url}${path}`, { method, headers });
+        assert.equal(response.status, 404);
+        assert.equal(response.headers.get("access-control-allow-origin"), null);
       }
     }
   }
-  assertRequest("/v1/logs", "post", batch);
-  const server = await collector(t);
-  await server.post("/v1/logs", gzipSync(JSON.stringify(batch)), 200, { "Content-Encoding": "gzip" });
-  assert.deepEqual(await server.post("/v1/logs", "{}", 200), {});
-  const page = await server.get("/v1/events");
-  assert.deepEqual(page.events.map(record => record.event), events);
-  assert.ok(page.events.every(record => record.otlp.log_record.attributes.length > 0));
-  for (const [index, record] of page.events.entries()) {
-    assert.equal(record.otlp.resource_logs.resource, null);
-    assert.equal(record.otlp.scope_logs.scope, null);
-    assert.deepEqual(record.otlp.log_record, batch.resourceLogs[index].scopeLogs[0].logRecords[0]);
-  }
-  await server.post("/v1/events", JSON.stringify(events[0]), 200);
-  assert.equal((await server.get("/v1/events")).events.length, events.length);
-  await server.post("/v1/logs", JSON.stringify({ resourceLogs: [{ scopeLogs: [{ logRecords: [{}] }] }] }), 400);
-  assert.equal((await server.get("/v1/events")).events.length, events.length);
+  assert.deepEqual((await server.get("/v1/events")).events, []);
 });
 
 test("documented authentication, CORS and protocol errors match the API", async t => {
   const event = sdkPlayback(t)[0];
-  const server = await collector(t, { "server.max_body_bytes": "8192", "server.max_otlp_records": "1" });
-  for (const path of ["/v1/events", "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos", "/v1/ingestion"]) {
+  const server = await collector(t, { "server.max_body_bytes": "8192" });
+  for (const path of ["/v1/events", "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos"]) {
     await server.get(path, 401, {});
     await server.get(path, 401, { Authorization: `Bearer ${server.keys.public_key}` });
     const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${server.keys.secret_key}`, Origin: "https://player.example" } });
     assert.equal(response.headers.get("access-control-allow-origin"), null);
     await assertResponse(path, "get", response, 200);
   }
-  for (const path of ["/v1/events", "/v1/logs"]) {
+  for (const path of ["/v1/events"]) {
     await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": "" });
     await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": server.keys.secret_key });
     await server.post(path, "{}", 403, { Origin: "https://elsewhere.example" });
@@ -251,20 +212,16 @@ test("documented authentication, CORS and protocol errors match the API", async 
   }
   await server.post("/v1/events", gzipSync(JSON.stringify(event)), 415, { "Content-Encoding": "gzip" });
   await server.post("/v1/events", JSON.stringify({ ...event, schema_version: 2 }), 400);
-  await server.post("/v1/logs", gzipSync(" ".repeat(8193)), 413, { "Content-Encoding": "gzip" });
-  await server.post("/v1/logs", "not gzip", 400, { "Content-Encoding": "gzip" });
-  const batch = await otlpPayload([event, event]);
-  await server.post("/v1/logs", JSON.stringify(batch), 413);
   const response = await fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
     headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, Origin: "https://player.example" } });
   assert.equal(response.headers.get("access-control-allow-origin"), "https://player.example");
   await assertResponse("/v1/events", "post", response, 201);
 });
 
-test("rate limit responses use the documented native and OTLP error envelopes", async t => {
+test("rate limit responses use the documented event error envelope", async t => {
   const server = await collector(t, { "server.ingest_per_second": "1" });
-  await server.post("/v1/logs", "{}", 200);
-  for (const path of ["/v1/events", "/v1/logs"]) {
+  await server.post("/v1/events", JSON.stringify(contract.paths["/v1/events"].post.requestBody.content["application/json"].example), 201);
+  for (const path of ["/v1/events"]) {
     const response = await fetch(`${server.url}${path}`, { method: "POST", body: "{}",
       headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } });
     assert.equal(response.headers.get("retry-after"), "1");
@@ -442,9 +399,6 @@ for (const separateReads of [false, true]) {
     for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get("/v1/quality", 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
-    const otlpServer = await collector(t, settings);
-    await otlpServer.post("/v1/logs", JSON.stringify(await otlpPayload(rows)), 200);
-    assert.deepEqual(await otlpServer.get(`/v1/quality?${new URLSearchParams(filters)}`), expected);
     // Large JSON integers also live in the storage remainder. This independent
     // cohort verifies extraction without affecting the realistic ratios above.
     const large = start("large-number");
@@ -548,9 +502,6 @@ for (const separateReads of [false, true]) {
     for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get("/v1/engagement", 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
-    const otlpServer = await collector(t, settings);
-    await otlpServer.post("/v1/logs", JSON.stringify(await otlpPayload(rows)), 200);
-    assert.deepEqual(await otlpServer.get(`/v1/engagement?${new URLSearchParams(filters)}`), expected);
     for (let i = 0; i < 2; i++) {
       const huge = start("overflow");
       await server.post("/v1/events", JSON.stringify(huge), 201);

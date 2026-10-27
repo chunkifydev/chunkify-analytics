@@ -9,7 +9,6 @@ use clap::Parser;
 mod context;
 mod event;
 mod mcp;
-mod otlp;
 mod profile;
 mod projects;
 mod query;

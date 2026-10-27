@@ -4,8 +4,7 @@ import { captureWorkload, measure } from "./benchmark.mjs";
 
 test("benchmark distinguishes duplicate records from new events and verifies playback after a crash", { timeout: 120000 }, async () => {
   const workload = await captureWorkload({ browserContext: true });
-  const result = await measure({ name: "accounting-check", format: "mixed", batch_size: 5,
-    gzip: true, duplicate_every: 2, large_every: 3, rate: 10, seconds: 2, preload: 20, shutdown: "kill" }, workload);
+  const result = await measure({ name: "accounting-check", duplicate_every: 2, large_every: 3, rate: 10, seconds: 2, preload: 20, shutdown: "kill" }, workload);
   assert.equal(result.completed, true);
   assert.equal(result.requests.scheduled, 20);
   assert.equal(result.requests.sent + result.requests.skipped_late + result.requests.skipped_concurrency, 20);
@@ -16,7 +15,6 @@ test("benchmark distinguishes duplicate records from new events and verifies pla
   assert.equal(result.records.persisted_new, result.records.newly_acknowledged);
   assert.ok(result.summary.total_playing_time_ms > 0);
   assert.equal(result.verification.payloads, true);
-  assert.equal(result.verification.otlp_context, true);
   assert.equal(result.verification.summary, true);
   assert.equal(result.verification.shutdown, "kill");
   assert.ok(result.queries.summary.latency.count > 0);
@@ -24,15 +22,14 @@ test("benchmark distinguishes duplicate records from new events and verifies pla
   assert.ok(result.queries.events.latency.count > 0);
 });
 
-test("benchmark reports rate-limited OTLP records separately from accepted records", { timeout: 120000 }, async () => {
-  const result = await measure({ name: "rejection-check", format: "otlp", batch_size: 5,
-    rate: 40, rate_limit: 10, seconds: 2, profile: true,
+test("benchmark reports rate-limited events separately from accepted events", { timeout: 120000 }, async () => {
+  const result = await measure({ name: "rejection-check", rate: 40, rate_limit: 10, seconds: 2, profile: true,
     write_settings: { "experimental.read_worker": "true" } }, await captureWorkload());
   assert.equal(result.requests.scheduled, 80);
   assert.equal(result.requests.sent + result.requests.skipped_late + result.requests.skipped_concurrency, 80);
   assert.ok(result.requests.failures[429] > 0);
-  assert.equal(result.records.rejected, result.requests.failures[429] * 5);
-  assert.equal(result.records.acknowledged, result.requests.successful * 5);
+  assert.equal(result.records.rejected, result.requests.failures[429]);
+  assert.equal(result.records.acknowledged, result.requests.successful);
   assert.equal(result.records.persisted_new, result.records.acknowledged);
   assert.equal(result.records.duplicate_acknowledgements, 0);
   assert.equal(result.records.uncertain, 0);
@@ -40,7 +37,7 @@ test("benchmark reports rate-limited OTLP records separately from accepted recor
   assert.ok(result.collector_profile.ingest.transactions <= result.requests.successful);
   assert.equal(result.collector_profile.ingest.received_records, result.records.acknowledged);
   assert.equal(result.collector_profile.ingest.inserted_records, result.records.newly_acknowledged);
-  assert.equal(result.collector_profile.ingest.max_records, result.collector_profile.ingest.max_requests * 5);
+  assert.equal(result.collector_profile.ingest.max_records, result.collector_profile.ingest.max_requests);
   assert.equal(result.reader_profile.worker, "reader");
   assert.equal(result.collector_profile.worker, "writer");
   for (const [name, query] of Object.entries(result.queries)) {

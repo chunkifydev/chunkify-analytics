@@ -8,7 +8,7 @@ export const contract = JSON.parse(await readFile(contractPath, "utf8"));
 const schemaId = "https://chunkify.example/collector-contract";
 const ajv = new Ajv2020({ strict: false, allErrors: true });
 addFormats(ajv);
-// Preserve local component references, including recursive OTLP AnyValue schemas.
+// Preserve local component references, including legacy OTLP context schemas.
 ajv.addSchema({ $id: schemaId, components: contract.components });
 const validators = new Map();
 

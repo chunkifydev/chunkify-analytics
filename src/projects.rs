@@ -417,14 +417,12 @@ pub fn apply_command(
                 project.keys.retain(|k| k.id != key.id);
                 project.keys.push(key);
             }
-            ("project-create", [id]) | ("project-create", [id, _]) => {
-                validate_id(id)?;
-                if list.iter().any(|p| &p.id == id) { return Err("Project already exists".into()); }
+            ("project-create", [name]) => {
+                let id = uuid::Uuid::new_v4().to_string();
                 let (ingest, public_key) = credential("Primary public", Permission::Public);
                 let (project_key, secret_key) = credential("Primary secret", Permission::Secret);
-                let name = args.get(1).unwrap_or(id).clone();
                 output = serde_json::json!({"project_id": id, "name": name, "public_key": public_key, "secret_key": secret_key, "restart_required": true});
-                list.push(Project { id: id.clone(), name, settings: Settings::default(), keys: vec![ingest, project_key] });
+                list.push(Project { id, name: name.clone(), settings: Settings::default(), keys: vec![ingest, project_key] });
             }
             ("project-rename", [id, name]) => {
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;

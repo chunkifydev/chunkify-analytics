@@ -51,11 +51,7 @@ pub enum ProjectCommand {
     /// List projects, settings and key IDs
     List,
     /// Create a project and its initial credentials
-    Create {
-        id: String,
-        #[arg(long)]
-        name: Option<String>,
-    },
+    Create { name: String },
     /// Change a project's display name
     Rename { id: String, name: String },
     /// Replace a project's overrides from a JSON file
@@ -105,11 +101,7 @@ impl ProjectCommand {
     pub fn request(self) -> (&'static str, Vec<String>) {
         match self {
             Self::List => ("project-list", vec![]),
-            Self::Create { id, name } => {
-                let mut args = vec![id];
-                args.extend(name);
-                ("project-create", args)
-            }
+            Self::Create { name } => ("project-create", vec![name]),
             Self::Rename { id, name } => ("project-rename", vec![id, name]),
             Self::Configure { id, settings } => ("project-configure", vec![id, settings]),
             Self::Retention { id, value } => ("project-retention", vec![id, value]),

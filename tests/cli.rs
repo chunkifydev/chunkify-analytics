@@ -82,3 +82,40 @@ fn data_directory_flag_is_global_and_controls_initialization() {
     assert_eq!(projects[0]["id"], "default");
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
+    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
+    let path = directory.to_str().unwrap();
+    assert!(run(&["--data-dir", path, "init"]).status.success());
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let output = run(&[
+            "--data-dir",
+            path,
+            "project",
+            "create",
+            "Production / Europe",
+        ]);
+        assert!(output.status.success(), "{output:?}");
+        let project: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let id = project["project_id"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(id).is_ok());
+        assert_eq!(project["name"], "Production / Europe");
+        ids.push(id.to_owned());
+    }
+    assert_ne!(ids[0], ids[1]);
+    let output = run(&["--data-dir", path, "project", "list"]);
+    assert!(output.status.success(), "{output:?}");
+    let projects: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    for id in ids {
+        let project = projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == id)
+            .unwrap();
+        assert_eq!(project["name"], "Production / Europe");
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}

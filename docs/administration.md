@@ -22,15 +22,16 @@ Each project has its own events, credentials and limits. Use separate projects
 for customers, websites or environments.
 
 ```sh
-chunkify-analytics project create live --name "Production website"
-chunkify-analytics project rename live "Customer website"
-chunkify-analytics key create live public "Website"
-chunkify-analytics key create live secret "Dashboard"
-chunkify-analytics key rotate live KEY_ID
-chunkify-analytics key revoke live KEY_ID
+chunkify-analytics project create "Production website"
+chunkify-analytics project rename PROJECT_ID "Customer website"
+chunkify-analytics key create PROJECT_ID public "Website"
+chunkify-analytics key create PROJECT_ID secret "Dashboard"
+chunkify-analytics key rotate PROJECT_ID KEY_ID
+chunkify-analytics key revoke PROJECT_ID KEY_ID
 ```
 
-Creating a project returns `public_key` and `secret_key`. Creating or rotating a
+The name is a display label. Creating a project generates a UUID and returns
+`project_id`, `public_key` and `secret_key`. Use `project_id` in later commands. Creating or rotating a
 named key returns its `key_id`, `permission` and `key`. Save the secret when returned; named
 key secrets cannot be retrieved later. `project list` shows settings and key IDs
 without secrets.
@@ -127,11 +128,11 @@ Change a project's duration without replacing its other settings:
 
 ```sh
 # Seven days:
-chunkify-analytics project retention live 604800
+chunkify-analytics project retention PROJECT_ID 604800
 # Keep indefinitely:
-chunkify-analytics project retention live 0
+chunkify-analytics project retention PROJECT_ID 0
 # Use the installation default:
-chunkify-analytics project retention live inherit
+chunkify-analytics project retention PROJECT_ID inherit
 ```
 
 Changes apply to existing and new events. Shortening retention makes older data

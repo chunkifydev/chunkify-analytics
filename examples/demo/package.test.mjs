@@ -25,6 +25,14 @@ test('shared archive excludes data and credentials even when stored under the ex
     assert.equal(/(?:demo\.json|keys\.json|\.duckdb|\.env|demo-data)/.test(stdout), false);
     const { stdout: readme } = await exec('tar', ['-xOzf', archive, prefix + '/README.md']);
     assert.ok(readme.includes('Node.js 24'));
+    const extracted = await mkdtemp(path.join(root, 'target', 'demo-package-test-'));
+    try {
+      await exec('tar', ['-xzf', archive, '-C', extracted]);
+      // A relocated bundle must load DuckDB without Cargo or loader environment variables.
+      const { stdout: help } = await exec(path.join(extracted, prefix, 'bin/chunkify-analytics'), ['--help'],
+        { cwd: extracted, env: { PATH: process.env.PATH } });
+      assert.ok(help.includes('Usage:'));
+    } finally { await rm(extracted, { recursive: true, force: true }); }
     // This deliberately checks the packaged artifact, not just the source allowlist.
     assert.equal((await readFile(path.join(canary, 'demo.json'), 'utf8')).includes('SYNTHETIC-PRIVATE-CANARY'), true);
   } finally { await rm(canary, { recursive: true, force: true }); await rm(dependencyCanary, { recursive: true, force: true }); }

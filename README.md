@@ -33,8 +33,8 @@ cd chunkify-analytics
 docker build -t chunkify-analytics:local .
 ```
 
-The first build compiles DuckDB and can take tens of minutes. Later builds can
-reuse cached dependencies. On a small build machine, add
+The build downloads a prebuilt DuckDB library and compiles the collector.
+On a small build machine, add
 `--build-arg BUILD_JOBS=1` to reduce simultaneous compilation work.
 
 ### 2. Configure your website
@@ -125,23 +125,26 @@ integration and revoke them independently.
 ## Install without Docker
 
 Run the executable directly on your computer without a container. You need Git,
-Rust 1.99.0, the toolchain used by CI, and a C++17 compiler for the initial build.
-On macOS, the Xcode Command Line Tools provide the compiler. On Linux, use your
-distribution's C++ build tools. No Node.js runtime is required for the collector.
+Rust 1.99.0, the toolchain used by CI, and your platform's C build tools.
+On macOS, install the Xcode Command Line Tools. On Linux, use your distribution's
+build tools. No Node.js runtime is required for the collector.
 
 ### 1. Build and install the executable
 
 ```sh
 git clone https://github.com/chunkifydev/chunkify-analytics.git
 cd chunkify-analytics
+sh scripts/install-duckdb.sh
 cargo build --locked --release
-mkdir -p "$HOME/.local/bin"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/lib"
 install -m 755 target/release/chunkify-analytics "$HOME/.local/bin/"
+install -m 755 target/lib/libduckdb.* "$HOME/.local/lib/"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Keep `$HOME/.local/bin` in your shell's PATH to use the command in future
-sessions. The first build compiles DuckDB; you do not install DuckDB separately.
+sessions. The setup script downloads DuckDB 2.0.0 for macOS or Linux and verifies
+its checksum. The executable finds the library in the adjacent `lib` directory.
 
 ### 2. Configure and initialize
 

@@ -136,13 +136,20 @@ Set those variables before starting Codex. See the
 | `get_engagement` | Average watch time and observed reached-end rate. |
 | `get_quality` | Startup, buffering and fatal-error metrics with sample counts. |
 | `get_timeseries` | Hourly or daily metrics for a bounded date range. |
-| `list_video_metrics` | One page of per-video totals, ordered by video ID. |
+| `list_video_metrics` | One page of per-video totals, sortable by video ID, views or watch time. |
 | `list_events` | One page of original events and context. |
 
 Query tools accept the [HTTP API's filters](api.md#filters-and-pagination).
 Results contain `data` and `coverage`. Follow `data.next_cursor` with the same
 filters to continue a page; `coverage.has_more` identifies more results.
 For the latest events, use `list_events` with `{"order":"desc","limit":10}`.
+For the ten videos with the most views, use `list_video_metrics` with
+`{"sort_by":"views","order":"desc","limit":10}`. Use
+`"sort_by":"total_playing_time_ms"` for total watch time. Sorting applies to
+all matching videos before pagination. Defaults are video ID ascending; metric
+ties use video ID ascending in either direction. Keep sorting and filters
+unchanged with each cursor. Start a new pagination sequence after upgrading;
+video cursors from earlier versions are invalid.
 
 Use summary totals rather than adding unique viewers across videos or days.
 Null measurements mean unavailable. Ratios are fractions; multiply by 100 for
@@ -151,8 +158,9 @@ playback outside that time bucket. See [metric definitions](api.md#metric-defini
 
 ## Limits
 
-Calls have a 15-second deadline and return at most 1 MiB of query data. Pages
-accept 1 to 100 rows, defaulting to 10. Use a smaller page if a response is too large.
+Calls have a 15-second deadline and return at most 1 MiB of query data.
+`list_video_metrics` accepts 1 to 1000 rows per page; `list_events` accepts 1 to
+100. Both default to 10 rows. Use a smaller page if a response is too large.
 Each adapter and the embedded endpoint allow up to four concurrent queries.
 Timeseries returns at most 1000 UTC buckets and has no pagination.
 

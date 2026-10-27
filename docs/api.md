@@ -122,14 +122,26 @@ do not match an explicit filter. `device_type=unknown` matches only a stored
 
 `/v1/events` and `/v1/videos` accept `limit` from 1 to 1000, defaulting to 100.
 Follow `next_cursor` until it is null. Keep the same project and filters when following a
-cursor. Invalid cursors, changed filters, unknown parameters, and invalid ranges
+cursor. Invalid cursors, changed filters or sorting, unknown parameters, and invalid ranges
 return 400. Treat cursors as opaque.
 
 Events are ordered by their server ingestion sequence, oldest first by default.
 Use `/v1/events?order=desc&limit=10` for the newest ten received events in one
-request. `order` accepts `asc` or `desc` only on this route. Keep the same order
-with each cursor; changing it returns 400. Videos are ordered by `video_id`. A pagination sequence is limited to events already committed
-at its first page, so later arrivals do not shift pages or change video totals
+request. `order` accepts `asc` or `desc` on events and videos, defaulting to `asc`.
+
+Videos accept `sort_by=video_id`, `sort_by=views`, or
+`sort_by=total_playing_time_ms` for watch time. The default is `video_id`.
+Ranking applies to all matching videos before pagination. Metric ties use
+`video_id` ascending in either direction. For example, the ten most watched videos:
+
+```text
+GET /v1/videos?sort_by=total_playing_time_ms&order=desc&limit=10
+```
+
+Keep the same filters, `sort_by` and `order` with every cursor; changing them
+returns 400. Video cursors from earlier versions are invalid; start a new
+pagination sequence after upgrading. A pagination sequence is limited to events
+already committed at its first page, so later arrivals do not shift pages or change video totals
 within that sequence. Start without a cursor to refresh. This is not an indefinite
 export snapshot; retention can remove records between requests.
 

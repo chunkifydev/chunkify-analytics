@@ -5,10 +5,38 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum EventOrder {
+pub enum SortOrder {
     #[default]
     Asc,
     Desc,
+}
+
+impl SortOrder {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoSort {
+    #[default]
+    VideoId,
+    Views,
+    TotalPlayingTimeMs,
+}
+
+impl VideoSort {
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::VideoId => "video_id",
+            Self::Views => "views",
+            Self::TotalPlayingTimeMs => "total_playing_time_ms",
+        }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -24,7 +52,8 @@ pub struct Query {
     pub device_type: Option<String>,
     pub limit: Option<usize>,
     pub cursor: Option<String>,
-    pub order: Option<EventOrder>,
+    pub order: Option<SortOrder>,
+    pub sort_by: Option<VideoSort>,
 }
 
 pub const MAX_TIME_BUCKETS: usize = 1000;

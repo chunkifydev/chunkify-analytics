@@ -2,7 +2,7 @@ use crate::{
     api::ApiError,
     context::RequestContext,
     event::IncomingEvent,
-    query::{Cursor, EventOrder, Query},
+    query::{Cursor, Query, SortOrder},
     reader::Reader,
     writer::{BatchConfig, Writer},
 };
@@ -221,11 +221,14 @@ impl Store {
     }
 
     pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if query.sort_by.is_some() {
+            return Err(ApiError::bad("sort_by is only supported by videos"));
+        }
         let order = query.order.unwrap_or_default();
         // Preserve existing ascending cursors; bind descending cursors to their order.
         let kind = match order {
-            EventOrder::Asc => "events",
-            EventOrder::Desc => "events_desc",
+            SortOrder::Asc => "events",
+            SortOrder::Desc => "events_desc",
         };
         let filters = query.filters()?;
         let limit = query.limit()?;
@@ -248,8 +251,8 @@ impl Store {
             };
             let after = cursor.as_ref().map_or(0, |c| c.after);
             let (lower, upper) = match order {
-                EventOrder::Asc => (after, through),
-                EventOrder::Desc => (
+                SortOrder::Asc => (after, through),
+                SortOrder::Desc => (
                     0,
                     cursor
                         .as_ref()
@@ -270,7 +273,7 @@ impl Store {
                 crate::storage::page_sql
             })(
                 &conditions,
-                matches!(order, EventOrder::Desc),
+                matches!(order, SortOrder::Desc),
             ))?;
             let mut rows = statement.query(params_from_iter(values.iter()))?;
             let mut events = Vec::new();

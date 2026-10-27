@@ -267,8 +267,8 @@ setup with synthetic events and a player, see the [local demo](examples/demo/REA
 
 ## Connect an MCP client
 
-Connect an HTTP MCP client to `http://127.0.0.1:4174/mcp` with the header
-`Authorization: Bearer YOUR_PRIVATE_SECRET_KEY`. Use your deployed HTTPS
+Connect directly to `http://127.0.0.1:4174/mcp` using Streamable HTTP and the
+`Authorization: Bearer YOUR_PRIVATE_SECRET_KEY` header. Use your deployed HTTPS
 address for remote access and add its hostname to `[mcp].allowed_hosts`.
 
 MCP tools read the authenticated project's analytics. See the

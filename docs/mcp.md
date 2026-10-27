@@ -1,5 +1,10 @@
 # Connect an MCP client
 
+Connect directly to a running collector with Streamable HTTP. The MCP client
+does not need a local Chunkify binary.
+
+## Connect by URL
+
 The collector serves a read-only MCP endpoint alongside its HTTP API:
 
 ```text
@@ -22,10 +27,47 @@ Hosts can include a port. Wildcards and empty allowlists are rejected. Browser
 requests must also match the project's allowed origins. Set `enabled = false`
 under `[mcp]` to disable the endpoint.
 
-## Stdio clients
+### Claude Code
 
-Clients without HTTP MCP support can launch `chunkify-analytics mcp`. It connects
-to the collector over HTTP and needs no database volume or `init` command.
+Set your private secret key, then register the collector's URL:
+
+```sh
+export CHUNKIFY_MCP_SECRET_KEY="YOUR_PRIVATE_SECRET_KEY"
+claude mcp add --transport http --scope local chunkify-analytics \
+  http://127.0.0.1:4174/mcp \
+  --header "Authorization: Bearer ${CHUNKIFY_MCP_SECRET_KEY}"
+```
+
+Use `/mcp` to check the connection. See the
+[Claude Code HTTP MCP guide](https://code.claude.com/docs/en/mcp#option-1-add-a-remote-http-server).
+
+### Codex CLI
+
+Set the secret key in the shell that starts Codex:
+
+```sh
+export CHUNKIFY_MCP_SECRET_KEY="YOUR_PRIVATE_SECRET_KEY"
+```
+
+In your private `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.chunkify-analytics]
+url = "http://127.0.0.1:4174/mcp"
+bearer_token_env_var = "CHUNKIFY_MCP_SECRET_KEY"
+required = true
+```
+
+Start or restart Codex from that shell so it receives the secret key. Use `/mcp`
+to check the connection. See the
+[Codex MCP guide](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+## Optional stdio fallback
+
+For clients without Streamable HTTP support, install the Chunkify binary on the
+client machine and let the client launch `chunkify-analytics mcp`. This optional
+adapter connects to the running collector over HTTP and needs no database volume
+or `init` command.
 For a client using `mcpServers` JSON:
 
 ```json
@@ -48,7 +90,7 @@ Use `--config /path/to/collector.toml mcp` for an explicit file. Environment val
 can come from `.env` or `--env-file`. Keep files containing tokens private.
 The client starts and stops the adapter; use matching collector and adapter versions.
 
-### Claude Code
+### Claude Code with stdio
 
 With the two MCP variables set in the shell that starts Claude Code:
 
@@ -60,7 +102,7 @@ claude mcp add --transport stdio --scope local chunkify-analytics \
 Use `/mcp` to check the connection. See the
 [Claude Code MCP guide](https://code.claude.com/docs/en/mcp#option-3-add-a-local-stdio-server).
 
-### Codex CLI
+### Codex CLI with stdio
 
 In your private Codex configuration:
 

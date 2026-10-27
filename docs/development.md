@@ -83,10 +83,18 @@ credential management, persistence, and benchmark runner. The image runs as UID
 10001 and supports a read-only root filesystem with writable `/data` and `/tmp`.
 
 The image includes the shared DuckDB library and requires no host installation.
-The workflow runs on pull requests and pushes to `main`, and cancels older runs
-for the same PR or branch. Docker uses the GitHub Actions layer cache directly;
-it no longer copies Cargo cache mounts into extra images to save them. Source
-changes invalidate the application build layer. Unchanged images reuse it.
+The workflow runs one job per pull request or push to `main`, and cancels older
+runs for the same PR or branch. It builds the collector and Rust test executables
+together with `cargo test --release --no-run`. The tests then reuse those
+artifacts. Native API tests and container tests exercise the same release
+executable. Playwright is installed once for real-browser SDK coverage.
+
+CI builds on Ubuntu 22.04 so the executable's glibc requirement is compatible
+with the Debian Bookworm runtime image. A Docker named build context replaces
+the compiler stage with that tested executable and its DuckDB library. The
+regular Docker build still compiles from source. Docker's GitHub Actions cache
+stores runtime layers directly, without copying Cargo cache mounts into extra
+images.
 
 ## Run a benchmark
 

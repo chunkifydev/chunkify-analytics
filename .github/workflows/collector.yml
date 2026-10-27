@@ -15,11 +15,14 @@ concurrency:
 
 jobs:
   collector:
-    runs-on: ubuntu-latest
+    # Build against glibc 2.35 so the executable also runs in Debian Bookworm.
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: 2
       RUSTUP_TOOLCHAIN: "1.99.0"
+      COLLECTOR_BINARY: ${{ github.workspace }}/target/release/chunkify-analytics
+      CHUNKIFY_COLLECTOR_BIN: ${{ github.workspace }}/target/release/chunkify-analytics
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -28,48 +31,47 @@ jobs:
           cache: npm
       - name: Install Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo fmt --check
+      - run: npm ci
+      - name: Test schema and dashboard
+        run: node --test tests/http/openapi-schema.test.mjs examples/dashboard/*.test.*
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: linked-duckdb-v1
+          key: linked-duckdb-release-ubuntu22-v1
       - name: Install prebuilt DuckDB
         run: sh scripts/install-duckdb.sh
-      - run: npm ci
-      - run: npm run check:collector:openapi
-      - name: Test local dashboard
-        run: node --test examples/dashboard/*.test.*
-      - run: npx playwright install --with-deps --only-shell chromium
-      - run: cargo fmt --check
-      - name: Build collector
-        run: cargo build --locked
-      - name: Test native demo lifecycle
-        run: node --test examples/demo/*.test.mjs
-      - name: Test HTTP API and browser adapters
-        run: node --test tests/http/*.test.mjs
-      - run: cargo test --locked
-      - run: cargo clippy --locked --all-targets -- -D warnings
-
-  container:
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps --only-shell chromium
+      # cargo test also builds the real executable for integration tests. Build
+      # that dependency graph first so later checks reuse the same artifacts.
+      - name: Build collector and test executables
+        run: cargo test --locked --release --no-run
+      - name: Run Rust tests
+        run: cargo test --locked --release
+      - run: cargo clippy --locked --release --all-targets -- -D warnings
+      - name: Install browser test runtime
+        run: npx playwright install --with-deps --only-shell chromium
+      - name: Test native demo, HTTP API and browser adapters
+        run: node --test examples/demo/*.test.mjs tests/http/*.test.mjs
+      - name: Prepare tested executable for Docker
+        run: |
+          mkdir -p target/container/usr/local/bin target/container/opt/duckdb
+          cp "$COLLECTOR_BINARY" target/container/usr/local/bin/chunkify-analytics
+          cp target/lib/libduckdb.so target/container/opt/duckdb/libduckdb.so
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
-      - name: Build collector image
+      - name: Validate Dockerfile
+        run: docker buildx build --check .
+      - name: Package tested collector image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
+          # A named context overrides the build stage, reusing the executable
+          # above instead of compiling it for a second time inside Docker.
+          build-contexts: build=./target/container
           platforms: linux/amd64
           load: true
           tags: chunkify-analytics:test
-          cache-from: type=gha,scope=collector-linked-amd64
-          cache-to: type=gha,scope=collector-linked-amd64,mode=max
+          cache-from: type=gha,scope=collector-runtime-amd64
+          cache-to: type=gha,scope=collector-runtime-amd64,mode=max
       - name: Test container lifecycle and benchmark runner
         run: node --test tests/http/docker/*.test.mjs

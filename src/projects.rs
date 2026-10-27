@@ -13,6 +13,7 @@ use std::{
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+pub const MAX_PROJECTS: usize = 1024;
 pub const DEFAULT_PROJECT: &str = "default";
 pub fn default_project() -> String {
     DEFAULT_PROJECT.into()
@@ -135,9 +136,16 @@ pub fn validate_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validate_name(name: &str) -> Result<(), String> {
+    if name.trim().is_empty() || name.chars().count() > 128 {
+        return Err("Project names must have 1..128 characters".into());
+    }
+    Ok(())
+}
+
 pub fn validate(projects: &[Project]) -> Result<(), String> {
     if projects.is_empty()
-        || projects.len() > 1024
+        || projects.len() > MAX_PROJECTS
         || !projects.iter().any(|p| p.id == DEFAULT_PROJECT)
     {
         return Err("Expected 1..1024 projects including default".into());
@@ -146,9 +154,7 @@ pub fn validate(projects: &[Project]) -> Result<(), String> {
     let mut hashes = HashSet::new();
     for project in projects {
         validate_id(&project.id)?;
-        if project.name.trim().is_empty() || project.name.chars().count() > 128 {
-            return Err("Project names must have 1..128 characters".into());
-        }
+        validate_name(&project.name)?;
         if !ids.insert(&project.id) {
             return Err("Duplicate project ID".into());
         }
@@ -241,6 +247,30 @@ pub struct Admission {
     _request: OwnedSemaphorePermit,
 }
 impl Access {
+    fn new(project: &Project, config: &Config, count: usize) -> Self {
+        let queue_bytes = project
+            .settings
+            .queue_bytes
+            .unwrap_or(config.batch.queue_bytes / count)
+            .min(config.batch.queue_bytes);
+        Self {
+            id: project.id.clone(),
+            origins: RwLock::new(effective_origins(
+                &config.allowed_origins,
+                project.settings.allowed_origins.as_deref(),
+            )),
+            rate: Mutex::new(RateLimit::new(
+                project
+                    .settings
+                    .ingest_per_second
+                    .unwrap_or((config.ingest_per_second / count as u32).max(1)),
+            )),
+            budget: Arc::new(Semaphore::new(queue_bytes)),
+            queue_bytes,
+            requests: Arc::new(Semaphore::new((config.batch.queue_requests / count).max(1))),
+        }
+    }
+
     pub fn allows_origin(&self, origin: &str) -> bool {
         self.origins
             .read()
@@ -273,7 +303,7 @@ impl Access {
 
 pub struct Registry {
     pub retention: RwLock<crate::retention::Policy>,
-    pub projects: HashMap<String, Arc<Access>>,
+    projects: RwLock<HashMap<String, Arc<Access>>>,
     credentials: RwLock<HashMap<String, (Permission, Resolved)>>,
 }
 
@@ -287,63 +317,29 @@ impl Registry {
     pub fn new(keys: &Keys, config: &Config) -> Result<Self, String> {
         let projects = projects(keys);
         validate(&projects)?;
-        let count = projects.len();
-        let mut registry = Self {
+        let registry = Self {
             retention: RwLock::new(crate::retention::Policy::new(
                 config.retention_seconds,
                 &projects,
             )),
-            projects: HashMap::new(),
+            projects: RwLock::new(HashMap::new()),
             credentials: RwLock::new(HashMap::new()),
         };
-        for project in projects {
-            let queue_bytes = project
-                .settings
-                .queue_bytes
-                .unwrap_or(config.batch.queue_bytes / count)
-                .min(config.batch.queue_bytes);
-            let access = Arc::new(Access {
-                id: project.id.clone(),
-                origins: RwLock::new(effective_origins(
-                    &config.allowed_origins,
-                    project.settings.allowed_origins.as_deref(),
-                )),
-                rate: Mutex::new(RateLimit::new(
-                    project
-                        .settings
-                        .ingest_per_second
-                        .unwrap_or((config.ingest_per_second / count as u32).max(1)),
-                )),
-                budget: Arc::new(Semaphore::new(queue_bytes)),
-                queue_bytes,
-                requests: Arc::new(Semaphore::new((config.batch.queue_requests / count).max(1))),
-            });
-            for key in project.keys {
-                registry
-                    .credentials
-                    .get_mut()
-                    .expect("credentials lock")
-                    .insert(
-                        key.hash,
-                        (
-                            key.permission,
-                            Resolved {
-                                project: access.clone(),
-                                key_id: key.id,
-                            },
-                        ),
-                    );
-            }
-            registry.projects.insert(project.id, access);
-        }
+        registry.replace_keys(keys, config);
         Ok(registry)
     }
-    // Only credentials change while serving. Reuse the exact Access objects so
-    // rate tokens, admission permits, origins and project budgets stay intact.
-    pub fn replace_keys(&self, keys: &Keys) {
+
+    // Preserve existing access state and in-flight admissions when adding projects
+    // or rotating keys. New projects receive a share of the installation limits.
+    pub fn replace_keys(&self, keys: &Keys, config: &Config) {
+        let next = projects(keys);
+        let count = next.len();
+        let mut projects = self.projects.write().expect("projects lock");
         let mut credentials = HashMap::new();
-        for project in projects(keys) {
-            let access = &self.projects[&project.id];
+        for project in next {
+            let access = projects
+                .entry(project.id.clone())
+                .or_insert_with(|| Arc::new(Access::new(&project, config, count)));
             for key in project.keys {
                 credentials.insert(
                     key.hash,
@@ -360,8 +356,16 @@ impl Registry {
         *self.credentials.write().expect("credentials lock") = credentials;
     }
 
+    pub fn allows_origin(&self, origin: &str) -> bool {
+        self.projects
+            .read()
+            .expect("projects lock")
+            .values()
+            .any(|project| project.allows_origin(origin))
+    }
+
     pub fn replace_origins(&self, project: &str, origins: Vec<String>) {
-        *self.projects[project]
+        *self.projects.read().expect("projects lock")[project]
             .origins
             .write()
             .expect("origins lock") = origins;
@@ -417,12 +421,16 @@ pub fn apply_command(
                 project.keys.retain(|k| k.id != key.id);
                 project.keys.push(key);
             }
-            ("project-create", [name]) => {
+            ("project-create", [name]) | ("project-create", [name, _]) => {
                 let id = uuid::Uuid::new_v4().to_string();
                 let (ingest, public_key) = credential("Primary public", Permission::Public);
                 let (project_key, secret_key) = credential("Primary secret", Permission::Secret);
                 output = serde_json::json!({"project_id": id, "name": name, "public_key": public_key, "secret_key": secret_key, "restart_required": true});
-                list.push(Project { id, name: name.clone(), settings: Settings::default(), keys: vec![ingest, project_key] });
+                let mut settings = Settings::default();
+                if let Some(origins) = args.get(1) {
+                    settings.allowed_origins = Some(serde_json::from_str(origins)?);
+                }
+                list.push(Project { id, name: name.clone(), settings, keys: vec![ingest, project_key] });
             }
             ("project-rename", [id, name]) => {
                 let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
@@ -466,7 +474,7 @@ pub fn apply_command(
                 if id == DEFAULT_PROJECT && key_id == "primary-secret" { keys.secret_key = secret.clone(); }
                 output = serde_json::json!({"project_id": id, "key_id": key_id, "key": secret, "permission": old.permission, "restart_required": true});
             }
-            _ => return Err("Expected project list | project create <id> [name] | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <public|secret> <name> | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
+            _ => return Err("Expected project list | project create <name> | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <public|secret> <name> | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
         }
     validate(&list)?;
     keys.projects = Some(list);

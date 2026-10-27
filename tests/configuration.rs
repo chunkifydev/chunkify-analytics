@@ -18,9 +18,11 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(BINARY);
         command.current_dir(&self.0);
-        for (key, _) in std::env::vars()
-            .filter(|(key, _)| key.starts_with("COLLECTOR_") || key.starts_with("CHUNKIFY_MCP_"))
-        {
+        for (key, _) in std::env::vars().filter(|(key, _)| {
+            key == "CH_ADMIN_KEY"
+                || key.starts_with("COLLECTOR_")
+                || key.starts_with("CHUNKIFY_MCP_")
+        }) {
             command.env_remove(key);
         }
         command
@@ -159,6 +161,7 @@ fn unknown_fields_types_and_missing_files_fail_without_echoing_configuration() {
     );
     for source in [
         "unknown = 'private-test-secret'",
+        "admin_key = 'private-test-secret'",
         "[server]\nbnid = 'private-test-secret'",
         "[retention]\nseconds = 'private-test-secret'",
         "[mcp]\nsecret_key = 'private-test-secret",

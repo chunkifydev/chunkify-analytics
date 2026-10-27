@@ -12,8 +12,9 @@ In Docker, run them inside the active container:
 docker exec chunkify-analytics chunkify-analytics project list
 ```
 
-On Linux and macOS, key management and retention changes work while the collector
-runs. Stop it before creating or renaming projects, or replacing project settings.
+On Linux and macOS, project creation, key management and retention changes work
+while the collector runs. Stop it before renaming projects or replacing
+project settings.
 Other platforms require stopping the collector for all administration.
 
 ## Projects and named keys
@@ -63,8 +64,10 @@ do not print the secret or change stored events.
 ## Project limits and origins
 
 Every project allows the shared TOML origins plus its own additional origins.
-Retention inherits the installation default. Rate, in-flight request
-and write-buffer allowances divide the installation limits across projects.
+Retention inherits the installation default. Default rate, in-flight request
+and write-buffer allowances divide the installation limits across projects at
+startup. A project created while serving gets a share based on the current
+project count; existing projects keep their active limits until restart.
 To replace a project's overrides, save a JSON file:
 
 ```json
@@ -79,7 +82,7 @@ To replace a project's overrides, save a JSON file:
 Then stop the collector and apply it:
 
 ```sh
-chunkify-analytics project configure live /path/to/settings.json
+chunkify-analytics project configure PROJECT_ID /path/to/settings.json
 ```
 
 Omitted or null values inherit defaults. `allowed_origins: []` clears additional
@@ -89,6 +92,29 @@ not retained storage. Installation limits still apply across projects.
 
 Excess requests return 429, full write buffers return 503, and a request larger
 than its buffer budget returns 413. Origin checks use the public key's project.
+
+## Create projects through the API
+
+Set `CH_ADMIN_KEY` in the collector's environment or private `.env` file to enable
+`POST /v1/projects`. Use a separate random secret for your provisioning backend.
+An unset or empty value disables this endpoint with a 404 response.
+
+```sh
+curl -X POST http://127.0.0.1:4174/v1/projects \
+  -H "Authorization: Bearer $CH_ADMIN_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Customer website","allowed_origins":["https://customer.example"]}'
+```
+
+The response is 201 with `project_id`, `name`, `public_key` and `secret_key`.
+The ID is generated automatically. Save the keys when returned and store the
+project ID alongside your customer record. The project is ready immediately.
+
+`name` is required, with 1 to 128 characters. Names can repeat. `allowed_origins`
+is optional and adds to the shared TOML origins. Supplying an ID is rejected.
+Project secret keys cannot create projects. The admin key does not grant access
+to project analytics or MCP. The installation supports up to 1024 projects,
+including the initial default project.
 
 ## Live project API
 

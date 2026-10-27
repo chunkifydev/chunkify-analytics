@@ -27,9 +27,9 @@ type Mcp = RunningService<RoleClient, ClientConfig>;
 fn clean_command() -> Command {
     let mut command = Command::new(BINARY);
     command.current_dir(std::env::temp_dir());
-    for (key, _) in std::env::vars()
-        .filter(|(key, _)| key.starts_with("COLLECTOR_") || key.starts_with("CHUNKIFY_MCP_"))
-    {
+    for (key, _) in std::env::vars().filter(|(key, _)| {
+        key == "CH_ADMIN_KEY" || key.starts_with("COLLECTOR_") || key.starts_with("CHUNKIFY_MCP_")
+    }) {
         command.env_remove(key);
     }
     command

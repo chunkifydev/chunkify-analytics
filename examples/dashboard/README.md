@@ -54,7 +54,7 @@ watched. See [metric definitions](../../docs/api.md#metric-definitions).
 
 ## Optional synthetic data
 
-Use a **separate demo project**. Stop the collector to create it with
+Use a **separate demo project**. Create it with
 `project create "Dashboard demo"`, save the returned credentials privately,
 and restart the collector. See the root README for native and Docker commands.
 Set that project's secret key as `CHUNKIFY_DEMO_SECRET_KEY` above.

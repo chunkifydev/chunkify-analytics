@@ -1,6 +1,7 @@
 import { sdkDist } from "./sdk-path.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +14,7 @@ import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
+import { component } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
@@ -60,7 +62,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, "data_dir": directory, "server.bind": "127.0.0.1:0",
+  const env = { ...process.env, CH_ADMIN_KEY: undefined, "data_dir": directory, "server.bind": "127.0.0.1:0",
     "server.allowed_origins": "https://player.example", "server.store_ip": "true",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);
@@ -80,7 +82,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
     },
     async start(executable = binary, overrides = {}) {
       await writeConfig(directory, { ...env, ...overrides });
-      child = spawn(executable, ["serve"], { cwd: directory, env: collectorEnvironment(env), stdio: "pipe" });
+      child = spawn(executable, ["serve"], { cwd: directory, env: collectorEnvironment({ ...env, ...overrides }), stdio: "pipe" });
       // Drain stdout/stderr as well as waiting for the process to exit.
       exited = once(child, "close");
       let output = "";
@@ -1562,7 +1564,7 @@ test("live administration serializes concurrent commands and rejects invalid cha
   const before = await readFile(keyFile, "utf8");
   for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "secret", ""],
     ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-public"],
-    ["project", "create", "other"], ["project", "configure", "default", "missing.json"]]) {
+    ["project", "rename", "default", "New name"], ["project", "configure", "default", "missing.json"]]) {
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
   }
@@ -1728,4 +1730,105 @@ test("secret keys list and rotate only their own project keys", async t => {
   await server.start();
   assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
   assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
+});
+
+async function createProject(server, body, key) {
+  return fetch(`${server.url}/v1/projects`, { method: "POST",
+    headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) },
+    body: JSON.stringify(body) });
+}
+
+test("admin project creation activates isolated projects immediately and persists across restart", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CH_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev",
+    "server.ingest_per_second": "1000", "retention.seconds": "0" });
+  const url = server.url;
+  const request = { name: "Production / Europe", allowed_origins: ["https://customer.example", "https://customer.example"] };
+  for (const key of [undefined, "wrong", server.keys.public_key, server.keys.secret_key]) {
+    assert.equal((await createProject(server, request, key)).status, 401);
+  }
+  const response = await createProject(server, request, adminKey);
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("access-control-allow-origin"), null);
+  const project = await response.json();
+  component("CreatedProject", project);
+  assert.match(project.project_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(project.name, request.name);
+  assert.equal(project.restart_required, false);
+  assert.match(project.public_key, /^ck_public_[0-9a-f]{64}$/);
+  assert.match(project.secret_key, /^ck_secret_[0-9a-f]{64}$/);
+  assert.equal(server.url, url);
+  const event = sdkEvents()[0];
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://customer.example" })).status, 201);
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://chunkify.dev" })).status, 200);
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://wrong.example" })).status, 403);
+  assert.equal((await projectPost(server, server.keys.public_key, event, { origin: "https://customer.example" })).status, 403);
+  assert.deepEqual((await server.get("/v1/events", project.secret_key)).events.map(row => row.project_id), [project.project_id]);
+  assert.deepEqual((await server.get("/v1/events")).events, []);
+  assert.equal((await createProject(server, { name: "Forbidden" }, project.secret_key)).status, 401);
+  for (const path of ["/v1/events", "/v1/project/keys", "/mcp"]) {
+    assert.equal((await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${adminKey}` } })).status, 401);
+  }
+  const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
+    origin: "https://customer.example", "access-control-request-method": "POST" } });
+  assert.equal(preflight.status, 204);
+  const sameName = await (await createProject(server, request, adminKey)).json();
+  assert.notEqual(sameName.project_id, project.project_id);
+  assert.deepEqual((await server.get("/v1/events", sameName.secret_key)).events, []);
+  const listing = await projectCommand(server, ["project", "list"]);
+  assert.deepEqual(listing.find(p => p.id === project.project_id).settings.allowed_origins, ["https://customer.example"]);
+  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  for (const secret of [adminKey, project.public_key, project.secret_key]) assert.ok(!stored.includes(secret));
+  await server.stop();
+  await server.start();
+  assert.equal((await server.get("/v1/events", project.secret_key)).events.length, 1);
+  assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://customer.example" })).status, 200);
+});
+
+test("project creation is disabled without an admin key and validates before saving", async t => {
+  const disabled = await collector(t);
+  assert.equal((await createProject(disabled, { name: "Disabled" }, disabled.keys.secret_key)).status, 404);
+  await disabled.stop();
+  const dotenvKey = `dotenv-${randomUUID()}`;
+  await writeFile(join(disabled.directory, ".env"), `CH_ADMIN_KEY=${dotenvKey}\n`, { mode: 0o600 });
+  await disabled.start();
+  assert.equal((await createProject(disabled, { name: "From dotenv" }, dotenvKey)).status, 201);
+  await disabled.stop();
+  const processKey = `process-${randomUUID()}`;
+  await disabled.start(binary, { CH_ADMIN_KEY: processKey });
+  assert.equal((await createProject(disabled, { name: "Old key" }, dotenvKey)).status, 401);
+  assert.equal((await createProject(disabled, { name: "Process key" }, processKey)).status, 201);
+  await disabled.stop();
+  await disabled.start(binary, { CH_ADMIN_KEY: "" });
+  assert.equal((await createProject(disabled, { name: "Disabled" }, processKey)).status, 404);
+  await disabled.stop();
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CH_ADMIN_KEY: adminKey });
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  for (const body of [{}, { name: "" }, { name: "  " }, { name: "x".repeat(129) }, { name: 42 },
+    { name: "Customer", id: "chosen" }, { name: "Customer", project_id: "chosen" },
+    { name: "Customer", allowed_origins: null }, { name: "Customer", allowed_origins: "https://customer.example" },
+    { name: "Customer", allowed_origins: ["*"] }, { name: "Customer", allowed_origins: ["https://customer.example/"] }]) {
+    const result = await createProject(server, body, adminKey);
+    assert.equal(result.status, 400, await result.clone().text());
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+  await chmod(server.directory, 0o500);
+  try { assert.equal((await createProject(server, { name: "Unsaved" }, adminKey)).status, 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal(await readFile(file, "utf8"), before);
+  assert.equal((await projectCommand(server, ["project", "list"])).length, 1);
+  const [apiResponse, cli] = await Promise.all([
+    createProject(server, { name: "API customer" }, adminKey),
+    projectCommand(server, ["project", "create", "CLI customer"]),
+  ]);
+  assert.equal(apiResponse.status, 201);
+  assert.equal(cli.restart_required, false);
+  const api = await apiResponse.json();
+  assert.notEqual(api.project_id, cli.project_id);
+  assert.equal((await projectCommand(server, ["project", "list"])).length, 3);
+  for (const customer of [api, cli]) assert.deepEqual((await server.get("/v1/events", customer.secret_key)).events, []);
 });

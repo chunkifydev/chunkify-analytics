@@ -1,10 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { containerCollector, docker } from "./support.mjs";
+
+test("the admin environment key provisions a project that survives container replacement", { timeout: 120000 }, async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await containerCollector({ environment: { CH_ADMIN_KEY: adminKey } });
+  t.after(() => server.close());
+  const response = await fetch(`${server.url}/v1/projects`, { method: "POST", headers: {
+    authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Customer website", allowed_origins: ["https://customer.example"] }) });
+  assert.equal(response.status, 201, await response.clone().text());
+  const project = await response.json();
+  assert.equal(project.restart_required, false);
+  assert.match(project.project_id, /^[0-9a-f-]{36}$/);
+  const events = () => fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${project.secret_key}` } });
+  assert.deepEqual((await (await events()).json()).events, []);
+  await server.stop();
+  await server.start();
+  assert.equal((await events()).status, 200);
+  const logs = await docker(["logs", server.name]);
+  for (const key of [adminKey, project.public_key, project.secret_key]) assert.ok(!logs.includes(key));
+});
 
 test("a non-root container keeps SDK events and keys when replaced, and stops gracefully", { timeout: 120000 }, async (t) => {
   const server = await containerCollector();
@@ -48,10 +69,17 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
 });
 
 
-test("docker exec manages live keys in a non-root read-only container", { timeout: 120000 }, async (t) => {
+test("docker exec manages live projects and keys in a non-root read-only container", { timeout: 120000 }, async (t) => {
   const server = await containerCollector();
   t.after(() => server.close());
   const command = async (...args) => JSON.parse(await docker(["exec", server.name, "chunkify-analytics", ...args]));
+  const project = await command("project", "create", "Customer website");
+  assert.equal(project.restart_required, false);
+  assert.match(project.project_id, /^[0-9a-f-]{36}$/);
+  assert.equal(project.name, "Customer website");
+  const projectRead = await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${project.secret_key}` } });
+  assert.equal(projectRead.status, 200);
+  assert.deepEqual((await projectRead.json()).events, []);
   const token = await command("key", "create", "default", "secret", "Dashboard");
   assert.equal(token.restart_required, false);
   assert.equal(await docker(["exec", server.name, "stat", "-c", "%a", "/data/admin.sock"]), "600");

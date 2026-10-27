@@ -295,10 +295,13 @@ chunkify-analytics key create PROJECT_ID secret "Dashboard"
 chunkify-analytics project retention PROJECT_ID 604800
 ```
 
-Use the returned `project_id` in later commands. Save new secrets when returned. In Docker, run these commands through
-`docker exec chunkify-analytics chunkify-analytics …`. Key and retention changes
-work while serving on Linux and macOS. Stop the collector to create or rename
-projects or replace project settings. See [administration](docs/administration.md).
+Use the returned `project_id` in later commands. Save new secrets when returned.
+In Docker, run these commands through
+`docker exec chunkify-analytics chunkify-analytics …`. Project creation, key
+management and retention changes work while serving on Linux and macOS. Stop the collector
+to rename projects or replace project settings. For automatic customer onboarding,
+use [project creation through the API](docs/administration.md#create-projects-through-the-api)
+with `CH_ADMIN_KEY`.
 
 ## Storage and backups
 

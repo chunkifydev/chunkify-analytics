@@ -10,7 +10,7 @@ Chunkify Analytics includes:
 - Separate projects and credentials for different websites or customers.
 - An HTTP API for building dashboards.
 - A read-only MCP endpoint for connecting AI tools.
-- Local DuckDB storage with configurable retention.
+- Local or S3-compatible storage with configurable expiration.
 
 One `chunkify-analytics serve` process runs ingestion, queries, and MCP. You do
 not need to install or run a separate database server.
@@ -116,8 +116,8 @@ The initial `default` project has two credentials:
 
 | Credential | Use |
 | --- | --- |
-| `ingest_key` | Send events from the player. This key can be included in browser code. |
-| `read_token` | Read analytics through the HTTP API or MCP. Keep it on a backend or in private AI-client settings. |
+| `public_key` | Starts with `ck_public_`. Use it in the player to send events. |
+| `secret_key` | Starts with `ck_secret_`. Read analytics and manage project origins and keys. Keep it on your backend. |
 
 Save these values privately. You can create separate named keys for each
 integration and revoke them independently.
@@ -161,8 +161,8 @@ its data in `./data`, beside `collector.toml`. Read the initial credentials with
 cat data/keys.json
 ```
 
-Use `ingest_key` in the player and keep `read_token` private for API and MCP
-access. This read token must stay out of browser code.
+Use `public_key` in the player and keep `secret_key` private for API and MCP
+access. This secret key must stay out of browser code.
 
 ### 3. Run and check the service
 
@@ -208,21 +208,21 @@ const session = monitor(document.querySelector("video"), {
   videoId: "video-123",
   destinations: [
     createChunkifyAdapter("http://localhost:4174/v1/events", {
-      ingestKey: "YOUR_PROJECT_INGEST_KEY",
+      ingestKey: "YOUR_PROJECT_PUBLIC_KEY",
     }),
   ],
 });
 ```
 
 This URL connects to the collector on your computer for testing. Use that
-project's ingest key, and allow the player's origin in `[server].allowed_origins`.
+project's public key, and allow the player's origin in `[server].allowed_origins`.
 For a deployed player, replace the URL with your collector's public HTTPS address.
 The adapter includes browser and device context by default; set
 `collectBrowserContext: false` in
 its options to disable that collection.
 
 For OTLP/HTTP JSON logs, use `createOtlpAdapter` from
-`@chunkify/analytics/otlp`, point it at `/v1/logs`, and supply the ingest key in
+`@chunkify/analytics/otlp`, point it at `/v1/logs`, and supply the public key in
 `X-Chunkify-Ingest-Key`. This endpoint accepts Chunkify playback events carried
 in OTLP logs; it is not a general metrics or traces backend.
 
@@ -231,13 +231,13 @@ error responses, or inspect the [OpenAPI specification](openapi.json).
 
 ## Read analytics
 
-Use a private project read token from your backend:
+Use a private secret key from your backend:
 
 ```sh
-export READ_TOKEN='YOUR_PRIVATE_PROJECT_READ_TOKEN'
+export SECRET_KEY='YOUR_PRIVATE_SECRET_KEY'
 
 curl --fail http://127.0.0.1:4174/v1/summary \
-  -H "Authorization: Bearer $READ_TOKEN"
+  -H "Authorization: Bearer $SECRET_KEY"
 ```
 
 | Endpoint | Returns |
@@ -248,9 +248,9 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/engagement` | Average watch time and observed reached-end rates. |
 | `GET /v1/quality` | Startup timing, buffering, and fatal-error metrics. |
 | `GET /v1/events` | Stored events, context, and pagination cursors. |
-| `GET /v1/ingestion` | Ingestion mode and queue status. |
+| `GET /v1/ingestion` | Ingestion status. |
 
-Read tokens grant access to one project. Keep them out of browser code. Build
+Secret keys grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before
 calling the collector.
 
@@ -262,141 +262,62 @@ which events contribute to each report.
 A [sample dashboard](examples/dashboard/README.md) is included. For a native
 setup with synthetic events and a player, see the [local demo](examples/demo/README.md).
 
-## Connect Claude, Codex, or Cursor with MCP
+## Connect an MCP client
 
-MCP runs inside the collector process by default. Configure an MCP client that
-supports Streamable HTTP and a bearer-token header with:
+Connect an HTTP MCP client to `http://127.0.0.1:4174/mcp` with the header
+`Authorization: Bearer YOUR_PRIVATE_SECRET_KEY`. Use your deployed HTTPS
+address for remote access and add its hostname to `[mcp].allowed_hosts`.
 
-```text
-URL: http://127.0.0.1:4174/mcp
-Authorization: Bearer YOUR_PRIVATE_PROJECT_READ_TOKEN
-```
-
-Use the deployed HTTPS URL for a remote installation. When exposing a hostname
-such as `analytics.example.com`, add it to the MCP hostname allowlist in TOML:
-
-```toml
-[mcp]
-allowed_hosts = ["localhost", "127.0.0.1", "[::1]", "analytics.example.com"]
-```
-
-The MCP tools provide read-only access to the authenticated project's analytics.
-They cannot ingest events or administer projects. Set `enabled = false` under
-`[mcp]` to disable the endpoint.
-
-No second collector process is required. Clients that only support standard
-input/output can use the optional `chunkify-analytics mcp` adapter. See the
-[MCP setup guide](docs/mcp.md) for both connection methods and available tools.
+MCP tools read the authenticated project's analytics. See the
+[MCP guide](docs/mcp.md) for client setup and the optional stdio adapter.
 
 ## Configure the service
 
-Use `collector.toml` as your main configuration file, as shown in both installation
-guides. Environment variables and `.env` are optional overrides, useful for
-credentials and deployment-specific settings. Explicit CLI flags have the highest
-priority:
-
-```text
-CLI flags > process environment > .env > TOML > built-in defaults
-```
-
-A minimal `collector.toml` is shown below. The complete
-[example file](collector.toml.example) includes every setting.
-
-```toml
-data_dir = "./data"
-
-[server]
-bind = "127.0.0.1:4174"
-allowed_origins = ["http://localhost:3000"]
-store_ip = true
-
-[retention]
-seconds = 2592000
-
-[duckdb]
-threads = 1
-```
-
-The executable loads `collector.toml` and `.env` from its working directory when
-present. Select other files with `--config` and `--env-file`:
+Keep application settings in `collector.toml`. Use `--config` when running from
+another directory:
 
 ```sh
 chunkify-analytics --config /etc/chunkify/collector.toml config check
 chunkify-analytics --config /etc/chunkify/collector.toml serve
 ```
 
-Relative data paths in TOML resolve beside that file. Relative CLI and
-environment paths resolve from the working directory. Configuration changes
-apply when the process starts. `config check` validates server settings without
-creating or opening a database.
-
-The Docker guide mounts the file as `/data/collector.toml`, where the executable
-finds it automatically. For optional environment overrides, use `-e NAME=value`
-or Docker's `--env-file .env`. The image sets `COLLECTOR_DATA_DIR=/data` and
-`COLLECTOR_BIND=0.0.0.0:4174`; those environment values take priority over TOML.
-
-See the [configuration reference](docs/configuration.md) for every setting,
-accepted range, and advanced option.
+Relative TOML paths resolve beside that file. Restart after changing installation
+settings. The [configuration reference](docs/configuration.md) lists all fields
+and the small set of environment overrides for deployments and secrets.
 
 ## Manage projects and keys
 
-Run administration commands against the same data directory as the collector.
-With Docker, use the executable inside the container:
-
-```sh
-docker exec chunkify-analytics chunkify-analytics project list
-docker exec chunkify-analytics chunkify-analytics key create default read "Dashboard"
-docker exec chunkify-analytics chunkify-analytics project retention default 604800
-```
-
-The last command keeps the default project's events for seven days. Use `0` to
-keep them indefinitely or `inherit` to restore the installation default.
-
-On Linux and macOS, listing projects, changing retention, and managing keys work
-while the service is running. Stop it before creating or renaming a project,
-replacing a project's full settings, or deleting a viewer's events.
-
-For native installations, the same commands run directly:
+Give each customer or website a separate project and credentials:
 
 ```sh
 chunkify-analytics project create production --name "Production website"
-chunkify-analytics key create production ingest "Website"
-chunkify-analytics key rotate production KEY_ID
-chunkify-analytics key revoke production KEY_ID
-chunkify-analytics viewer delete viewer-123 --project production
+chunkify-analytics key create production secret "Dashboard"
+chunkify-analytics project retention production 604800
 ```
 
-Creating or rotating a named key prints its new secret. Save it when returned;
-you cannot retrieve it later. Rotation replaces the old secret immediately. To
-switch clients without an interruption, create another key, update the clients,
-then revoke the old one.
+Save new secrets when returned. In Docker, run these commands through
+`docker exec chunkify-analytics chunkify-analytics …`. Key and retention changes
+work while serving on Linux and macOS. Stop the collector to create or rename
+projects or replace project settings. See [administration](docs/administration.md).
 
-Use `chunkify-analytics --help` or a command such as
-`chunkify-analytics project create --help` for arguments. The
-[administration guide](docs/administration.md) includes project settings,
-Docker commands, viewer deletion, and backup/restore procedures.
+## Storage and backups
 
-## Storage, retention, and backups
+Local storage is the default. Set `backend = "s3"` under `[storage]` for S3-compatible
+storage, including Cloudflare R2. S3 keeps events and credentials when a container
+is replaced. Run one collector per bucket prefix.
 
-Events are stored locally in the persistent data directory. By default, the
-service removes events received more than 30 days ago, with cleanup at startup
-and hourly afterward. Projects can have different retention periods. Deletion
-also removes those events' contributions to reports.
+Expiration defaults to 30 days by receipt time. Projects can override it.
+Expired events stop contributing to reports. Local database files can reuse
+freed space without shrinking.
 
-Retention limits age, not disk size. There is no automatic S3 sync or archival
-feature. Choose retention for your event volume and monitor available storage.
-The queue settings limit pending writes, not the size of the retained database.
-
-Back up the complete data directory while the collector is stopped. A Docker
-container is replaceable; its data volume is not a backup. See
-[backup and restore](docs/administration.md#backup-and-restore) before replacing
-an installation or moving its data.
+See [storage](docs/storage.md) for configuration and
+[backup and restore](docs/administration.md#backup-and-restore) before moving data.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| `401` response | Use an ingest key for writes and a read token for reads/MCP. Check whether the key was rotated or revoked. |
+| `401` response | Use an public key for writes and a secret key for reads/MCP. Check whether the key was rotated or revoked. |
 | Browser requests receive `403` | Match the website's exact origin in the project's allowed origins. |
 | MCP requests receive `403` | Add the client-facing HTTP hostname to `[mcp].allowed_hosts`; browser Origin headers must also be allowed. |
 | Ingestion receives `429` | Requests exceed an installation or project rate limit. See the admission settings. |
@@ -406,6 +327,7 @@ an installation or moving its data.
 
 ## Further documentation
 
+- [Storage backends and R2 setup](docs/storage.md)
 - [Configuration reference](docs/configuration.md)
 - [HTTP API and metric definitions](docs/api.md)
 - [Projects, credentials, retention, and backups](docs/administration.md)

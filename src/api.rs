@@ -8,12 +8,13 @@ use crate::{
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::{ConnectInfo, Extension, Request, State},
-    http::{HeaderValue, Method, StatusCode},
+    extract::{ConnectInfo, Extension, Path, Request, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     io::Read,
@@ -25,6 +26,7 @@ use std::{
 struct App {
     store: Store,
     projects: Arc<Registry>,
+    admin: Arc<crate::admin::Controller>,
     max_body_bytes: usize,
     max_otlp_records: usize,
     store_ip: bool,
@@ -76,10 +78,16 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn router(store: Store, projects: Arc<Registry>, config: &Config) -> Router {
+pub fn router(
+    store: Store,
+    projects: Arc<Registry>,
+    config: &Config,
+    admin: Arc<crate::admin::Controller>,
+) -> Router {
     let app = App {
         store,
         projects,
+        admin,
         max_body_bytes: config.max_body_bytes,
         max_otlp_records: config.max_otlp_records,
         store_ip: config.store_ip,
@@ -96,6 +104,9 @@ pub fn router(store: Store, projects: Arc<Registry>, config: &Config) -> Router 
         .merge(mcp)
         .route("/healthz", get(health))
         .route("/v1/ingestion", get(ingestion_status))
+        .route("/v1/project/allowed-origins", put(project_origins))
+        .route("/v1/project/keys", get(project_keys))
+        .route("/v1/project/keys/{key_id}/rotate", post(rotate_project_key))
         .route("/v1/summary", get(summary))
         .route("/v1/quality", get(quality))
         .route("/v1/engagement", get(engagement))
@@ -163,7 +174,7 @@ async fn access(
                     .get("x-chunkify-ingest-key")
                     .and_then(|v| v.to_str().ok())
                     .unwrap_or(""),
-                Permission::Ingest,
+                Permission::Public,
             )?,
         )
     } else if !ingest && (request.uri().path().starts_with("/v1/") || mcp) {
@@ -173,7 +184,7 @@ async fn access(
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
-        Some(app.projects.authorize(secret, Permission::Read)?)
+        Some(app.projects.authorize(secret, Permission::Secret)?)
     } else {
         None
     };
@@ -182,13 +193,8 @@ async fn access(
             Some(origin)
                 if origin.to_str().is_ok_and(|s| {
                     resolved.as_ref().map_or_else(
-                        || {
-                            app.projects
-                                .projects
-                                .values()
-                                .any(|p| p.origins.iter().any(|o| o == s))
-                        },
-                        |r| r.project.origins.iter().any(|o| o == s),
+                        || app.projects.projects.values().any(|p| p.allows_origin(s)),
+                        |r| r.project.allows_origin(s),
                     )
                 }) =>
             {
@@ -284,20 +290,11 @@ async fn ingest(
         .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
     let event = read_json(request, app.max_body_bytes, false).await?;
     event::validate(&event)?;
-    let inserted = match app
+    let inserted = app
         .store
         .insert(&resolved.project, &resolved.key_id, event, context)
         .await?
-    {
-        crate::store::Receipt::Queued => {
-            return Ok((
-                StatusCode::ACCEPTED,
-                Json(json!({"accepted": true, "queued": true})),
-            )
-                .into_response());
-        }
-        crate::store::Receipt::Committed(count) => count > 0,
-    };
+        > 0;
     Ok((
         if inserted {
             StatusCode::CREATED
@@ -394,6 +391,66 @@ async fn read_json(request: Request, limit: usize, allow_gzip: bool) -> Result<V
     .map_err(|_| ApiError::unavailable())?
 }
 
+fn bearer(headers: &HeaderMap) -> String {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("")
+        .to_owned()
+}
+
+async fn project_action(
+    app: App,
+    token: String,
+    action: crate::admin::ProjectAction,
+) -> Result<Json<Value>, ApiError> {
+    tokio::task::spawn_blocking(move || app.admin.project(&token, action))
+        .await
+        .map_err(|_| ApiError::unavailable())?
+        .map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Origins {
+    allowed_origins: Vec<String>,
+}
+
+async fn project_origins(
+    State(app): State<App>,
+    request: Request,
+) -> Result<Json<Value>, ApiError> {
+    let token = bearer(request.headers());
+    let body: Origins =
+        serde_json::from_value(read_json(request, app.max_body_bytes, false).await?)
+            .map_err(|_| ApiError::bad("Expected allowed_origins as an array of origins"))?;
+    for origin in &body.allowed_origins {
+        crate::config::validate_origin(origin).map_err(ApiError::bad)?;
+    }
+    let mut origins = body.allowed_origins;
+    origins.sort();
+    origins.dedup();
+    project_action(app, token, crate::admin::ProjectAction::Origins(origins)).await
+}
+
+async fn project_keys(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    project_action(app, bearer(&headers), crate::admin::ProjectAction::Keys).await
+}
+
+async fn rotate_project_key(
+    State(app): State<App>,
+    Path(key_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    project_action(
+        app,
+        bearer(&headers),
+        crate::admin::ProjectAction::RotateKey(key_id),
+    )
+    .await
+}
+
 async fn events(
     State(app): State<App>,
     Extension(resolved): Extension<Resolved>,
@@ -404,7 +461,6 @@ async fn events(
     ))
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
-    app.store.ensure_healthy()?;
     app.store
         .call("health", |db| {
             db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;

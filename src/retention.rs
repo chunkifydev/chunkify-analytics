@@ -31,6 +31,15 @@ impl Policy {
         self.default_seconds > 0 || self.overrides.iter().any(|(_, seconds)| *seconds > 0)
     }
 
+    pub fn project_cutoff(&self, project: &str, now_ms: i64) -> i64 {
+        let seconds = self
+            .overrides
+            .iter()
+            .find(|(id, _)| id == project)
+            .map_or(self.default_seconds, |(_, seconds)| *seconds);
+        cutoff(now_ms, seconds)
+    }
+
     pub fn purge(&self, connection: &mut Connection, now_ms: i64) -> duckdb::Result<usize> {
         let default_cutoff = cutoff(now_ms, self.default_seconds);
         let (expired, mut values) = if self.overrides.is_empty() {

@@ -164,7 +164,7 @@ async function initialize() {
     const response = await fetch('/api/projects', { signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new Error('Cannot load project configuration.');
     ({ projects, demo = null } = await response.json());
-    if (!projects.length) throw new Error('Configure a project read token on the dashboard server, then reload.');
+    if (!projects.length) throw new Error('Configure a secret key on the dashboard server, then reload.');
     $('project').replaceChildren(...projects.map(p => new Option(p.name, p.id)));
     const requested = new URLSearchParams(location.search).get('project');
     if (projects.some(project => project.id === requested)) $('project').value = requested;

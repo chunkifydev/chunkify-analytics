@@ -39,11 +39,6 @@ pub enum Command {
         #[command(subcommand)]
         command: KeyCommand,
     },
-    /// Manage viewer data
-    Viewer {
-        #[command(subcommand)]
-        command: ViewerCommand,
-    },
     /// Inspect configuration
     Config {
         #[command(subcommand)]
@@ -71,15 +66,15 @@ pub enum ProjectCommand {
 
 #[derive(Clone, ValueEnum)]
 pub enum Permission {
-    Ingest,
-    Read,
+    Public,
+    Secret,
 }
 
 impl Permission {
     fn as_str(&self) -> &'static str {
         match self {
-            Self::Ingest => "ingest",
-            Self::Read => "read",
+            Self::Public => "public",
+            Self::Secret => "secret",
         }
     }
 }
@@ -98,16 +93,6 @@ pub enum KeyCommand {
     Revoke { project: String, key_id: String },
     /// Rotate the default project's primary credential
     RotatePrimary { permission: Permission },
-}
-
-#[derive(Subcommand)]
-pub enum ViewerCommand {
-    /// Delete a viewer's events while the collector is stopped
-    Delete {
-        viewer_id: String,
-        #[arg(long, default_value = "default")]
-        project: String,
-    },
 }
 
 #[derive(Subcommand)]

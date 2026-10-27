@@ -168,9 +168,9 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     assert.ok(fixture.sent.length <= safety.max_unique_events, "fixture exceeds the unique-event safety limit");
   }
   if (await hostFreeBytes() < (safety.min_free_disk_mib + safety.max_data_mib) * mib) throw new Error("Benchmark requires its data budget plus the free-disk floor before starting");
-  const settings = { COLLECTOR_INGEST_PER_SECOND: String(config.rate_limit), COLLECTOR_MAX_BODY_BYTES: "1048576",
-    COLLECTOR_MAX_OTLP_RECORDS: "100", COLLECTOR_RETENTION_SECONDS: "2592000", COLLECTOR_RETENTION_INTERVAL_SECONDS: "5",
-    COLLECTOR_PROFILE: String(config.profile), ...config.write_settings };
+  const settings = { "server.ingest_per_second": String(config.rate_limit), "server.max_body_bytes": "1048576",
+    "server.max_otlp_records": "100", "retention.seconds": "2592000", "retention.interval_seconds": "5",
+    "profile": String(config.profile), ...config.write_settings };
   const server = await containerCollector({ resources, settings, seed: fixture?.volume });
   const sent = new Map();
   const acknowledged = new Set();
@@ -179,7 +179,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
   const duplicatePool = [];
   let generation = 0;
   let abortReason = null;
-  let verified = false;
   const interrupt = () => { abortReason = "interrupted"; };
   signal?.addEventListener("abort", interrupt, { once: true });
   if (signal?.aborted) interrupt();
@@ -230,7 +229,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     try {
       const response = await fetch(`${server.url}${format === "native" ? "/v1/events" : "/v1/logs"}`, {
         method: "POST", body, signal: AbortSignal.timeout(safety.request_timeout_ms),
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key,
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key,
           ...(config.gzip && format === "otlp" ? { "Content-Encoding": "gzip" } : {}) },
       });
       await response.text();
@@ -257,28 +256,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
   }
 
   try {
-    const queueSamples = [];
-    const queueEnabled = settings.COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE === "true";
-    const queueSample = async () => {
-      if (!queueEnabled) return null;
-      const result = await server.get("/v1/ingestion");
-      const value = { at: Date.now(), ...result.queue };
-      queueSamples.push(value);
-      if (value.failed) throw new Error("Durable queue worker failed");
-      return value;
-    };
-    const waitForQueue = async (started = performance.now()) => {
-      while (true) {
-        const point = await queueSample();
-        if (!point || point.pending_requests === 0) return { completed: true, elapsed_ms: performance.now() - started, last_sample: point };
-        if (performance.now() - started > 20000) { abortReason ??= "Queue did not drain within 20 seconds"; return { completed: false, elapsed_ms: performance.now() - started, last_sample: point }; }
-        const resources = await sample(server);
-        samples.push({ phase: trafficStart === null ? "preload_drain" : "queue_drain", at_seconds: trafficStart === null ? 0 : +((performance.now() - trafficStart) / 1000).toFixed(3), ...resources });
-        const reason = checkSafety(resources);
-        if (reason) { abortReason ??= `Queue drain safety stop: ${reason}`; return { completed: false, elapsed_ms: performance.now() - started, last_sample: point }; }
-        await delay(100);
-      }
-    };
     const initial = await sample(server);
     abortReason ??= checkSafety(initial);
     if (abortReason) throw new Error(`Safety stop before preload: ${abortReason}`);
@@ -297,7 +274,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
       }
       if ((count + 100) % 10000 === 0) console.error(`Preloaded ${Math.min(count + 100, config.preload)} / ${config.preload} events...`);
     }
-    await waitForQueue();
     for (const id of acknowledged) preloadIds.add(id);
     const preloadSeconds = (performance.now() - preloadStart) / 1000;
     if (fixture && !fixture.volume) {
@@ -338,10 +314,9 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
         ]);
         const point = { at_seconds: +((performance.now() - start) / 1000).toFixed(3), ...await sample(server) };
         samples.push(point);
-        const queue = await queueSample();
         if (point.at_seconds - lastProgress >= 30) {
-          await onProgress({ phase: "traffic", at_seconds: point.at_seconds, requests: structuredClone(requests), sample: point, queue });
-          console.error(`Traffic ${point.at_seconds}s: ${requests.successful} successful; ${requests.skipped_late + requests.skipped_concurrency} omitted; pending ${queue?.pending_events ?? 0}; container ${(point.container_memory_bytes / mib).toFixed(0)} MiB; generator ${(point.generator_rss_bytes / mib).toFixed(0)} MiB`);
+          await onProgress({ phase: "traffic", at_seconds: point.at_seconds, requests: structuredClone(requests), sample: point });
+          console.error(`Traffic ${point.at_seconds}s: ${requests.successful} successful; ${requests.skipped_late + requests.skipped_concurrency} omitted; container ${(point.container_memory_bytes / mib).toFixed(0)} MiB; generator ${(point.generator_rss_bytes / mib).toFixed(0)} MiB`);
           lastProgress = point.at_seconds;
         }
         abortReason ??= checkSafety(point);
@@ -408,9 +383,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     const generatorCpu = process.cpuUsage(cpuBefore);
     loopDelay.disable();
     running = false;
-    const queueDrainStarted = performance.now();
-    const queueAtTrafficEnd = await queueSample();
-    const queueDrain = await waitForQueue(queueDrainStarted);
     await monitoring;
     const after = await sample(server);
     samples.push({ at_seconds: +((performance.now() - start) / 1000).toFixed(3), ...after });
@@ -421,7 +393,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     const collectorProfile = profiles.find((profile) => !profile.worker || profile.worker === "writer") ?? null;
     const readerProfile = profiles.find((profile) => profile.worker === "reader") ?? null;
     if (config.profile && config.shutdown === "stop") assert.ok(collectorProfile, "collector profile must be available after graceful shutdown");
-    if (config.profile && config.shutdown === "stop" && settings.COLLECTOR_EXPERIMENTAL_READ_WORKER === "true") assert.ok(readerProfile, "separate reader profile must be available after graceful shutdown");
+    if (config.profile && config.shutdown === "stop" && settings["experimental.read_worker"] === "true") assert.ok(readerProfile, "separate reader profile must be available after graceful shutdown");
     const shutdownMs = performance.now() - stopStart;
     assert.equal(stopped.OOMKilled, false, "benchmark must stay within memory limits");
     assert.equal(stopped.ExitCode, config.shutdown === "kill" ? 137 : 0);
@@ -437,7 +409,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
       if (reason) throw new Error(`Verification safety stop: ${reason}`);
       if (count % 100000 === 0) console.error(`Verified ${count} events...`);
     });
-    verified = true;
     await server.stop();
     const dataBytes = Number((await docker(["run", "--rm", "--mount", `type=volume,src=${server.volume},dst=/data,readonly`,
       "--entrypoint", "du", image, "-sb", "/data"])).split(/\s/)[0]);
@@ -465,10 +436,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
         duplicate_acknowledgements: records.acknowledged - (acknowledged.size - preloadIds.size),
         newly_acknowledged_per_second: +((acknowledged.size - preloadIds.size) / elapsed).toFixed(2),
         persisted_new: checked.persisted_new, persisted_without_ack: checked.persisted_without_ack },
-      durable_queue: queueEnabled ? { samples: queueSamples, after_http_completion: queueAtTrafficEnd,
-        drain_completed: queueDrain.completed, after_drain_wait: queueDrain.last_sample,
-        drain_ms: queueDrain.completed ? +queueDrain.elapsed_ms.toFixed(2) : null,
-        drain_wait_ms: +queueDrain.elapsed_ms.toFixed(2) } : null,
       request_latency: latency, successful_request_latency: successfulLatency, schedule_lag: lag,
       preparation_latency: distribution(preparation), queries, collector_profile: collectorProfile, reader_profile: readerProfile, max_inflight: maxInflight,
       payload: { total_wire_bytes: wireBytes, total_decoded_bytes: decodedBytes,
@@ -490,8 +457,6 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     signal?.removeEventListener("abort", interrupt);
     loopDelay.disable();
     await monitoring;
-    const preserveVolume = Boolean(config.write_settings?.COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE === "true" && acknowledged.size && !verified);
-    if (preserveVolume) console.error(`Unverified acknowledged events retained in Docker volume ${server.volume}`);
-    await server.close({ preserveVolume });
+    await server.close();
   }
 }

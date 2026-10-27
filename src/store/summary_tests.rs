@@ -19,7 +19,6 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             },
             false,
             64,
-            None,
             separate_reads,
             Some(1),
         )

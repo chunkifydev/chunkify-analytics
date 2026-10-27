@@ -165,6 +165,19 @@ fn definitions() -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
+pub fn create_parquet_stage(connection: &Connection) -> duckdb::Result<()> {
+    connection.execute_batch(&format!(
+        "CREATE TEMP TABLE collector_parquet_stage (ingest_id BIGINT, {}, otlp_payload VARCHAR)",
+        definitions()
+    ))
+}
+
+pub fn parquet_page_sql(conditions: &str, descending: bool) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    // Context and OTLP payload live in the same row, so repeated IDs never multiply a join.
+    format!("SELECT ingest_id, {0}, otlp_payload FROM collector_parquet_events
+        WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id {direction} LIMIT ?", *COLUMN_NAMES)
+}
 pub fn create_stage(connection: &Connection) -> duckdb::Result<()> {
     connection.execute_batch(&format!(
         "CREATE TEMP TABLE collector_write_stage (ordinal BIGINT, {})",

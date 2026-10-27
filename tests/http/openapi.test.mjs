@@ -12,14 +12,17 @@ import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
+import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
 async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-openapi-test-"));
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("COLLECTOR_")));
-  const env = { ...inherited, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
-    COLLECTOR_ALLOWED_ORIGINS: "https://player.example", COLLECTOR_RETENTION_SECONDS: "0", ...settings };
+  const configuration = { ...inherited, "data_dir": directory, "server.bind": "127.0.0.1:0",
+    "server.allowed_origins": "https://player.example", "retention.seconds": "0", ...settings };
+  await writeConfig(directory, configuration);
+  const env = collectorEnvironment(inherited);
   let child;
   let closed;
   let logs = "";
@@ -31,12 +34,12 @@ async function collector(t, settings = {}) {
     }
     await rm(directory, { recursive: true, force: true });
   });
-  const init = spawn(binary, ["init"], { env, stdio: "pipe" });
+  const init = spawn(binary, ["init"], { env, cwd: directory, stdio: "pipe" });
   init.stdout.resume();
   init.stderr.on("data", chunk => { logs += chunk; });
   assert.equal((await once(init, "close"))[0], 0, logs);
   const keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
-  child = spawn(binary, ["serve"], { env, stdio: "pipe" });
+  child = spawn(binary, ["serve"], { env, cwd: directory, stdio: "pipe" });
   closed = once(child, "close");
   child.stderr.on("data", chunk => { logs += chunk; });
   const url = await new Promise((resolveReady, reject) => {
@@ -53,10 +56,10 @@ async function collector(t, settings = {}) {
     url, keys,
     async post(path, body, status, headers = {}) {
       const response = await fetch(`${url}${path}`, { method: "POST", body,
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": keys.ingest_key, ...headers } });
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": keys.public_key, ...headers } });
       return assertResponse(path, "post", response, status);
     },
-    async get(path, status = 200, headers = { Authorization: `Bearer ${keys.read_token}` }) {
+    async get(path, status = 200, headers = { Authorization: `Bearer ${keys.secret_key}` }) {
       return assertResponse(path.split("?")[0], "get", await fetch(`${url}${path}`, { headers }), status);
     },
   };
@@ -222,17 +225,17 @@ test("OTLP gzip, all seven SDK events and cross-transport duplicates match the c
 
 test("documented authentication, CORS and protocol errors match the API", async t => {
   const event = sdkPlayback(t)[0];
-  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "8192", COLLECTOR_MAX_OTLP_RECORDS: "1" });
+  const server = await collector(t, { "server.max_body_bytes": "8192", "server.max_otlp_records": "1" });
   for (const path of ["/v1/events", "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos", "/v1/ingestion"]) {
     await server.get(path, 401, {});
-    await server.get(path, 401, { Authorization: `Bearer ${server.keys.ingest_key}` });
-    const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${server.keys.read_token}`, Origin: "https://player.example" } });
+    await server.get(path, 401, { Authorization: `Bearer ${server.keys.public_key}` });
+    const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${server.keys.secret_key}`, Origin: "https://player.example" } });
     assert.equal(response.headers.get("access-control-allow-origin"), null);
     await assertResponse(path, "get", response, 200);
   }
   for (const path of ["/v1/events", "/v1/logs"]) {
     await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": "" });
-    await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": server.keys.read_token });
+    await server.post(path, "{}", 401, { "X-Chunkify-Ingest-Key": server.keys.secret_key });
     await server.post(path, "{}", 403, { Origin: "https://elsewhere.example" });
     await server.post(path, "{}", 415, { "Content-Type": "application/x-protobuf" });
     await server.post(path, "{}", 415, { "Content-Encoding": "br" });
@@ -253,49 +256,26 @@ test("documented authentication, CORS and protocol errors match the API", async 
   const batch = await otlpPayload([event, event]);
   await server.post("/v1/logs", JSON.stringify(batch), 413);
   const response = await fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, Origin: "https://player.example" } });
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, Origin: "https://player.example" } });
   assert.equal(response.headers.get("access-control-allow-origin"), "https://player.example");
   await assertResponse("/v1/events", "post", response, 201);
 });
 
 test("rate limit responses use the documented native and OTLP error envelopes", async t => {
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1" });
+  const server = await collector(t, { "server.ingest_per_second": "1" });
   await server.post("/v1/logs", "{}", 200);
   for (const path of ["/v1/events", "/v1/logs"]) {
     const response = await fetch(`${server.url}${path}`, { method: "POST", body: "{}",
-      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } });
+      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } });
     assert.equal(response.headers.get("retry-after"), "1");
     await assertResponse(path, "post", response, 429);
   }
 });
 
-test("experimental queue responses and committed visibility follow the same contract", async t => {
-  const events = sdkPlayback(t);
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_EXPERIMENTAL_READ_WORKER: "true", COLLECTOR_BATCH_DELAY_MS: "200" });
-  const start = events[0];
-  assert.deepEqual(await server.post("/v1/events", JSON.stringify(start), 202), { accepted: true, queued: true });
-  assert.deepEqual(await server.post("/v1/events", JSON.stringify(start), 202), { accepted: true, queued: true });
-  const batch = await otlpPayload(events);
-  await server.post("/v1/logs", JSON.stringify(batch), 200);
-  let status = await server.get("/v1/ingestion");
-  assert.equal(status.mode, "durable_queue");
-  const deadline = Date.now() + 10000;
-  while (status.queue.pending_requests && Date.now() < deadline) {
-    await delay(20);
-    status = await server.get("/v1/ingestion");
-  }
-  assert.equal(status.queue.pending_requests, 0);
-  assert.equal(status.queue.failed, false);
-  const page = await server.get("/v1/events");
-  assert.deepEqual(page.events.map(record => record.event), events);
-  assert.equal(page.events[0].otlp, undefined, "the first native delivery keeps its original transport context");
-  assert.equal((await server.get("/v1/summary")).views, 1);
-});
-
 
 for (const separateReads of [false, true]) {
   test(`timeseries returns bounded UTC start cohorts with summary parity (separate reads: ${separateReads})`, async t => {
-    const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" });
+    const server = await collector(t, { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" });
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (at, viewer, video = "video-a", browser = "Chrome") => ({
       ...sample, event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
@@ -367,7 +347,7 @@ for (const separateReads of [false, true]) {
       await server.get(`/v1/timeseries?${new URLSearchParams(invalid)}`, 400);
     }
     await server.get(`/v1/timeseries?${new URLSearchParams(params)}&interval=day`, 400);
-    for (const token of [null, "invalid", server.keys.ingest_key]) {
+    for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get(`/v1/timeseries?${new URLSearchParams(params)}`, 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
     for (const path of ["/v1/summary", "/v1/videos", "/v1/events"]) await server.get(`${path}?interval=day`, 400);
@@ -377,7 +357,7 @@ for (const separateReads of [false, true]) {
 
 for (const separateReads of [false, true]) {
   test(`quality measures each view once with explicit coverage (separate reads: ${separateReads})`, async t => {
-    const settings = { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" };
+    const settings = { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" };
     const server = await collector(t, settings);
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (video = "a", browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
@@ -459,7 +439,7 @@ for (const separateReads of [false, true]) {
       await server.get(`/v1/quality?${new URLSearchParams({ ...filters, ...invalid })}`, 400);
     }
     await server.get("/v1/quality?video_id=a&video_id=b", 400);
-    for (const token of [null, "invalid", server.keys.ingest_key]) {
+    for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get("/v1/quality", 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
     const otlpServer = await collector(t, settings);
@@ -489,7 +469,7 @@ for (const separateReads of [false, true]) {
 
 for (const separateReads of [false, true]) {
   test(`engagement uses all attempts and the selected final event (separate reads: ${separateReads})`, async t => {
-    const settings = { COLLECTOR_EXPERIMENTAL_READ_WORKER: String(separateReads), COLLECTOR_DUCKDB_THREADS: "1" };
+    const settings = { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" };
     const server = await collector(t, settings);
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (video, browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
@@ -565,7 +545,7 @@ for (const separateReads of [false, true]) {
       await server.get(`/v1/engagement?${new URLSearchParams({ ...filters, ...invalid })}`, 400);
     }
     await server.get("/v1/engagement?video_id=a&video_id=b", 400);
-    for (const token of [null, "invalid", server.keys.ingest_key]) {
+    for (const token of [null, "invalid", server.keys.public_key]) {
       await server.get("/v1/engagement", 401, token ? { Authorization: `Bearer ${token}` } : {});
     }
     const otlpServer = await collector(t, settings);

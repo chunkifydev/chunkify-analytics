@@ -4,6 +4,23 @@
 data_dir = "./data"
 profile = false
 
+[storage]
+# Local storage is the default. S3-compatible storage also uses this section.
+backend = "local"
+# Optional database file; defaults to analytics.duckdb inside data_dir.
+# path = "./data/analytics.duckdb"
+# For S3 or R2, replace backend with "s3" and set these in the same section:
+# url = "s3://my-bucket/analytics/"
+# endpoint = "ACCOUNT_ID.r2.cloudflarestorage.com"
+# region = "auto"
+# access_key_id = "YOUR_ACCESS_KEY_ID"
+# secret_access_key = "YOUR_SECRET_ACCESS_KEY"
+# session_token = "..." # Optional for temporary credentials.
+# url_style = "path"   # Or "vhost".
+# use_ssl = true       # Set false only for an HTTP endpoint.
+# Omit explicit credentials on AWS to use the task role.
+# See docs/storage.md for setup, expiration and single-writer operation.
+
 [server]
 bind = "127.0.0.1:4174"
 allowed_origins = ["http://localhost:3000"]
@@ -31,16 +48,13 @@ threads = 1
 checkpoint_threshold_mib = 16
 
 [experimental]
-durable_queue = false
-replay_pipeline = false
 read_worker = false
-spool_max_bytes = 67108864
 
 [mcp]
 enabled = true
 # Add the public HTTP hostname when exposing /mcp through an ingress.
 allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
 # Used only by the local stdio companion. Keep real tokens in a private file
-# or CHUNKIFY_MCP_READ_TOKEN in the environment.
+# or CHUNKIFY_MCP_SECRET_KEY in the environment.
 collector_url = "http://127.0.0.1:4174"
-# read_token = "..."
+# secret_key = "..."

@@ -45,30 +45,28 @@ impl BatchConfig {
             }
             Ok(value)
         }
-        let max_bytes = number(settings, "COLLECTOR_BATCH_MAX_BYTES", 1048576, 1, 67108864)?;
+        let max_bytes = number(settings, "batch.max_bytes", 1048576, 1, 67108864)?;
         Ok(Self {
             bulk: match settings
-                .var("COLLECTOR_INSERT_MODE")
+                .var("batch.insert_mode")
                 .as_deref()
                 .unwrap_or("bulk")
             {
                 "bulk" => true,
                 "row" => false,
-                _ => return Err("COLLECTOR_INSERT_MODE must be bulk or row".into()),
+                _ => return Err("batch.insert_mode must be bulk or row".into()),
             },
-            max_events: number(settings, "COLLECTOR_BATCH_MAX_EVENTS", 100, 1, 10000)?,
+            max_events: number(settings, "batch.max_events", 100, 1, 10000)?,
             max_bytes,
-            delay: Duration::from_millis(
-                number(settings, "COLLECTOR_BATCH_DELAY_MS", 10, 0, 1000)? as u64,
-            ),
+            delay: Duration::from_millis(number(settings, "batch.delay_ms", 10, 0, 1000)? as u64),
             queue_bytes: number(
                 settings,
-                "COLLECTOR_QUEUE_MAX_BYTES",
+                "batch.queue_max_bytes",
                 16777216,
                 max_bytes,
                 268435456,
             )?,
-            queue_requests: number(settings, "COLLECTOR_QUEUE_MAX_REQUESTS", 256, 1, 4096)?,
+            queue_requests: number(settings, "batch.queue_max_requests", 256, 1, 4096)?,
         })
     }
 }
@@ -140,24 +138,6 @@ struct WriteRequest {
     project_permit: Option<crate::projects::Admission>,
 }
 
-// Prepared replay rows own their byte reservation before they can be queued.
-pub struct PreparedReplay {
-    rows: Vec<Row>,
-    bytes: usize,
-    preparation: Duration,
-    permit: OwnedSemaphorePermit,
-}
-
-pub struct Replay(oneshot::Receiver<Result<usize, ApiError>>);
-impl Replay {
-    pub fn wait(self) -> Result<(), ApiError> {
-        self.0
-            .blocking_recv()
-            .map_err(|_| ApiError::unavailable())??;
-        Ok(())
-    }
-}
-
 #[derive(Clone)]
 pub struct Writer {
     sender: mpsc::SyncSender<Job>,
@@ -167,110 +147,21 @@ pub struct Writer {
 }
 
 impl Writer {
-    #[cfg(test)]
-    pub(crate) fn reserved_replay_bytes(&self) -> usize {
-        self.config.queue_bytes - self.budget.available_permits()
-    }
-
-    // Bump when the prepared row representation changes. Durable requests may
-    // have been admitted by an older binary with a different memory estimate.
-    pub const PREPARED_VERSION: u32 = 5;
-
-    pub fn prepared_bytes(request: &crate::spool::StoredRequest) -> Result<usize, ApiError> {
-        let mut bytes = size_of::<WriteRequest>() + request.events.len() * size_of::<Row>();
-        for event in &request.events {
-            bytes += Row::prepare(
-                event,
-                &request.project_id,
-                request.ingest_key_id.as_deref(),
-                request.context.as_ref(),
-                request.received,
-            )?
-            .heap_bytes();
-        }
-        Ok(bytes)
-    }
-    // Only the durable consumer prepares replay rows. A busy budget leaves the
-    // decoded requests untouched so it can finish the previous write and retry.
-    pub fn prepare_replay(
-        &self,
-        requests: &[crate::spool::StoredRequest],
-    ) -> Result<Option<PreparedReplay>, ApiError> {
-        let started = Instant::now();
-        let reserved = requests.iter().try_fold(0usize, |bytes, r| {
-            bytes
-                .checked_add(r.prepared_bytes)
-                .ok_or_else(ApiError::internal)
-        })?;
-        let records = requests.iter().try_fold(0usize, |count, r| {
-            count
-                .checked_add(r.events.len())
-                .ok_or_else(ApiError::internal)
-        })?;
-        if records > self.config.max_events
-            || reserved > self.config.max_bytes
-            || reserved < size_of::<WriteRequest>() + records * size_of::<Row>()
-        {
-            return Err(ApiError::internal());
-        }
-        let permit = match self
-            .budget
-            .clone()
-            .try_acquire_many_owned(reserved.try_into().map_err(|_| ApiError::internal())?)
-        {
-            Ok(permit) => permit,
-            Err(tokio::sync::TryAcquireError::NoPermits) => return Ok(None),
-            Err(tokio::sync::TryAcquireError::Closed) => return Err(ApiError::unavailable()),
-        };
-        let mut rows = Vec::with_capacity(records);
-        for request in requests {
-            for event in &request.events {
-                rows.push(Row::prepare(
-                    event,
-                    &request.project_id,
-                    request.ingest_key_id.as_deref(),
-                    request.context.as_ref(),
-                    request.received,
-                )?);
-            }
-        }
-        let bytes = size_of::<WriteRequest>()
-            + rows.capacity() * size_of::<Row>()
-            + rows.iter().map(Row::heap_bytes).sum::<usize>();
-        // Stored estimates include a WriteRequest for every original request;
-        // combining requests can use less memory, but must never use more.
-        if bytes > reserved {
-            return Err(ApiError::internal());
-        }
-        Ok(Some(PreparedReplay {
-            rows,
-            bytes,
-            preparation: started.elapsed(),
-            permit,
-        }))
-    }
-
-    pub fn submit_replay(&self, prepared: PreparedReplay) -> Result<Replay, ApiError> {
-        let (reply, receiver) = oneshot::channel();
-        self.sender
-            .send(Job::Write(WriteRequest {
-                rows: prepared.rows,
-                bytes: prepared.bytes,
-                queued: Instant::now(),
-                preparation: prepared.preparation,
-                reply,
-                _permit: prepared.permit,
-                project_permit: None,
-            }))
-            .map_err(|_| ApiError::unavailable())?;
-        Ok(Replay(receiver))
-    }
     pub fn start(
-        mut connection: Connection,
+        connection: Connection,
         config: BatchConfig,
         profile: bool,
     ) -> duckdb::Result<(Self, thread::JoinHandle<duckdb::Result<()>>)> {
-        if config.bulk {
+        Self::start_with_storage(connection, config, profile, None)
+    }
+
+    pub fn start_with_storage(
+        mut connection: Connection,
+        config: BatchConfig,
+        profile: bool,
+        remote: Option<Arc<crate::s3_store::RemoteStore>>,
+    ) -> duckdb::Result<(Self, thread::JoinHandle<duckdb::Result<()>>)> {
+        if remote.is_none() && config.bulk {
             crate::storage::create_stage(&connection)?;
         }
         let (sender, receiver) = mpsc::sync_channel(config.queue_requests);
@@ -324,6 +215,7 @@ impl Writer {
                             records,
                             bytes,
                             worker_config.bulk,
+                            remote.as_deref(),
                             profile,
                         );
                     }
@@ -433,6 +325,7 @@ fn flush(
     records: usize,
     bytes: usize,
     bulk: bool,
+    remote: Option<&crate::s3_store::RemoteStore>,
     profile: &mut Profile,
 ) {
     let started = profile.start();
@@ -440,7 +333,10 @@ fn flush(
         profile.queue("ingest", Some(request.queued), started);
         profile.duration("prepare_request", request.preparation);
     }
-    let result = write_batch(connection, &batch, bulk, profile);
+    let result = match remote {
+        Some(remote) => write_remote(connection, &batch, remote),
+        None => write_batch(connection, &batch, bulk, profile),
+    };
     profile.executed("ingest", started);
     if let Ok(counts) = &result {
         profile.committed(batch.len(), records, bytes, counts.iter().sum());
@@ -457,6 +353,36 @@ fn flush(
         drop(request.project_permit);
         let _ = request.reply.send(response);
     }
+}
+
+fn write_remote(
+    connection: &Connection,
+    batch: &[WriteRequest],
+    remote: &crate::s3_store::RemoteStore,
+) -> Result<Vec<usize>, ApiError> {
+    connection.execute("DELETE FROM collector_parquet_stage", [])?;
+    let result = (|| {
+        let mut appender =
+            connection.appender_to_catalog_and_db("collector_parquet_stage", "temp", "main")?;
+        for request in batch {
+            for row in &request.rows {
+                appender.append_row(appender_params_from_iter(
+                    std::iter::once(Value::BigInt(remote.next_id()?))
+                        .chain(row.values.iter().cloned())
+                        .chain(std::iter::once(
+                            row.otlp.clone().map_or(Value::Null, Value::Text),
+                        )),
+                ))?;
+            }
+        }
+        appender.flush()?;
+        drop(appender);
+        remote.publish(connection)
+    })();
+    let cleanup = connection.execute("DELETE FROM collector_parquet_stage", []);
+    result?;
+    cleanup?;
+    Ok(batch.iter().map(|request| request.rows.len()).collect())
 }
 
 fn write_batch(

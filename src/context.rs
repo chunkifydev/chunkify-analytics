@@ -19,12 +19,10 @@ pub fn trusted_proxies(value: &str) -> Result<Vec<IpNet>, &'static str> {
                 return Ok(IpNet::from(ip.to_canonical()));
             }
             let network = entry.parse::<IpNet>().map_err(
-                |_| "COLLECTOR_TRUSTED_PROXIES must contain comma-separated IP addresses or CIDRs",
+                |_| "server.trusted_proxies must contain comma-separated IP addresses or CIDRs",
             )?;
             if matches!(network, IpNet::V6(net) if net.addr().to_ipv4_mapped().is_some()) {
-                return Err(
-                    "COLLECTOR_TRUSTED_PROXIES must use IPv4 CIDRs for IPv4-mapped addresses",
-                );
+                return Err("server.trusted_proxies must use IPv4 CIDRs for IPv4-mapped addresses");
             }
             Ok(network)
         })

@@ -13,6 +13,7 @@ import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
+import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
@@ -38,17 +39,20 @@ async function otlpRequests(events, options) {
 
 function postOtlp(server, body, headers = {}) {
   return fetch(`${server.url}/v1/logs`, { method: "POST", body,
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, ...headers },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, ...headers },
   });
 }
 
 async function runCommand(args, env) {
-  const child = spawn(binary, args, { env, stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
+  const configuration = await mkdtemp(join(tmpdir(), "chunkify-command-config-"));
+  const config = await writeConfig(configuration, env);
+  const child = spawn(binary, ["--config", config, ...args], { env: collectorEnvironment(env), cwd: tmpdir(), stdio: "pipe", timeout: 10000, killSignal: "SIGKILL" });
   let stdout = "";
   let stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
   const [code] = await once(child, "close");
+  await rm(configuration, { recursive: true, force: true });
   return { code, stdout, stderr };
 }
 
@@ -56,10 +60,11 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, COLLECTOR_DATA_DIR: directory, COLLECTOR_BIND: "127.0.0.1:0",
-    COLLECTOR_ALLOWED_ORIGINS: "https://player.example", COLLECTOR_STORE_IP: "true",
-    COLLECTOR_TRUSTED_PROXIES: "", ...settings };
-  const init = spawn(initialBinary, ["init"], { env, stdio: "pipe" });
+  const env = { ...process.env, "data_dir": directory, "server.bind": "127.0.0.1:0",
+    "server.allowed_origins": "https://player.example", "server.store_ip": "true",
+    "server.trusted_proxies": "", ...settings };
+  await writeConfig(directory, env);
+  const init = spawn(initialBinary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
   let errors = "";
   init.stderr.on("data", (chunk) => { errors += chunk; });
   assert.equal((await once(init, "exit"))[0], 0, errors);
@@ -74,7 +79,8 @@ async function collector(t, settings = {}, initialBinary = binary) {
       Object.assign(keys, JSON.parse(await readFile(join(directory, "keys.json"), "utf8")));
     },
     async start(executable = binary, overrides = {}) {
-      child = spawn(executable, ["serve"], { env: { ...env, ...overrides }, stdio: "pipe" });
+      await writeConfig(directory, { ...env, ...overrides });
+      child = spawn(executable, ["serve"], { cwd: directory, env: collectorEnvironment(env), stdio: "pipe" });
       // Drain stdout/stderr as well as waiting for the process to exit.
       exited = once(child, "close");
       let output = "";
@@ -99,17 +105,17 @@ async function collector(t, settings = {}, initialBinary = binary) {
       const [code, receivedSignal] = await exited;
       if (signal === "SIGTERM") assert.equal(code, 0, `${receivedSignal}: ${errors}`);
     },
-    async get(path, token = keys.read_token) {
+    async get(path, token = keys.secret_key) {
       const response = await fetch(`${server.url}${path}`, { headers: { Authorization: `Bearer ${token}` } });
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
     async send(event, headers = {}) {
-      await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.ingest_key, ...headers } }).send(event);
+      await createHttpAdapter(`${server.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": keys.public_key, ...headers } }).send(event);
     },
     async sendOtlp(event, options = {}) {
       await createOtlpAdapter(`${server.url}/v1/logs`, {
-        ...options, headers: { "X-Chunkify-Ingest-Key": keys.ingest_key, ...options.headers },
+        ...options, headers: { "X-Chunkify-Ingest-Key": keys.public_key, ...options.headers },
       }).send(event);
     },
   };
@@ -187,7 +193,7 @@ test("real SDK events survive a collector restart and duplicate delivery", async
 });
 
 test("optional profiling reports database work on shutdown without event data or credentials", async (t) => {
-  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INSERT_MODE: "row" });
+  const server = await collector(t, { "profile": "true", "retention.seconds": "0", "batch.insert_mode": "row" });
   const events = sdkEvents("private-video", "private-viewer");
   await server.send(events[0]);
   await server.send(events[0]);
@@ -214,17 +220,17 @@ test("optional profiling reports database work on shutdown without event data or
     assert.ok(profile.ingest_stages[name].total_ms >= profile.ingest_stages[name].max_ms);
   }
   assert.equal(profile.ingest_stages.insert_otlp.count, 1);
-  for (const secret of [server.keys.ingest_key, server.keys.read_token, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
+  for (const secret of [server.keys.public_key, server.keys.secret_key, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
     assert.ok(!JSON.stringify(profiles(server)).includes(secret), "profiles must contain only aggregate measurements");
   }
-  await server.start(binary, { COLLECTOR_PROFILE: "false" });
+  await server.start(binary, { "profile": "false" });
   assert.equal((await server.get("/v1/events")).events.length, 2);
   await server.stop();
   assert.ok(!server.logs().includes('"collector_profile"'));
 });
 
 test("checkpoint configuration is applied and acknowledged native and OTLP events survive a crash", async (t) => {
-  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_CHECKPOINT_THRESHOLD_MIB: "64" });
+  const server = await collector(t, { "profile": "true", "duckdb.checkpoint_threshold_mib": "64" });
   const events = sdkEvents("checkpoint");
   await server.send(events[0]);
   await server.sendOtlp(events.at(-1));
@@ -238,15 +244,15 @@ test("checkpoint configuration is applied and acknowledged native and OTLP event
   assert.ok(profile.database.threads > 0);
   assert.ok(profile.database.version.startsWith("v"));
   for (const value of ["0", "1025", "no", "1; DROP TABLE events"]) {
-    const result = await server.command(["serve"], { COLLECTOR_CHECKPOINT_THRESHOLD_MIB: value });
+    const result = await server.command(["serve"], { "duckdb.checkpoint_threshold_mib": value });
     assert.notEqual(result.code, 0);
-    assert.ok(result.stderr.includes("COLLECTOR_CHECKPOINT_THRESHOLD_MIB"), result.stderr);
+    assert.match(result.stderr, /duckdb.checkpoint_threshold_mib|Invalid TOML configuration/);
   }
 });
 
 test("concurrent native and OTLP requests share bounded transactions and preserve their data", async (t) => {
-  const server = await collector(t, { COLLECTOR_PROFILE: "true", COLLECTOR_RETENTION_SECONDS: "0",
-    COLLECTOR_BATCH_MAX_EVENTS: "8", COLLECTOR_BATCH_DELAY_MS: "100", COLLECTOR_INSERT_MODE: "row" });
+  const server = await collector(t, { "profile": "true", "retention.seconds": "0",
+    "batch.max_events": "8", "batch.delay_ms": "100", "batch.insert_mode": "row" });
   const events = Array.from({ length: 12 }, (_, index) => sdkEvents(`batch-${index}`)[0]);
   const envelopes = await otlpRequests(events);
   await Promise.all(events.map(async (event, index) => {
@@ -272,7 +278,7 @@ test("concurrent native and OTLP requests share bounded transactions and preserv
 });
 
 test("a lone event flushes by the collection deadline and keeps its earlier receipt time", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "250", COLLECTOR_RETENTION_SECONDS: "0" });
+  const server = await collector(t, { "batch.delay_ms": "250", "retention.seconds": "0" });
   const before = Date.now();
   await server.send(sdkEvents()[0]);
   const responded = Date.now();
@@ -283,15 +289,15 @@ test("a lone event flushes by the collection deadline and keeps its earlier rece
 });
 
 test("oversized write requests are rejected atomically and a full byte budget recovers", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384",
-    COLLECTOR_BATCH_DELAY_MS: "250", COLLECTOR_BATCH_MAX_EVENTS: "2", COLLECTOR_INGEST_PER_SECOND: "1000" });
+  const server = await collector(t, { "batch.max_bytes": "16384", "batch.queue_max_bytes": "16384",
+    "batch.delay_ms": "250", "batch.max_events": "2", "server.ingest_per_second": "1000" });
   const events = Array.from({ length: 3 }, (_, i) => sdkEvents(`limits-${i}`)[0]);
   const envelopes = await otlpRequests(events);
   const batch = { resourceLogs: [{ scopeLogs: [{ logRecords: envelopes.map((e) => e.resourceLogs[0].scopeLogs[0].logRecords[0]) }] }] };
   assert.equal((await postOtlp(server, JSON.stringify(batch))).status, 413);
   assert.equal((await server.get("/v1/events")).events.length, 0);
   const post = (event) => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } });
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } });
   assert.equal((await post({ ...events[0], extra: "x".repeat(20000) })).status, 413);
   const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => post({ ...sdkEvents(`budget-${i}`)[0], extra: "x".repeat(4000) })));
   assert.ok(responses.some((r) => r.status === 503), "outstanding bytes must be bounded");
@@ -303,7 +309,7 @@ test("oversized write requests are rejected atomically and a full byte budget re
 });
 
 test("bulk writes keep the first event and envelope and return per-request duplicate results", async (t) => {
-  const server = await collector(t, { COLLECTOR_INSERT_MODE: "bulk", COLLECTOR_PROFILE: "true", COLLECTOR_BATCH_DELAY_MS: "100" });
+  const server = await collector(t, { "batch.insert_mode": "bulk", "profile": "true", "batch.delay_ms": "100" });
   const playback = sdkEvents("bulk");
   const events = [playback[0], playback.at(-1)];
   const envelopes = await otlpRequests([events[0], { ...events[0], replaced: true }, events[1]]);
@@ -311,7 +317,7 @@ test("bulk writes keep the first event and envelope and return per-request dupli
   assert.equal((await postOtlp(server, JSON.stringify(body))).status, 200);
   const responses = await Promise.all(Array.from({ length: 6 }, () => fetch(`${server.url}/v1/events`, {
     method: "POST", body: JSON.stringify({ ...events[0], replaced: true }),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
   })));
   for (const response of responses) {
     assert.equal(response.status, 200);
@@ -334,7 +340,7 @@ test("bulk writes keep the first event and envelope and return per-request dupli
 });
 
 test("a failed batch commit never acknowledges or retains any of its requests", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_BATCH_DELAY_MS: "200" });
+  const server = await collector(t, { "retention.seconds": "0", "batch.delay_ms": "200" });
   // A clean checkpoint removes the WAL. Prevent its recreation to exercise a
   // real commit failure through the deployment filesystem, without DB access.
   await server.stop();
@@ -347,7 +353,7 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
     const responses = await Promise.all(events.map((event, i) => i % 2
       ? postOtlp(server, JSON.stringify(envelopes[i]))
       : fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key } })));
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } })));
     assert.ok(responses.every((r) => r.status === 500), `failed writes returned ${responses.map((r) => r.status)}`);
   } finally { await chmod(server.directory, 0o700); }
   await server.stop("SIGKILL");
@@ -358,7 +364,7 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
 });
 
 test("zero collection delay commits each request separately, including empty OTLP requests", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "0", COLLECTOR_PROFILE: "true" });
+  const server = await collector(t, { "batch.delay_ms": "0", "profile": "true" });
   await Promise.all(Array.from({ length: 12 }, (_, i) => i % 2
     ? server.send(sdkEvents(`zero-${i}`)[0])
     : postOtlp(server, JSON.stringify({ resourceLogs: [] })).then((r) => assert.equal(r.status, 200))));
@@ -371,8 +377,8 @@ test("zero collection delay commits each request separately, including empty OTL
 });
 
 test("shared-worker reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0",
-    COLLECTOR_EXPERIMENTAL_READ_WORKER: "false" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0",
+    "experimental.read_worker": "false" });
   let acknowledged = false;
   const writing = server.send(sdkEvents("read-barrier")[0]).then(() => { acknowledged = true; });
   await delay(100);
@@ -393,8 +399,8 @@ test("shared-worker reads flush pending writes and graceful shutdown drains an i
 });
 
 test("separate reads return committed data without flushing unacknowledged writes", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0",
-    COLLECTOR_EXPERIMENTAL_READ_WORKER: "true" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0",
+    "experimental.read_worker": "true" });
   let acknowledged = false;
   const writing = server.send(sdkEvents("independent-read")[0]).then(() => { acknowledged = true; });
   await delay(100);
@@ -408,11 +414,11 @@ test("separate reads return committed data without flushing unacknowledged write
 });
 
 test("a concurrent native duplicate has exactly one acknowledged owner", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "100" });
+  const server = await collector(t, { "batch.delay_ms": "100" });
   const event = sdkEvents()[0];
   const responses = await Promise.all(Array.from({ length: 12 }, (_, i) => fetch(`${server.url}/v1/events`, {
     method: "POST", body: JSON.stringify({ ...event, delivery: i }),
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
   })));
   assert.equal(responses.filter((r) => r.status === 201).length, 1);
   assert.equal(responses.filter((r) => r.status === 200).length, 11);
@@ -423,12 +429,12 @@ test("a concurrent native duplicate has exactly one acknowledged owner", async (
 test("invalid batch settings fail startup with the setting name", async (t) => {
   const server = await collector(t);
   await server.stop();
-  for (const [name, value] of Object.entries({ COLLECTOR_BATCH_MAX_EVENTS: "0", COLLECTOR_BATCH_DELAY_MS: "not-a-number",
-    COLLECTOR_QUEUE_MAX_BYTES: "100", COLLECTOR_QUEUE_MAX_REQUESTS: "0", COLLECTOR_INSERT_MODE: "unknown",
-    COLLECTOR_EXPERIMENTAL_READ_WORKER: "invalid" })) {
+  for (const [name, value] of Object.entries({ "batch.max_events": "0", "batch.delay_ms": "not-a-number",
+    "batch.queue_max_bytes": "100", "batch.queue_max_requests": "0", "batch.insert_mode": "unknown",
+    "experimental.read_worker": "invalid" })) {
     const result = await server.command(["serve"], { [name]: value });
     assert.notEqual(result.code, 0);
-    assert.ok(result.stderr.includes(name), result.stderr);
+    assert.ok((result.stderr.includes(name) || result.stderr.includes("Invalid TOML configuration")), result.stderr);
   }
 });
 
@@ -449,14 +455,14 @@ test("connection IP is stored separately and cannot be replaced by event fields 
 });
 
 test("IP collection can be disabled without rewriting earlier events or enriching retries", async (t) => {
-  const server = await collector(t, { COLLECTOR_STORE_IP: "false" });
+  const server = await collector(t, { "server.store_ip": "false" });
   const events = sdkEvents();
   await server.send(events[0]);
   await server.sendOtlp(events[1]);
   const withoutIp = (await server.get("/v1/events")).events;
   assert.ok(withoutIp.every((record) => !Object.hasOwn(record, "event_context")));
   await server.stop();
-  await server.start(binary, { COLLECTOR_STORE_IP: "true" });
+  await server.start(binary, { "server.store_ip": "true" });
   for (const event of events) await server.send(event);
   const added = sdkEvents("with-ip")[0];
   await server.send(added);
@@ -464,7 +470,7 @@ test("IP collection can be disabled without rewriting earlier events or enrichin
   assert.deepEqual(withIp.slice(0, 2), withoutIp);
   assert.equal(withIp[2].event_context.client_ip, "127.0.0.1");
   await server.stop();
-  await server.start(binary, { COLLECTOR_STORE_IP: "false" });
+  await server.start(binary, { "server.store_ip": "false" });
   await server.send(added);
   assert.deepEqual((await server.get("/v1/events")).events, withIp);
   await server.sendOtlp(sdkEvents("disabled-again")[0]);
@@ -487,7 +493,7 @@ test("flat event context copies browser fields and reserves IP fields for the co
     peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
   });
   await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_STORE_IP: "false" });
+  await server.start(binary, { "server.store_ip": "false" });
   const withoutIp = { ...sdkEvents()[0], browser_context: event.browser_context };
   await server.sendOtlp(withoutIp);
   const records = (await server.get("/v1/events")).events;
@@ -499,7 +505,7 @@ test("flat event context copies browser fields and reserves IP fields for the co
 });
 
 test("trusted proxies resolve the first untrusted address from the right", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1,10.20.0.0/16,2001:db8:abcd::/48" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1,10.20.0.0/16,2001:db8:abcd::/48" });
   const event = sdkEvents()[0];
   await server.send(event, { "X-Forwarded-For": "203.0.113.99, 198.51.100.8, 10.20.1.2, 2001:db8:abcd::1" });
   const stored = (await server.get("/v1/events")).events;
@@ -513,7 +519,7 @@ test("trusted proxies resolve the first untrusted address from the right", async
 });
 
 test("proxy headers are ignored unless the connection peer matches the configured trust list", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "10.0.0.0/8,::1" });
+  const server = await collector(t, { "server.trusted_proxies": "10.0.0.0/8,::1" });
   await server.sendOtlp(sdkEvents()[0], { headers: { "X-Forwarded-For": "203.0.113.10, 10.1.2.3" } });
   const context = (await server.get("/v1/events")).events[0].event_context;
   assert.equal(context.client_ip, "127.0.0.1");
@@ -521,7 +527,7 @@ test("proxy headers are ignored unless the connection peer matches the configure
 });
 
 test("trusted forwarding accepts literal IPs and leaves invalid or missing client addresses unresolved", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.0/8,10.20.0.0/16,2001:db8:abcd::/48" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.0/8,10.20.0.0/16,2001:db8:abcd::/48" });
   const cases = [
     ["198.51.100.2", "198.51.100.2"],
     ["2001:db8:beef::5, 2001:db8:abcd::1", "2001:db8:beef::5"],
@@ -548,12 +554,12 @@ test("trusted forwarding accepts literal IPs and leaves invalid or missing clien
 });
 
 test("multiple X-Forwarded-For header lines form one ordered chain", async (t) => {
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1,10.20.0.0/16" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1,10.20.0.0/16" });
   const body = JSON.stringify(sdkEvents()[0]);
   const status = await new Promise((resolveStatus, reject) => {
     const request = httpRequest(`${server.url}/v1/events`, { method: "POST", headers: [
       "Content-Type", "application/json", "Content-Length", String(Buffer.byteLength(body)),
-      "X-Chunkify-Ingest-Key", server.keys.ingest_key,
+      "X-Chunkify-Ingest-Key", server.keys.public_key,
       "X-Forwarded-For", "203.0.113.99, 198.51.100.7", "X-Forwarded-For", "10.20.1.2",
     ] }, (response) => { response.resume(); response.on("end", () => resolveStatus(response.statusCode)); });
     request.on("error", reject);
@@ -564,13 +570,13 @@ test("multiple X-Forwarded-For header lines form one ordered chain", async (t) =
 });
 
 test("IPv6 connection addresses are captured and can be trusted explicitly", async (t) => {
-  const server = await collector(t, { COLLECTOR_BIND: "[::1]:0" });
+  const server = await collector(t, { "server.bind": "[::1]:0" });
   await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
   assert.deepEqual((await server.get("/v1/events")).events[0].event_context, {
     schema_version: 1, peer_ip: "::1", client_ip: "::1", client_ip_source: "connection",
   });
   await server.stop();
-  await server.start(binary, { COLLECTOR_TRUSTED_PROXIES: "::1/128" });
+  await server.start(binary, { "server.trusted_proxies": "::1/128" });
   await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
   assert.deepEqual((await server.get("/v1/events")).events.at(-1).event_context, {
     schema_version: 1, peer_ip: "::1", client_ip: "2001:db8::4", client_ip_source: "x_forwarded_for",
@@ -584,17 +590,17 @@ test("invalid IP configuration fails at startup without changing events or crede
   const keys = { ...server.keys };
   await server.stop();
   for (const settings of [
-    ...["0", "1", "yes", "FALSE", ""].map((value) => ({ COLLECTOR_STORE_IP: value })),
+    ...["0", "1", "yes", "FALSE", ""].map((value) => ({ "server.store_ip": value })),
     ...["*", "localhost", "127.0.0.1:80", "127.0.0.1/33", "::1/129", "127.0.0.1,", "::ffff:127.0.0.0/104"]
-      .map((value) => ({ COLLECTOR_TRUSTED_PROXIES: value })),
+      .map((value) => ({ "server.trusted_proxies": value })),
   ]) {
     const result = await server.command(["serve"], settings);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, new RegExp(Object.keys(settings)[0]));
+    assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
   await server.reloadKeys();
   assert.deepEqual(server.keys, keys);
-  await server.start(binary, { COLLECTOR_TRUSTED_PROXIES: " ::ffff:127.0.0.1 , 2001:db8::/32 " });
+  await server.start(binary, { "server.trusted_proxies": " ::ffff:127.0.0.1 , 2001:db8::/32 " });
   assert.deepEqual(await server.get("/v1/events"), before);
   await server.send(sdkEvents()[0], { "X-Forwarded-For": "198.51.100.11" });
   assert.equal((await server.get("/v1/events")).events.at(-1).event_context.client_ip, "198.51.100.11");
@@ -616,11 +622,11 @@ test("the browser Chunkify adapter persists context through authenticated ingest
   fixture.listen(0, "127.0.0.1");
   await once(fixture, "listening");
   const origin = `http://127.0.0.1:${fixture.address().port}`;
-  const server = await collector(t, { COLLECTOR_ALLOWED_ORIGINS: origin });
+  const server = await collector(t, { "server.allowed_origins": origin });
   browser = await chromium.launch();
   const page = await browser.newPage({ locale: "fr-FR", timezoneId: "Europe/Paris", viewport: { width: 960, height: 540 } });
   await page.goto(origin);
-  const destination = { endpoint: `${server.url}/v1/events`, ingestKey: server.keys.ingest_key };
+  const destination = { endpoint: `${server.url}/v1/events`, ingestKey: server.keys.public_key };
   const events = await page.evaluate(async ({ endpoint, ingestKey }) => {
     const { attachAnalytics } = await import("/core.js");
     const { createChunkifyAdapter } = await import("/chunkify.js");
@@ -669,7 +675,7 @@ test("the browser Chunkify adapter persists context through authenticated ingest
 });
 
 test("retention expires native and OTLP events by receipt time and updates summaries", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "2", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const server = await collector(t, { "retention.seconds": "2", "retention.interval_seconds": "1" });
   const past = { ...sdkEvents("past-video")[0], occurred_at: "2000-01-01T00:00:00Z" };
   const future = { ...sdkEvents("future-video")[0], occurred_at: "2099-01-01T00:00:00Z" };
   await server.send(past);
@@ -685,7 +691,7 @@ test("retention expires native and OTLP events by receipt time and updates summa
   await server.sendOtlp(future);
   assert.equal((await server.get("/v1/events")).events.length, 1);
   await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "0" });
+  await server.start(binary, { "retention.seconds": "0" });
   assert.equal((await server.get("/v1/summary")).views, 1);
 });
 
@@ -696,54 +702,21 @@ test("retention defaults to 30 days, can be disabled, and purges at startup", as
   await server.sendOtlp(event);
   await server.stop();
   await delay(1200);
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   assert.match(server.output, /Retention: disabled/);
   await delay(1200);
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
   await server.stop();
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "1" });
   assert.deepEqual((await server.get("/v1/events")).events, []);
   assert.equal((await server.get("/v1/summary")).views, 0);
 });
 
-test("offline viewer deletion removes both transports across videos and preserves other viewers", async (t) => {
+test("viewer deletion is not a supported command", async (t) => {
   const server = await collector(t);
-  const viewerId = "viewer's-id; SELECT * FROM events";
-  const first = sdkEvents("video-a", viewerId);
-  const second = sdkEvents("video-b", viewerId);
-  const other = sdkEvents("video-a", "keep-me");
-  const anonymous = sdkEvents("video-b", null);
-  first.at(-1).playing_time_ms = 1000;
-  second.at(-1).playing_time_ms = 2000;
-  other.at(-1).playing_time_ms = 3000;
-  anonymous.at(-1).playing_time_ms = 500;
-  for (const event of [...first, ...other]) await server.send(event);
-  for (const event of [...second, ...anonymous]) await server.sendOtlp(event);
-  const original = (await server.get("/v1/events")).events;
-  const busy = await server.command(["viewer", "delete", viewerId]);
-  assert.notEqual(busy.code, 0);
-  assert.match(busy.stderr, /Stop the collector/);
-  assert.deepEqual((await server.get("/v1/events")).events, original);
-  await server.stop("SIGKILL");
-  const deleted = await server.command(["viewer", "delete", viewerId]);
-  assert.equal(deleted.code, 0, deleted.stderr);
-  assert.deepEqual(JSON.parse(deleted.stdout), { deleted_events: 6 });
-  await server.start();
-  assert.deepEqual((await server.get("/v1/events")).events,
-    original.filter((record) => record.event.viewer_id !== viewerId));
-  assert.deepEqual(await server.get("/v1/summary"), { views: 2, unique_viewers: 1, total_playing_time_ms: 3500 });
-  assert.deepEqual((await server.get("/v1/videos")).videos, [
-    { video_id: "video-a", views: 1, unique_viewers: 1, total_playing_time_ms: 3000 },
-    { video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500 },
-  ]);
-  await server.stop();
-  const repeated = await server.command(["viewer", "delete", viewerId]);
-  assert.equal(repeated.code, 0, repeated.stderr);
-  assert.deepEqual(JSON.parse(repeated.stdout), { deleted_events: 0 });
-  await server.start();
-  // Deletion removes stored data; it does not block future collection of this ID.
-  await server.sendOtlp(second[0]);
-  assert.equal((await server.get("/v1/summary")).views, 3);
+  const result = await server.command(["viewer", "delete", "viewer"]);
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /unrecognized subcommand/);
 });
 
 test("offline key rotation replaces each credential independently without exposing keys or losing data", async (t) => {
@@ -760,12 +733,12 @@ test("offline key rotation replaces each credential independently without exposi
   await server.stop();
   const invalid = await server.command(["key", "rotate-primary", "unknown"]);
   assert.notEqual(invalid.code, 0);
-  const ingest = await server.command(["key", "rotate-primary", "ingest"]);
+  const ingest = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(ingest.code, 0, ingest.stderr);
   await server.reloadKeys();
-  assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
-  assert.equal(server.keys.read_token, originalKeys.read_token);
-  assert.ok(server.keys.ingest_key.length >= 32);
+  assert.notEqual(server.keys.public_key, originalKeys.public_key);
+  assert.equal(server.keys.secret_key, originalKeys.secret_key);
+  assert.ok(server.keys.public_key.length >= 32);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
     assert.equal(`${ingest.stdout}${ingest.stderr}`.includes(key), false);
   }
@@ -775,25 +748,25 @@ test("offline key rotation replaces each credential independently without exposi
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), original);
   const deniedWrite = await fetch(`${server.url}/v1/events`, { method: "POST",
-    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": originalKeys.ingest_key },
+    headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": originalKeys.public_key },
     body: JSON.stringify(event),
   });
   assert.equal(deniedWrite.status, 401);
-  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.ingest_key })).status, 401);
-  const rotatedIngest = server.keys.ingest_key;
+  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": originalKeys.public_key })).status, 401);
+  const rotatedIngest = server.keys.public_key;
   await server.sendOtlp(sdkEvents("after-ingest-rotation")[0]);
   await server.stop("SIGKILL");
-  const read = await server.command(["key", "rotate-primary", "read"]);
+  const read = await server.command(["key", "rotate-primary", "secret"]);
   assert.equal(read.code, 0, read.stderr);
   await server.reloadKeys();
-  assert.notEqual(server.keys.read_token, originalKeys.read_token);
-  assert.equal(server.keys.ingest_key, rotatedIngest);
+  assert.notEqual(server.keys.secret_key, originalKeys.secret_key);
+  assert.equal(server.keys.public_key, rotatedIngest);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
     assert.equal(`${read.stdout}${read.stderr}`.includes(key), false);
   }
   await server.start();
   const deniedRead = await fetch(`${server.url}/v1/events`, {
-    headers: { Authorization: `Bearer ${originalKeys.read_token}` },
+    headers: { Authorization: `Bearer ${originalKeys.secret_key}` },
   });
   assert.equal(deniedRead.status, 401);
   await server.send(sdkEvents("after-read-rotation")[0]);
@@ -815,10 +788,10 @@ test("a stopped data-directory backup restores events, OTLP context, summaries a
   await server.stop();
   await cp(server.directory, join(backups, "snapshot"), { recursive: true, force: false, errorOnExist: true });
   // Changes made after the backup must not appear in the restored installation.
-  const rotation = await server.command(["key", "rotate-primary", "ingest"]);
+  const rotation = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(rotation.code, 0, rotation.stderr);
   await server.reloadKeys();
-  assert.notEqual(server.keys.ingest_key, originalKeys.ingest_key);
+  assert.notEqual(server.keys.public_key, originalKeys.public_key);
   await server.start();
   await server.send(sdkEvents("after-backup")[0]);
   await server.stop();
@@ -827,7 +800,7 @@ test("a stopped data-directory backup restores events, OTLP context, summaries a
   const restoredKeys = JSON.parse(await readFile(join(restored, "keys.json"), "utf8"));
   assert.deepEqual(restoredKeys, originalKeys);
   Object.assign(server.keys, restoredKeys);
-  await server.start(binary, { COLLECTOR_DATA_DIR: restored });
+  await server.start(binary, { "data_dir": restored });
   assert.deepEqual(await server.get("/v1/events"), originalEvents);
   assert.deepEqual(await server.get("/v1/summary"), originalSummary);
   await server.sendOtlp(events[0]);
@@ -843,16 +816,16 @@ test("invalid retention settings fail clearly without changing stored events or 
   const keys = { ...server.keys };
   await server.stop();
   for (const settings of [
-    { COLLECTOR_RETENTION_SECONDS: "-1" },
-    { COLLECTOR_RETENTION_SECONDS: "1.5" },
-    { COLLECTOR_RETENTION_SECONDS: "18446744073709551615" },
-    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "0" },
-    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "-1" },
-    { COLLECTOR_RETENTION_INTERVAL_SECONDS: "86401" },
+    { "retention.seconds": "-1" },
+    { "retention.seconds": "1.5" },
+    { "retention.seconds": "18446744073709551615" },
+    { "retention.interval_seconds": "0" },
+    { "retention.interval_seconds": "-1" },
+    { "retention.interval_seconds": "86401" },
   ]) {
     const result = await server.command(["serve"], settings);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, new RegExp(Object.keys(settings)[0]));
+    assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
   await server.reloadKeys();
   assert.deepEqual(server.keys, keys);
@@ -861,15 +834,15 @@ test("invalid retention settings fail clearly without changing stored events or 
 });
 
 test("ingestion validates SDK payloads and separates browser writes from private reads", async (t) => {
-  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "8192" });
+  const server = await collector(t, { "server.max_body_bytes": "8192" });
   const event = sdkEvents()[0];
   const post = (body, headers = {}) => fetch(`${server.url}/v1/events`, {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key, ...headers },
+    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key, ...headers },
     body: JSON.stringify(body),
   });
-  assert.equal((await post(event, { "X-Chunkify-Ingest-Key": server.keys.read_token })).status, 401);
+  assert.equal((await post(event, { "X-Chunkify-Ingest-Key": server.keys.secret_key })).status, 401);
   assert.equal((await fetch(`${server.url}/v1/events`, {
-    headers: { Authorization: `Bearer ${server.keys.ingest_key}` },
+    headers: { Authorization: `Bearer ${server.keys.public_key}` },
   })).status, 401);
   assert.equal((await post(event, { Origin: "https://untrusted.example" })).status, 403);
   const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
@@ -893,7 +866,7 @@ test("ingestion validates SDK payloads and separates browser writes from private
   assert.equal(valid.headers.get("access-control-allow-origin"), "https://player.example");
   assert.deepEqual((await server.get("/v1/events")).events[0].event.extra, { customer_field: "preserved" });
   const read = await fetch(`${server.url}/v1/events`, { headers: {
-    Origin: "https://player.example", Authorization: `Bearer ${server.keys.read_token}`,
+    Origin: "https://player.example", Authorization: `Bearer ${server.keys.secret_key}`,
   } });
   assert.equal(read.headers.get("access-control-allow-origin"), null);
 });
@@ -922,7 +895,7 @@ test("all seven SDK event types can be filtered and paged while new events arriv
     "from=invalid", "from=2026-10-16T00:00:00Z&to=2026-10-15T00:00:00Z",
     `video_id=video-b&cursor=${encodeURIComponent(firstCursor)}`]) {
     const response = await fetch(`${server.url}/v1/events?${query}`, {
-      headers: { Authorization: `Bearer ${server.keys.read_token}` },
+      headers: { Authorization: `Bearer ${server.keys.secret_key}` },
     });
     assert.equal(response.status, 400, query);
   }
@@ -973,9 +946,9 @@ test("summaries count views and viewers and use final or latest cumulative playt
 test("ingestion rate limits reject excess requests without storing more events", async (t) => {
   const event = sdkEvents()[0];
   const [envelope] = await otlpRequests([event]);
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1" });
+  const server = await collector(t, { "server.ingest_per_second": "1" });
   const responses = await Promise.all(Array.from({ length: 8 }, (_, index) => fetch(`${server.url}/v1/${index % 2 ? "logs" : "events"}`, {
-    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
     body: JSON.stringify(index % 2 ? envelope : event),
   })));
   assert.equal(responses.filter((response) => response.ok).length, 1);
@@ -1024,29 +997,6 @@ test("upgrading a previous collector preserves events and keys and accepts OTLP"
   assert.deepEqual(upgraded.slice(0, events.length), expected.events);
   assert.equal(upgraded.at(-1).event_context.client_ip, "127.0.0.1");
   assert.equal((await server.get("/v1/summary")).views, 2);
-});
-
-test("upgrading replays pending durable requests with the current prepared-row budget", {
-  skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
-}, async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_BATCH_MAX_BYTES: "16384",
-    COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" }, process.env.COLLECTOR_PREVIOUS_BINARY);
-  const events = Array.from({ length: 8 }, (_, index) => ({ ...sdkEvents(`legacy-${index}`)[0],
-    browser_context: { schema_version: 1, browser_name: "Firefox", viewport_width_px: 900 + index } }));
-  for (const event of events) await server.send(event);
-  assert.ok((await server.get("/v1/ingestion")).queue.pending_requests > 0);
-  await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  const state = (await server.get("/v1/ingestion")).queue;
-  assert.equal(state.failed, false);
-  assert.equal(state.pending_requests, 0);
-  const records = (await server.get("/v1/events")).events;
-  assert.deepEqual(records.map(r => r.event), events);
-  for (const record of records) {
-    assert.equal(record.event_context.client_ip, "127.0.0.1");
-    assert.equal(record.event_context.browser_name, "Firefox");
-  }
 });
 
 test("the OTLP adapter preserves all seven SDK events and produces the same reports as native ingestion", async (t) => {
@@ -1100,7 +1050,7 @@ test("OTLP gzip batches retain resource and scope context and deduplicate within
     ] },
     { scopeLogs: [{ logRecords: [...logs.slice(3), logs[0]] }] },
   ] };
-  const server = await collector(t, { COLLECTOR_TRUSTED_PROXIES: "127.0.0.1" });
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
   const response = await postOtlp(server, gzipSync(JSON.stringify(batch)), {
     "Content-Encoding": "gzip", "X-Forwarded-For": "198.51.100.50",
   });
@@ -1148,14 +1098,14 @@ test("large OTLP batches decode promptly and preserve each scope's original meta
     });
     return { ...metadata, logRecords };
   });
-  const server = await collector(t, { COLLECTOR_MAX_OTLP_RECORDS: "1000", COLLECTOR_BATCH_MAX_EVENTS: "1000",
-    COLLECTOR_MAX_BODY_BYTES: "16777216", COLLECTOR_BATCH_MAX_BYTES: "16777216",
-    COLLECTOR_QUEUE_MAX_BYTES: "67108864" });
+  const server = await collector(t, { "server.max_otlp_records": "1000", "batch.max_events": "1000",
+    "server.max_body_bytes": "16777216", "batch.max_bytes": "16777216",
+    "batch.queue_max_bytes": "67108864" });
   // A generous request deadline catches repeated whole-batch copies before persistence.
   // Kill a failed test server promptly rather than waiting for the expensive decode.
   try {
     const response = await fetch(`${server.url}/v1/logs`, { method: "POST",
-      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.ingest_key },
+      headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
       body: JSON.stringify({ resourceLogs: [{ ...resource, scopeLogs }] }), signal: AbortSignal.timeout(10000) });
     assert.equal(response.status, 200, await response.clone().text());
     assert.deepEqual(await response.json(), {});
@@ -1177,7 +1127,7 @@ test("large OTLP batches decode promptly and preserve each scope's original meta
 });
 
 test("OTLP rejects invalid or excessive exports atomically with protocol errors", async (t) => {
-  const server = await collector(t, { COLLECTOR_MAX_BODY_BYTES: "32768", COLLECTOR_MAX_OTLP_RECORDS: "2" });
+  const server = await collector(t, { "server.max_body_bytes": "32768", "server.max_otlp_records": "2" });
   const event = sdkEvents()[0];
   const [envelope] = await otlpRequests([event]);
   const log = envelope.resourceLogs[0].scopeLogs[0].logRecords[0];
@@ -1196,7 +1146,7 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
     assert.equal((await server.get("/v1/summary")).views, 0);
   }
   await rejected(body, 401, { "X-Chunkify-Ingest-Key": "" });
-  await rejected(body, 401, { "X-Chunkify-Ingest-Key": server.keys.read_token });
+  await rejected(body, 401, { "X-Chunkify-Ingest-Key": server.keys.secret_key });
   await rejected(body, 403, { Origin: "https://elsewhere.example" });
   await rejected(body, 415, { "Content-Type": "application/x-protobuf" });
   await rejected(body, 415, { "Content-Encoding": "br" });
@@ -1240,10 +1190,10 @@ test("OTLP rejects invalid or excessive exports atomically with protocol errors"
   assert.deepEqual((await server.get("/v1/events")).events.map((record) => record.event), [event]);
 });
 
-test("separate reader serves committed SDK events with stable pagination in direct and queued modes", async (t) => {
-  for (const queued of [false, true]) await t.test(queued ? "durable queue" : "direct", async (t) => {
-    const server = await collector(t, { COLLECTOR_EXPERIMENTAL_READ_WORKER: "true",
-      COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(queued), COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_PROFILE: "true" });
+test("separate reader serves committed SDK events with stable pagination", async (t) => {
+  await t.test("direct", async (t) => {
+    const server = await collector(t, { "experimental.read_worker": "true",
+      "retention.seconds": "0", "profile": "true" });
     const events = Array.from({ length: 8 }, (_, index) => {
       const view = sdkEvents(`video-${index % 2}`, `viewer-${index % 3}`);
       view.at(-1).playing_time_ms = 1000;
@@ -1258,19 +1208,11 @@ test("separate reader serves committed SDK events with stable pagination in dire
         }
       })(),
     ]);
-    const drain = async () => {
-      if (!queued) return;
-      const deadline = Date.now() + 5000;
-      while ((await server.get("/v1/ingestion")).queue.pending_requests && Date.now() < deadline) await delay(10);
-      assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-    };
-    await drain();
     assert.deepEqual(await server.get("/v1/summary"), { views: 8, unique_viewers: 3, total_playing_time_ms: 8000 });
     assert.equal((await server.get("/v1/summary?video_id=video-0")).views, 4);
     const first = await server.get("/v1/events?limit=1");
     const extra = sdkEvents("after-first-page");
     for (const event of extra) await server.send(event);
-    await drain();
     const records = [...first.events];
     let cursor = first.next_cursor;
     while (cursor) {
@@ -1294,129 +1236,6 @@ test("separate reader serves committed SDK events with stable pagination in dire
   });
 });
 
-test("durable queue acknowledges before DuckDB, recovers after SIGKILL, and deduplicates replay", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const event = sdkEvents()[0];
-  event.browser_context = { schema_version: 1, browser_name: "Queue test", language: "fr" };
-  const send = () => fetch(`${server.url}/v1/events`, { method: "POST",
-    headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key }, body: JSON.stringify(event) });
-  const before = Date.now();
-  for (let i = 0; i < 2; i++) {
-    const response = await send();
-    assert.equal(response.status, 202);
-    assert.deepEqual(await response.json(), { accepted: true, queued: true });
-  }
-  const status = await server.get("/v1/ingestion");
-  assert.ok(status.queue.pending_requests >= 1, "acknowledged events remain queued while DuckDB waits for its batch");
-  assert.ok(Date.now() - before < 1000, "acknowledgement does not wait for the DuckDB batching deadline");
-  await server.stop("SIGKILL");
-  const disabled = await server.command(["serve"], { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "false" });
-  assert.notEqual(disabled.code, 0);
-  assert.match(disabled.stderr, /Pending durable events exist/);
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-  const page = await server.get("/v1/events");
-  assert.equal(page.events.length, 1);
-  assert.deepEqual(page.events[0].event, event);
-  assert.equal(page.events[0].event_context.client_ip, "127.0.0.1");
-  assert.equal(page.events[0].event_context.browser_name, "Queue test");
-  assert.ok(Date.parse(page.events[0].received_at) >= before);
-  assert.ok(Date.parse(page.events[0].received_at) < before + 1000, "replay preserves original receipt time");
-  const unauthorized = await fetch(`${server.url}/v1/ingestion`);
-  assert.equal(unauthorized.status, 401);
-});
-
-test("durable queue rejects overload, drains, and accepts subsequent events", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_SPOOL_MAX_BYTES: "4096",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const responses = await Promise.all(Array.from({ length: 12 }, () => {
-    const event = sdkEvents()[0];
-    return fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-      headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
-  }));
-  const statuses = responses.map(r => r.status);
-  await Promise.all(responses.map(r => r.text()));
-  assert.ok(statuses.includes(202));
-  assert.ok(statuses.includes(503), "full disk queue returns retryable overload");
-  assert.ok(statuses.every(s => [202, 503].includes(s)));
-  const deadline = Date.now() + 5000;
-  while ((await server.get("/v1/ingestion")).queue.pending_requests && Date.now() < deadline) await delay(20);
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-  const rows = (await server.get("/v1/events")).events;
-  assert.equal(rows.length, statuses.filter(s => s === 202).length);
-  await server.send(sdkEvents()[0]);
-  await server.stop();
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal((await server.get("/v1/events")).events.length, rows.length + 1);
-});
-
-test("durable queue preserves OTLP context and deletes a viewer after pending recovery", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const events = sdkEvents("queued-video", "queued-viewer");
-  await server.sendOtlp(events[0], { resourceAttributes: { "service.name": "queue-test" } });
-  await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  const rows = (await server.get("/v1/events")).events;
-  assert.equal(rows.length, 1);
-  assert.deepEqual(rows[0].event, events[0]);
-  assert.ok(rows[0].otlp);
-  await server.sendOtlp(events[1]);
-  await server.stop("SIGKILL");
-  const deleted = await server.command(["viewer", "delete", "queued-viewer"], { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal(deleted.code, 0, deleted.stderr);
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.equal((await server.get("/v1/events")).events.length, 0);
-});
-
-test("durable queue validates prepared sizes before acknowledging with a small writer budget", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_MAX_BYTES: "16384", COLLECTOR_QUEUE_MAX_BYTES: "16384", COLLECTOR_RETENTION_SECONDS: "0" });
-  const post = event => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
-    headers: { "content-type": "application/json", "x-chunkify-ingest-key": server.keys.ingest_key } });
-  const tooLarge = sdkEvents("v".repeat(13500))[0];
-  assert.ok(Buffer.byteLength(JSON.stringify(tooLarge)) < 16384, "input JSON fits the budget");
-  assert.equal((await post(tooLarge)).status, 413, "JSON fits but prepared row does not");
-  const responses = [];
-  for (let i = 0; i < 8; i++) responses.push(await post(sdkEvents("v".repeat(3500))[0]));
-  assert.ok(responses.every(r => r.status === 202));
-  await Promise.all(responses.map(r => r.text()));
-  await server.stop();
-  await server.start();
-  const state = (await server.get("/v1/ingestion")).queue;
-  assert.equal(state.failed, false);
-  assert.equal(state.pending_requests, 0);
-  assert.equal((await server.get("/v1/events")).events.length, 8);
-});
-
-test("durable queue replays the committed-but-not-dequeued crash window without changing first delivery", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true",
-    COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  const event = sdkEvents()[0];
-  event.browser_context = { schema_version: 1, browser_name: "First delivery" };
-  await server.send(event);
-  assert.ok((await server.get("/v1/ingestion")).queue.pending_requests > 0);
-  const snapshot = join(server.directory, "pending-snapshot.sqlite");
-  // SQLite's online backup includes the WAL. After graceful draining, restoring
-  // this queue snapshot recreates a crash after DuckDB commit but before dequeue.
-  const backup = spawn("python3", ["-c", "import sqlite3,sys; a=sqlite3.connect(sys.argv[1]); b=sqlite3.connect(sys.argv[2]); a.backup(b); assert b.execute('select count(*) from pending').fetchone()[0] > 0; b.close(); a.close()",
-    join(server.directory, "ingestion.sqlite"), snapshot], { stdio: "pipe" });
-  assert.equal((await once(backup, "close"))[0], 0);
-  await server.stop();
-  await cp(snapshot, join(server.directory, "ingestion.sqlite"));
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  const page = await server.get("/v1/events");
-  assert.equal(page.events.length, 1);
-  assert.deepEqual(page.events[0].event, event);
-  const original = page.events[0];
-  await server.send({ ...event, video_id: "different", browser_context: { schema_version: 1, browser_name: "Retry" } });
-  await server.stop();
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.deepEqual((await server.get("/v1/events")).events, [original]);
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_requests, 0);
-});
-
 async function projectCommand(server, args) {
   const result = await server.command(args);
   assert.equal(result.code, 0, result.stderr);
@@ -1428,19 +1247,19 @@ function projectPost(server, key, event, headers = {}) {
     headers: { "content-type": "application/json", "x-chunkify-ingest-key": key, ...headers } });
 }
 
-for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical IDs, cursors and deletion (${mode})`, async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_INGEST_PER_SECOND: "1000",
-    COLLECTOR_INSERT_MODE: mode === "row" ? "row" : "bulk",
-    COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: String(mode === "durable"), COLLECTOR_BATCH_DELAY_MS: "100" });
+for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cursors (${mode})`, async (t) => {
+  const server = await collector(t, { "retention.seconds": "0", "server.ingest_per_second": "1000",
+    "batch.insert_mode": mode === "row" ? "row" : "bulk",
+    "batch.delay_ms": "100" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live", "--name", "Production website"]);
-  const second = await projectCommand(server, ["key", "create", "live", "ingest", "Mobile app"]);
+  const second = await projectCommand(server, ["key", "create", "live", "public", "Mobile app"]);
   const list = await projectCommand(server, ["project", "list"]);
-  const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "ingest").id;
+  const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "public").id;
   assert.equal(list.find(p => p.id === "live").name, "Production website");
-  assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.secret)));
+  assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.key)));
   const configuration = await readFile(join(server.directory, "keys.json"), "utf8");
-  for (const secret of [live.ingest_key, live.read_token, second.secret]) assert.ok(!configuration.includes(secret));
+  for (const secret of [live.public_key, live.secret_key, second.key]) assert.ok(!configuration.includes(secret));
   await server.start();
   const events = sdkEvents("shared-video", "shared-viewer");
   events.at(-1).playing_time_ms = 1200;
@@ -1451,27 +1270,27 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
   liveEvents.at(-1).playing_time_ms = 5400;
   await Promise.all([
     ...events.map(event => server.send(event)),
-    ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key },
+    ...liveEvents.map(event => server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key },
       resourceAttributes: { "service.name": "production" } })),
   ]);
-  // Restart waits for all durable entries; retrying via another key must keep first delivery.
+  // Retrying via another key must keep first delivery.
   await server.stop();
   await server.start();
-  await server.send(liveEvents[0], { "X-Chunkify-Ingest-Key": second.secret });
+  await server.send(liveEvents[0], { "X-Chunkify-Ingest-Key": second.key });
   await server.stop();
   await server.start();
   const defaultRows = (await server.get("/v1/events")).events;
-  const liveRows = (await server.get("/v1/events", live.read_token)).events;
+  const liveRows = (await server.get("/v1/events", live.secret_key)).events;
   assert.equal(defaultRows.length, events.length);
   assert.equal(liveRows.length, events.length);
-  assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-ingest" && !r.otlp));
+  assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-public" && !r.otlp));
   assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id === firstKey && r.otlp));
   assert.deepEqual(await server.get("/v1/summary"), { views: 1, unique_viewers: 1, total_playing_time_ms: 1200 });
-  assert.deepEqual(await server.get("/v1/summary", live.read_token), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
-  assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.read_token)).videos[0].total_playing_time_ms, 5400);
+  assert.deepEqual(await server.get("/v1/summary", live.secret_key), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
+  assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.secret_key)).videos[0].total_playing_time_ms, 5400);
   const page = await server.get("/v1/events?limit=1");
   let response = await fetch(`${server.url}/v1/events?limit=1&cursor=${encodeURIComponent(page.next_cursor)}`,
-    { headers: { authorization: `Bearer ${live.read_token}` } });
+    { headers: { authorization: `Bearer ${live.secret_key}` } });
   assert.equal(response.status, 400);
   // Cursors are positions, not authorization: even a forged scope cannot leak another project.
   const cursor = JSON.parse(Buffer.from(page.next_cursor, "base64url"));
@@ -1479,55 +1298,53 @@ for (const mode of ["row", "bulk", "durable"]) test(`projects isolate identical 
   cursor.after = 0;
   cursor.through = Number.MAX_SAFE_INTEGER;
   const forged = Buffer.from(JSON.stringify(cursor)).toString("base64url");
-  const forgedPage = await server.get(`/v1/events?cursor=${forged}`, live.read_token);
+  const forgedPage = await server.get(`/v1/events?cursor=${forged}`, live.secret_key);
   assert.ok(forgedPage.events.every(r => r.project_id === "live"));
   for (const path of ["/v1/events?project_id=live", "/v1/summary?project_id=live", "/v1/videos?project_id=live"]) {
-    response = await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${server.keys.read_token}` } });
+    response = await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${server.keys.secret_key}` } });
     assert.equal(response.status, 400);
   }
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.ingest_key}` } })).status, 401);
-  assert.equal((await projectPost(server, live.read_token, events[0])).status, 401);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.public_key}` } })).status, 401);
+  assert.equal((await projectPost(server, live.secret_key, events[0])).status, 401);
   await server.stop();
   await projectCommand(server, ["project", "rename", "live", "Customer A — Live"]);
-  await projectCommand(server, ["viewer", "delete", "shared-viewer", "--project", "default"]);
   await server.start();
-  assert.equal((await server.get("/v1/events")).events.length, 0);
-  assert.deepEqual((await server.get("/v1/events", live.read_token)).events, liveRows);
+  assert.equal((await server.get("/v1/events")).events.length, events.length);
+  assert.deepEqual((await server.get("/v1/events", live.secret_key)).events, liveRows);
   await server.stop();
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").name, "Customer A — Live");
-  await projectCommand(server, ["viewer", "delete", "shared-viewer", "--project", "live"]);
   await server.start();
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
+  assert.deepEqual((await server.get("/v1/events", live.secret_key)).events, liveRows);
 });
 
 test("project credentials rotate and revoke independently without changing ownership", async (t) => {
   const server = await collector(t);
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
-  const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Website"]);
-  const extraRead = await projectCommand(server, ["key", "create", "live", "read", "Dashboard"]);
+  const extra = await projectCommand(server, ["key", "create", "live", "public", "Website"]);
+  const extraRead = await projectCommand(server, ["key", "create", "live", "secret", "Dashboard"]);
   const events = sdkEvents();
   await server.start();
-  assert.equal((await projectPost(server, extra.secret, events[0])).status, 201);
+  assert.equal((await projectPost(server, extra.key, events[0])).status, 201);
   await server.stop();
   const rotated = await projectCommand(server, ["key", "rotate", "live", extra.key_id]);
   assert.equal(rotated.key_id, extra.key_id);
   await projectCommand(server, ["key", "revoke", "live", extraRead.key_id]);
   await server.start();
-  assert.equal((await projectPost(server, extra.secret, events[1])).status, 401);
-  assert.equal((await projectPost(server, rotated.secret, events[1])).status, 201);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${extraRead.secret}` } })).status, 401);
-  assert.ok((await server.get("/v1/events", live.read_token)).events.every(r => r.ingest_key_id === extra.key_id));
+  assert.equal((await projectPost(server, extra.key, events[1])).status, 401);
+  assert.equal((await projectPost(server, rotated.key, events[1])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${extraRead.key}` } })).status, 401);
+  assert.ok((await server.get("/v1/events", live.secret_key)).events.every(r => r.ingest_key_id === extra.key_id));
   assert.equal((await server.get("/v1/events")).events.length, 0);
   await server.stop();
-  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
   await server.start();
-  assert.equal((await projectPost(server, server.keys.ingest_key, events[0])).status, 401, "legacy root export is not an auth fallback");
-  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0])).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, events[0])).status, 401, "legacy root export is not an auth fallback");
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0])).status, 201);
 });
 
 test("project retention updates live, preserves other settings, and persists across restart", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const server = await collector(t, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
   const settings = join(server.directory, "live-settings.json");
@@ -1539,15 +1356,15 @@ test("project retention updates live, preserves other settings, and persists acr
   events.at(-1).playing_time_ms = 1200;
   for (const event of events) {
     await server.send(event);
-    await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
+    await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   }
   await delay(1200);
   const result = await projectCommand(server, ["project", "retention", "live", "1"]);
   assert.deepEqual(result, { project_id: "live", retention_seconds: 1, effective_retention_seconds: 1, restart_required: false });
   const deadline = Date.now() + 7000;
-  while ((await server.get("/v1/events", live.read_token)).events.length && Date.now() < deadline) await delay(100);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, 0);
-  assert.equal((await server.get("/v1/summary", live.read_token)).total_playing_time_ms, 0);
+  while ((await server.get("/v1/events", live.secret_key)).events.length && Date.now() < deadline) await delay(100);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, 0);
+  assert.equal((await server.get("/v1/summary", live.secret_key)).total_playing_time_ms, 0);
   assert.equal((await server.get("/v1/events")).events.length, events.length);
   assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 1200);
   const listed = (await projectCommand(server, ["project", "list"])).find(p => p.id === "live");
@@ -1556,15 +1373,15 @@ test("project retention updates live, preserves other settings, and persists acr
   assert.equal(server.url, url, "retention change must not restart the HTTP server");
   // A retry after expiration is new data. Disable expiry before resending it.
   await projectCommand(server, ["project", "retention", "live", "0"]);
-  for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.ingest_key } });
+  for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   await delay(2200);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   await server.stop("SIGKILL");
   await server.start();
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").effective_retention_seconds, 0);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   // The running server's default is authoritative, even if the CLI has a different environment.
-  const inherited = await server.command(["project", "retention", "live", "inherit"], { COLLECTOR_RETENTION_SECONDS: "1" });
+  const inherited = await server.command(["project", "retention", "live", "inherit"], { "retention.seconds": "1" });
   assert.equal(inherited.code, 0, inherited.stderr);
   assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 0);
   assert.equal(JSON.parse(inherited.stdout).retention_seconds, null);
@@ -1573,36 +1390,36 @@ test("project retention updates live, preserves other settings, and persists acr
   const secondDeadline = Date.now() + 7000;
   while ((await server.get("/v1/events")).events.length && Date.now() < secondDeadline) await delay(100);
   assert.equal((await server.get("/v1/events")).events.length, 0);
-  assert.equal((await server.get("/v1/events", live.read_token)).events.length, events.length);
+  assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
 });
 
 test("startup retention uses inherited, longer, shorter and disabled project policies", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0" });
+  const server = await collector(t, { "retention.seconds": "0" });
   await server.stop();
   const projects = [];
   for (const id of ["short", "long", "keep"]) projects.push(await projectCommand(server, ["project", "create", id]));
   await server.start();
   const event = sdkEvents()[0];
   await server.send(event);
-  for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.ingest_key } });
+  for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.public_key } });
   await server.stop();
   for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
     assert.equal((await projectCommand(server, ["project", "retention", id, seconds])).restart_required, true);
   }
   await delay(1200);
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
+  await server.start(binary, { "retention.seconds": "1" });
   assert.equal((await server.get("/v1/events")).events.length, 0);
-  for (const project of projects) assert.equal((await server.get("/v1/events", project.read_token)).events.length, project.project_id === "short" ? 0 : 1);
+  for (const project of projects) assert.equal((await server.get("/v1/events", project.secret_key)).events.length, project.project_id === "short" ? 0 : 1);
   await server.stop();
   // Removing an override makes existing data eligible under the inherited policy at startup.
   await projectCommand(server, ["project", "retention", "long", "inherit"]);
-  await server.start(binary, { COLLECTOR_RETENTION_SECONDS: "1" });
-  assert.equal((await server.get("/v1/events", projects[1].read_token)).events.length, 0);
-  assert.equal((await server.get("/v1/events", projects[2].read_token)).events.length, 1);
+  await server.start(binary, { "retention.seconds": "1" });
+  assert.equal((await server.get("/v1/events", projects[1].secret_key)).events.length, 0);
+  assert.equal((await server.get("/v1/events", projects[2].secret_key)).events.length, 1);
 });
 
 test("invalid or unpersisted project retention changes preserve policy and data", async (t) => {
-  const server = await collector(t, { COLLECTOR_RETENTION_SECONDS: "0", COLLECTOR_RETENTION_INTERVAL_SECONDS: "1" });
+  const server = await collector(t, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   await server.send(sdkEvents()[0]);
   const file = join(server.directory, "keys.json");
   const before = await readFile(file, "utf8");
@@ -1629,71 +1446,39 @@ test("invalid or unpersisted project retention changes preserve policy and data"
 });
 
 test("project origin policies and rate quotas apply across all of its keys", async (t) => {
-  const server = await collector(t, { COLLECTOR_INGEST_PER_SECOND: "1000" });
+  const server = await collector(t, { "server.ingest_per_second": "1000" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
-  const extra = await projectCommand(server, ["key", "create", "live", "ingest", "Another integration"]);
+  const extra = await projectCommand(server, ["key", "create", "live", "public", "Another integration"]);
   const settings = join(server.directory, "live-settings.json");
-  await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 1 }));
+  await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 2 }));
   await projectCommand(server, ["project", "configure", "live", settings]);
   await server.start();
   const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
     origin: "https://live.example", "access-control-request-method": "POST", "access-control-request-headers": "x-chunkify-ingest-key,content-type" } });
   assert.equal(preflight.status, 204);
-  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0], { origin: "https://player.example" })).status, 403);
-  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0], { origin: "https://live.example" })).status, 403);
-  assert.equal((await projectPost(server, live.ingest_key, sdkEvents()[0], { origin: "https://live.example" })).status, 201);
-  const limited = await projectPost(server, extra.secret, sdkEvents()[0]);
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0], { origin: "https://player.example" })).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0], { origin: "https://live.example" })).status, 403);
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0], { origin: "https://live.example" })).status, 201);
+  const limited = await projectPost(server, extra.key, sdkEvents()[0]);
   assert.equal(limited.status, 429);
   assert.equal(limited.headers.get("retry-after"), "1");
-  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0])).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 201);
 });
 
 test("a busy project leaves admission slots for another project", async (t) => {
-  const server = await collector(t, { COLLECTOR_BATCH_DELAY_MS: "1000", COLLECTOR_QUEUE_MAX_REQUESTS: "4",
-    COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "batch.queue_max_requests": "4",
+    "server.ingest_per_second": "1000", "retention.seconds": "0" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
   await server.start();
-  const busy = Array.from({ length: 4 }, () => projectPost(server, live.ingest_key, sdkEvents()[0]));
-  const other = projectPost(server, server.keys.ingest_key, sdkEvents()[0]);
+  const busy = Array.from({ length: 4 }, () => projectPost(server, live.public_key, sdkEvents()[0]));
+  const other = projectPost(server, server.keys.public_key, sdkEvents()[0]);
   const responses = await Promise.all(busy);
   assert.equal(responses.filter(r => r.status === 201).length, 2);
   assert.equal(responses.filter(r => r.status === 503).length, 2);
   assert.equal((await other).status, 201);
   await Promise.all(responses.map(r => r.text()));
-});
-
-test("durable project quotas and pending counters stay isolated through crash recovery", async (t) => {
-  const server = await collector(t, { COLLECTOR_EXPERIMENTAL_DURABLE_QUEUE: "true", COLLECTOR_BATCH_DELAY_MS: "1000",
-    COLLECTOR_SPOOL_MAX_BYTES: "16384", COLLECTOR_INGEST_PER_SECOND: "1000", COLLECTOR_RETENTION_SECONDS: "0" });
-  await server.stop();
-  const live = await projectCommand(server, ["project", "create", "live"]);
-  const settings = join(server.directory, "live-settings.json");
-  await writeFile(settings, JSON.stringify({ spool_bytes: 4096 }));
-  await projectCommand(server, ["project", "configure", "live", settings]);
-  await server.start();
-  const accepted = [];
-  let overloaded = false;
-  for (let i = 0; i < 10; i++) {
-    const event = sdkEvents()[0];
-    const response = await projectPost(server, live.ingest_key, event);
-    if (response.status === 503) { overloaded = true; break; }
-    assert.equal(response.status, 202);
-    accepted.push(event);
-  }
-  assert.ok(overloaded);
-  assert.equal((await server.get("/v1/ingestion")).queue.pending_events, 0);
-  assert.equal((await server.get("/v1/ingestion", live.read_token)).queue.pending_events, accepted.length);
-  const ownEvent = sdkEvents()[0];
-  assert.equal((await projectPost(server, server.keys.ingest_key, ownEvent)).status, 202);
-  await server.stop("SIGKILL");
-  await server.start(binary, { COLLECTOR_BATCH_DELAY_MS: "10" });
-  assert.deepEqual((await server.get("/v1/events")).events.map(r => r.event), [ownEvent]);
-  const liveRows = (await server.get("/v1/events", live.read_token)).events;
-  assert.deepEqual(liveRows.map(r => r.event), accepted);
-  assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id));
-  assert.equal((await server.get("/v1/ingestion", live.read_token)).queue.pending_events, 0);
 });
 
 test("project administration rejects invalid changes without overwriting credentials", async (t) => {
@@ -1706,13 +1491,13 @@ test("project administration rejects invalid changes without overwriting credent
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
   }
-  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
   const keys = JSON.parse(await readFile(keyFile, "utf8"));
-  keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "ingest",
+  keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "public",
     hash: index.toString(16).padStart(64, "0") }));
   await writeFile(keyFile, JSON.stringify(keys));
   const before = await readFile(keyFile, "utf8");
-  const result = await server.command(["key", "rotate-primary", "ingest"]);
+  const result = await server.command(["key", "rotate-primary", "public"]);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /64 keys/);
   assert.equal(await readFile(keyFile, "utf8"), before, "failed legacy rotation must not break the registry");
@@ -1725,31 +1510,31 @@ test("live keys update ingestion and read access immediately and survive a crash
   const other = await projectCommand(server, ["project", "create", "other"]);
   await server.start();
   const originalUrl = server.url;
-  const first = await projectCommand(server, ["key", "create", "default", "ingest", "Website"]);
-  const read = await projectCommand(server, ["key", "create", "default", "read", "Dashboard"]);
+  const first = await projectCommand(server, ["key", "create", "default", "public", "Website"]);
+  const read = await projectCommand(server, ["key", "create", "default", "secret", "Dashboard"]);
   assert.equal(first.restart_required, false);
   assert.equal(read.restart_required, false);
   const events = sdkEvents("live-keys");
-  assert.equal((await projectPost(server, first.secret, events[0])).status, 201);
-  assert.equal((await server.get("/v1/events", read.secret)).events.length, 1);
-  assert.equal((await server.get("/v1/events", other.read_token)).events.length, 0);
-  assert.equal((await projectPost(server, read.secret, events[1])).status, 401);
+  assert.equal((await projectPost(server, first.key, events[0])).status, 201);
+  assert.equal((await server.get("/v1/events", read.key)).events.length, 1);
+  assert.equal((await server.get("/v1/events", other.secret_key)).events.length, 0);
+  assert.equal((await projectPost(server, read.key, events[1])).status, 401);
 
   const rotated = await projectCommand(server, ["key", "rotate", "default", first.key_id]);
   assert.equal(rotated.restart_required, false);
   assert.equal(rotated.key_id, first.key_id);
-  assert.equal((await projectPost(server, first.secret, events[1])).status, 401);
-  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": first.secret })).status, 401);
-  for (const event of events.slice(1)) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": rotated.secret } });
-  const stored = (await server.get("/v1/events", read.secret)).events;
+  assert.equal((await projectPost(server, first.key, events[1])).status, 401);
+  assert.equal((await postOtlp(server, "{}", { "X-Chunkify-Ingest-Key": first.key })).status, 401);
+  for (const event of events.slice(1)) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": rotated.key } });
+  const stored = (await server.get("/v1/events", read.key)).events;
   assert.ok(stored.every(row => row.ingest_key_id === first.key_id && row.project_id === "default"));
   assert.deepEqual(stored.map(row => row.event), events);
   await projectCommand(server, ["key", "revoke", "default", read.key_id]);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.secret}` } })).status, 401);
-  assert.equal((await projectPost(server, other.ingest_key, sdkEvents("other")[0])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status, 401);
+  assert.equal((await projectPost(server, other.public_key, sdkEvents("other")[0])).status, 201);
   const listed = await projectCommand(server, ["project", "list"]);
   assert.ok(listed.find(project => project.id === "default").keys.some(key => key.id === first.key_id));
-  for (const secret of [first.secret, rotated.secret, read.secret, other.ingest_key, other.read_token]) {
+  for (const secret of [first.key, rotated.key, read.key, other.public_key, other.secret_key]) {
     assert.ok(!JSON.stringify(listed).includes(secret));
     assert.ok(!server.logs().includes(secret));
   }
@@ -1758,9 +1543,9 @@ test("live keys update ingestion and read access immediately and survive a crash
   assert.equal(server.url, originalUrl);
   await server.stop("SIGKILL");
   await server.start();
-  assert.equal((await projectPost(server, first.secret, sdkEvents()[0])).status, 401);
-  assert.equal((await projectPost(server, rotated.secret, sdkEvents()[0])).status, 201);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.secret}` } })).status, 401);
+  assert.equal((await projectPost(server, first.key, sdkEvents()[0])).status, 401);
+  assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
+  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status, 401);
   assert.equal((await server.get("/v1/summary")).views, 2);
   await server.stop();
   await assert.rejects(stat(join(server.directory, "admin.sock")), { code: "ENOENT" });
@@ -1769,14 +1554,14 @@ test("live keys update ingestion and read access immediately and survive a crash
 test("live administration serializes concurrent commands and rejects invalid changes", async (t) => {
   const server = await collector(t);
   const created = await Promise.all(Array.from({ length: 5 }, (_, index) =>
-    projectCommand(server, ["key", "create", "default", "read", `Dashboard ${index}`])));
+    projectCommand(server, ["key", "create", "default", "secret", `Dashboard ${index}`])));
   const listed = await projectCommand(server, ["project", "list"]);
   assert.equal(listed[0].keys.length, 7);
-  await Promise.all(created.map(key => server.get("/v1/summary", key.secret)));
+  await Promise.all(created.map(key => server.get("/v1/summary", key.key)));
   const keyFile = join(server.directory, "keys.json");
   const before = await readFile(keyFile, "utf8");
-  for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "read", ""],
-    ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-ingest"],
+  for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "secret", ""],
+    ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-public"],
     ["project", "create", "other"], ["project", "configure", "default", "missing.json"]]) {
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
@@ -1788,20 +1573,20 @@ test("live administration serializes concurrent commands and rejects invalid cha
 test("live primary rotation and revocation keep legacy exports consistent", async (t) => {
   const server = await collector(t);
   const original = { ...server.keys };
-  for (const kind of ["ingest", "read"]) {
+  for (const kind of ["public", "secret"]) {
     const result = await server.command(["key", "rotate-primary", kind]);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /new key is active/);
     await server.reloadKeys();
     for (const secret of Object.values(server.keys)) assert.ok(!result.stdout.includes(secret));
   }
-  assert.equal((await projectPost(server, original.ingest_key, sdkEvents()[0])).status, 401);
-  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.read_token}` } })).status, 401);
+  assert.equal((await projectPost(server, original.public_key, sdkEvents()[0])).status, 401);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.secret_key}` } })).status, 401);
   await server.send(sdkEvents()[0]);
   assert.equal((await server.get("/v1/summary")).views, 1);
-  await projectCommand(server, ["key", "revoke", "default", "primary-ingest"]);
-  assert.equal((await projectPost(server, server.keys.ingest_key, sdkEvents()[0])).status, 401);
-  const restored = await server.command(["key", "rotate-primary", "ingest"]);
+  await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 401);
+  const restored = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(restored.code, 0, restored.stderr);
   await server.reloadKeys();
   await server.send(sdkEvents()[0]);
@@ -1815,13 +1600,13 @@ test("failed live key persistence does not change active credentials", async (t)
   // read its existing database. Restore permissions before shutdown/cleanup.
   await chmod(server.directory, 0o500);
   try {
-    const result = await server.command(["key", "rotate", "default", "primary-read"]);
+    const result = await server.command(["key", "rotate", "default", "primary-secret"]);
     assert.notEqual(result.code, 0);
     assert.equal(await readFile(join(server.directory, "keys.json"), "utf8"), before);
     assert.equal((await server.get("/v1/summary")).views, 0);
   } finally { await chmod(server.directory, 0o700); }
-  const rotated = await projectCommand(server, ["key", "rotate", "default", "primary-read"]);
-  assert.equal((await server.get("/v1/summary", rotated.secret)).views, 0);
+  const rotated = await projectCommand(server, ["key", "rotate", "default", "primary-secret"]);
+  assert.equal((await server.get("/v1/summary", rotated.key)).views, 0);
 });
 
 
@@ -1829,15 +1614,15 @@ test("live key administration supports a deeply nested data directory", async (t
   const server = await collector(t);
   await server.stop();
   const directory = join(server.directory, "nested-".repeat(24));
-  const settings = { COLLECTOR_DATA_DIR: directory };
+  const settings = { "data_dir": directory };
   const init = await server.command(["init"], settings);
   assert.equal(init.code, 0, init.stderr);
   await server.start(binary, settings);
-  const created = await server.command(["key", "create", "default", "read", "Long path"], settings);
+  const created = await server.command(["key", "create", "default", "secret", "Long path"], settings);
   assert.equal(created.code, 0, created.stderr);
   const token = JSON.parse(created.stdout);
   assert.equal(token.restart_required, false);
-  assert.equal((await server.get("/v1/summary", token.secret)).views, 0);
+  assert.equal((await server.get("/v1/summary", token.key)).views, 0);
   const locator = join(directory, "admin.socket-id");
   const previousSocket = await readFile(locator, "utf8");
   assert.equal((await stat(locator)).mode & 0o777, 0o600);
@@ -1846,5 +1631,101 @@ test("live key administration supports a deeply nested data directory", async (t
   assert.notEqual(await readFile(locator, "utf8"), previousSocket);
   const revoked = await server.command(["key", "revoke", "default", token.key_id], settings);
   assert.equal(revoked.code, 0, revoked.stderr);
-  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.secret}` } })).status, 401);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.key}` } })).status, 401);
+});
+
+async function projectApi(server, path, { method = "GET", body, token = server.keys.secret_key, headers = {} } = {}) {
+  return fetch(`${server.url}/v1/project${path}`, { method,
+    headers: { authorization: `Bearer ${token}`, ...(body !== undefined && { "content-type": "application/json" }), ...headers },
+    ...(body !== undefined && { body: JSON.stringify(body) }) });
+}
+
+test("project origins update live, merge shared origins and persist without changing other settings", async t => {
+  const server = await collector(t, { "server.allowed_origins": "https://chunkify.dev", "server.ingest_per_second": "1000" });
+  await server.stop();
+  const live = await projectCommand(server, ["project", "create", "live"]);
+  const file = join(server.directory, "origin-settings.json");
+  await writeFile(file, JSON.stringify({ allowed_origins: ["https://old.example"], retention_seconds: 86400, ingest_per_second: 100 }));
+  await projectCommand(server, ["project", "configure", "live", file]);
+  await server.start();
+  const send = origin => projectPost(server, live.public_key, sdkEvents()[0], { origin });
+  assert.equal((await send("https://chunkify.dev")).status, 201);
+  assert.equal((await send("https://customer.example")).status, 403);
+  assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", body: { allowed_origins: [] }, token: live.public_key })).status, 401);
+  for (const body of [{ allowed_origins: null }, { allowed_origins: "https://customer.example" },
+    { allowed_origins: ["https://customer.example/"] }, { allowed_origins: ["*"] },
+    { allowed_origins: [], project_id: "default" }]) {
+    assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", body, token: live.secret_key })).status, 400);
+  }
+  const update = origins => projectApi(server, "/allowed-origins", { method: "PUT", body: { allowed_origins: origins }, token: live.secret_key });
+  const response = await update(["https://customer.example", "https://customer.example"]);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), { project_id: "live", allowed_origins: ["https://customer.example"],
+    effective_allowed_origins: ["https://chunkify.dev", "https://customer.example"], restart_required: false });
+  assert.equal((await send("https://customer.example")).status, 201);
+  assert.equal((await send("https://old.example")).status, 403);
+  assert.equal((await send("https://chunkify.dev")).status, 201);
+  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0], { origin: "https://customer.example" })).status, 403);
+  await chmod(server.directory, 0o500);
+  try { assert.equal((await update(["https://unsaved.example"])).status, 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal((await send("https://customer.example")).status, 201);
+  assert.equal((await send("https://unsaved.example")).status, 403);
+  const [updated, created] = await Promise.all([update(["https://next.example"]),
+    server.command(["key", "create", "live", "secret", "Concurrent integration"])]);
+  assert.equal(updated.status, 200);
+  assert.equal(created.code, 0, created.stderr);
+  const token = JSON.parse(created.stdout).key;
+  assert.equal((await projectApi(server, "/keys", { token })).status, 200);
+  const settings = (await projectCommand(server, ["project", "list"])).find(project => project.id === "live").settings;
+  assert.equal(settings.retention_seconds, 86400);
+  assert.equal(settings.ingest_per_second, 100);
+  await server.stop();
+  await server.start();
+  assert.equal((await send("https://next.example")).status, 201);
+  assert.equal((await projectApi(server, "/keys", { token })).status, 200);
+  assert.equal((await update([])).status, 200);
+  assert.equal((await send("https://next.example")).status, 403);
+  assert.equal((await send("https://chunkify.dev")).status, 201);
+});
+
+test("secret keys list and rotate only their own project keys", async t => {
+  const server = await collector(t, { "retention.seconds": "0", "server.ingest_per_second": "1000" });
+  assert.match(server.keys.public_key, /^ck_public_[0-9a-f]{64}$/);
+  assert.match(server.keys.secret_key, /^ck_secret_[0-9a-f]{64}$/);
+  await server.stop();
+  const live = await projectCommand(server, ["project", "create", "live"]);
+  await server.start();
+  const options = { token: live.secret_key };
+  let response = await projectApi(server, "/keys", options);
+  assert.equal(response.status, 200);
+  const list = await response.json();
+  assert.equal(list.project_id, "live");
+  assert.deepEqual(list.keys.map(key => key.permission).sort(), ["public", "secret"]);
+  for (const key of list.keys) assert.deepEqual(Object.keys(key).sort(), ["id", "name", "permission"]);
+  assert.equal((await projectApi(server, "/keys", { token: live.public_key })).status, 401);
+  const foreign = (await (await projectApi(server, "/keys")).json()).keys[0].id;
+  assert.equal((await projectApi(server, `/keys/${foreign}/rotate`, { ...options, method: "POST" })).status, 404);
+  const publicId = list.keys.find(key => key.permission === "public").id;
+  response = await projectApi(server, `/keys/${publicId}/rotate`, { ...options, method: "POST" });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const rotated = await response.json();
+  assert.equal(rotated.permission, "public");
+  assert.match(rotated.key, /^ck_public_[0-9a-f]{64}$/);
+  assert.equal((await projectPost(server, live.public_key, sdkEvents()[0])).status, 401);
+  assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
+  const secretId = list.keys.find(key => key.permission === "secret").id;
+  response = await projectApi(server, `/keys/${secretId}/rotate`, { ...options, method: "POST" });
+  assert.equal(response.status, 200);
+  const secret = (await response.json()).key;
+  assert.match(secret, /^ck_secret_[0-9a-f]{64}$/);
+  assert.equal((await projectApi(server, "/keys", options)).status, 401);
+  assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
+  assert.equal((await projectApi(server, "/allowed-origins", { ...options, method: "PUT", body: { allowed_origins: [] } })).status, 401);
+  await server.stop();
+  await server.start();
+  assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
+  assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
 });

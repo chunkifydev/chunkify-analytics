@@ -5,14 +5,17 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | Method and path | Authorization | Response |
 | --- | --- | --- |
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
-| `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after commit; 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
-| `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch commits, including empty or duplicate-only batches. |
-| `GET /v1/events` | `Authorization: Bearer READ_TOKEN` | `{"events":[{"project_id":"default","ingest_key_id":"primary-ingest","received_at":"...","event":{...}}],"next_cursor":null}` |
-| `GET /v1/summary` | `Authorization: Bearer READ_TOKEN` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
-| `GET /v1/engagement` | `Authorization: Bearer READ_TOKEN` | Average playing time per attempt and observed reached-end count/rate. |
-| `GET /v1/quality` | `Authorization: Bearer READ_TOKEN` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
-| `GET /v1/timeseries` | `Authorization: Bearer READ_TOKEN` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
-| `GET /v1/videos` | `Authorization: Bearer READ_TOKEN` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
+| `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
+| `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch finishes storage, including empty batches. |
+| `PUT /v1/project/allowed-origins` | `Authorization: Bearer SECRET_KEY` | Save additional project origins and apply them immediately. |
+| `GET /v1/project/keys` | `Authorization: Bearer SECRET_KEY` | Key IDs, names and permissions, without key values. |
+| `POST /v1/project/keys/{key_id}/rotate` | `Authorization: Bearer SECRET_KEY` | New key value; the previous value stops working immediately. |
+| `GET /v1/events` | `Authorization: Bearer SECRET_KEY` | `{"events":[{"project_id":"default","ingest_key_id":"primary-public","received_at":"...","event":{...}}],"next_cursor":null}` |
+| `GET /v1/summary` | `Authorization: Bearer SECRET_KEY` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/engagement` | `Authorization: Bearer SECRET_KEY` | Average playing time per attempt and observed reached-end count/rate. |
+| `GET /v1/quality` | `Authorization: Bearer SECRET_KEY` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
+| `GET /v1/timeseries` | `Authorization: Bearer SECRET_KEY` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
+| `GET /v1/videos` | `Authorization: Bearer SECRET_KEY` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
 Native ingestion accepts `Content-Type: application/json` and one complete schema
 version 1 event. It validates all seven event shapes emitted by the SDK. Malformed
@@ -22,6 +25,10 @@ return 413. Missing or invalid keys return 401. Disallowed origins return 403.
 Only the ingest endpoints enable CORS, including preflight for the ingest header.
 Read endpoints are intended for the customer's backend and do not enable CORS.
 Keys are never accepted in a query string. Responses are marked `no-store`.
+
+Public keys start with `ck_public_`; secret keys start with `ck_secret_`.
+Secret keys can read analytics and manage origins and keys in their own project.
+See [live project management](administration.md#live-project-api) for requests.
 
 ### OTLP format and storage
 
@@ -45,7 +52,10 @@ Every log is validated before storage. An invalid record rejects the entire
 batch with HTTP 400. Wire size, decompressed size, or record count violations return
 413. Unsupported content types or encodings return 415. OTLP errors use the JSON
 Status shape `{"message":"..."}`, including authentication and rate-limit errors.
-No partial export is accepted, and success is sent only after the transaction commits.
+All records must pass validation before storage. Success is sent only after storage
+finishes. Local storage commits the batch atomically. S3 uploads are independent,
+so a storage failure can leave some objects written; retrying can repeat events.
+See [storage behavior](storage.md#events-and-expiration).
 
 The raw-event API returns the canonical `event` and, for an event first received
 through OTLP, an additional `otlp` object:
@@ -61,8 +71,11 @@ through OTLP, an additional `otlp` object:
 `log_record` retains the original log object. `resource_logs` and `scope_logs`
 retain their original group fields, excluding the nested record/group arrays.
 Objects preserve JSON values, not original whitespace or key order. Native events
-have no `otlp` field. Deduplication is shared across formats: the first accepted
-payload and context win, and later duplicates do not enrich or replace them.
+have no `otlp` field. With local storage, deduplication is shared across formats:
+the first accepted payload and context win. Later duplicates do not enrich or
+replace them. With S3, every delivery is a separate row with its own context;
+repeated event IDs are not deduplicated. Native S3 writes always return 201 with
+`{"accepted":true,"duplicate":false}` on success.
 Both formats feed the same filters, pagination, and summary calculations.
 
 ### Flat event context and request IP
@@ -91,40 +104,25 @@ verified identity. Only the collector supplies `peer_ip`, `client_ip`, and
 browser context is still available. Without either source, `event_context` is
 omitted. This context schema has its own `schema_version: 1`.
 
-`peer_ip` comes from the TCP connection. Without a trusted proxy, `client_ip`
-equals `peer_ip` and `client_ip_source` is `connection`. Browser-provided fields
-cannot replace this collector-derived context. IPv4-mapped IPv6 addresses are
-stored as IPv4. The collector makes no outbound IP lookup and does not infer
-viewer identity or location from the address.
+`peer_ip` identifies the HTTP sender. Without a trusted proxy, `client_ip` is the
+same address. With a proxy, configure its addresses under `[server]`:
 
-For a reverse proxy, configure only addresses or CIDRs you control. For example,
-`COLLECTOR_TRUSTED_PROXIES=10.20.1.2,2001:db8:abcd::/48`. Ensure each trusted proxy
-overwrites incoming `X-Forwarded-For` with the actual source IP, or correctly
-appends that source to the existing chain. Restrict direct access to the collector
-where possible. Broad trust ranges can allow clients to forge their address.
+```toml
+trusted_proxies = ["10.20.1.2", "2001:db8:abcd::/48"]
+```
 
-The collector reads `X-Forwarded-For` only when the direct peer is trusted. It
-combines all header lines in order, walks from right to left, skips configured
-trusted hops, and selects the first untrusted address. This follows the
-[trusted-proxy selection described by MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/X-Forwarded-For#selecting_an_ip_address).
-Only literal IPv4 or bare IPv6 entries are accepted, with at most 32 addresses
-and 4096 bytes across the header values. Missing, malformed, excessive, or entirely
-trusted chains leave `client_ip` and `client_ip_source` null while retaining
-`peer_ip`. The event is still accepted. `Forwarded`, `X-Real-IP`, and
-`CF-Connecting-IP` are ignored; configure the proxy to supply `X-Forwarded-For`.
+Trusted proxies must supply the actual client through `X-Forwarded-For`.
+The collector selects the first untrusted address from the right. Missing or
+invalid forwarding information leaves `client_ip` unavailable; the event is
+still accepted. Other forwarding headers are ignored.
 
-The IP describes the HTTP sender. When a gateway batches multiple viewers' events,
-the request context describes that gateway for every event in the batch. It cannot
-recover those viewers' individual IPs. NAT, Docker networking and VPNs can also
-change the visible address. Supplied `viewer_id` remains the basis for unique-viewer
-counts. IP data is available only through the private raw-event API, with no IP
-filter or GeoIP enrichment in this stage.
+IP context describes the request sender, including gateways that batch events.
+It does not identify individual viewers. Set `store_ip = false` under `[server]`
+and restart to omit it from new events. This does not erase existing context or
+IP values supplied inside event payloads.
 
-Set `COLLECTOR_STORE_IP=false` and restart to omit IP fields for new events.
-Raw forwarding headers are neither stored nor logged, and normal request handling
-does not log IP values. First accepted delivery wins, including whether context
-was collected; retries never add or replace it. Retention and viewer deletion
-remove the event's context with its row.
+Local storage keeps the first delivery's context. S3 keeps each delivery's
+context separately. Expiration removes context with its event.
 
 ### Filters and pagination
 
@@ -133,7 +131,7 @@ All read endpoints accept `from`, `to`, `video_id`, `viewer_id`, `browser_name`,
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
 
-Browser and OS names use exact, case-sensitive matching and accept 1–64 Unicode
+Browser and OS names use exact, case-sensitive matching and accept 1 to 64 Unicode
 characters. Device type accepts `desktop`, `mobile`, `tablet`, or `unknown`.
 Multiple filters combine with AND. Missing, null, and nonstring context values
 do not match an explicit filter. `device_type=unknown` matches only a stored
@@ -150,13 +148,13 @@ request. `order` accepts `asc` or `desc` only on this route. Keep the same order
 with each cursor; changing it returns 400. Videos are ordered by `video_id`. A pagination sequence is limited to events already committed
 at its first page, so later arrivals do not shift pages or change video totals
 within that sequence. Start without a cursor to refresh. This is not an indefinite
-export snapshot; retention and deletion can remove records between requests.
+export snapshot; retention can remove records between requests.
 
 For example, run this from your dashboard backend or terminal, using a local
-`READ_TOKEN` environment variable containing the private token:
+`SECRET_KEY` environment variable containing the private token:
 
 ```sh
-curl -H "Authorization: Bearer $READ_TOKEN" \
+curl -H "Authorization: Bearer $SECRET_KEY" \
   'http://127.0.0.1:4174/v1/summary?video_id=video-123'
 ```
 
@@ -180,18 +178,18 @@ curl -H "Authorization: Bearer $READ_TOKEN" \
   people, and per-video viewer counts should not be summed for a global count.
 - Final events do not imply video completion. Missing events can make metrics
   incomplete. Client occurrence times and metric values are supplied by the SDK;
-  an ingest key does not verify their authenticity.
+  an public key does not verify their authenticity.
 
 ### Hourly and daily charts
 
 `GET /v1/timeseries` returns the same metrics grouped by the time each view
-started. Supply `from`, `to` and `interval=hour` or `interval=day`. The existing
+started. Supply `from`, `to` and `interval=hour` or `interval=day`. The
 video, viewer, browser, OS and device filters also apply. The project is selected
-by the private read token.
+by the private secret key.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/timeseries' \
-  -H "Authorization: Bearer $READ_TOKEN" \
+  -H "Authorization: Bearer $SECRET_KEY" \
   --data-urlencode 'from=2026-10-19T00:00:00Z' \
   --data-urlencode 'to=2026-10-21T00:00:00Z' \
   --data-urlencode 'interval=day'
@@ -205,12 +203,12 @@ UTC hours, and daily buckets align to midnight UTC, regardless of input offsets.
 ### Watch time and reaching the end
 
 `GET /v1/engagement` accepts the same optional date, video, viewer, browser, OS
-and device filters as summary. The private read token selects the project.
+and device filters as summary. The private secret key selects the project.
 There is no pagination. The MCP tool is `get_engagement`.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/engagement' \
-  -H "Authorization: Bearer $READ_TOKEN" \
+  -H "Authorization: Bearer $SECRET_KEY" \
   --data-urlencode 'video_id=video-123' \
   --data-urlencode 'from=2026-10-19T00:00:00Z' \
   --data-urlencode 'to=2026-10-21T00:00:00Z'
@@ -226,10 +224,8 @@ curl --get 'http://127.0.0.1:4174/v1/engagement' \
 }
 ```
 
-This example represents four playback attempts, 120 seconds of total playing
-time, 30 seconds per attempt on average, and one attempt reaching the end: 25%.
 The average uses all selected attempts, including failed and ongoing views.
-It is not the average per unique viewer. Label it **Average watch time per attempt**.
+Label it **Average watch time per attempt**.
 
 The collector uses one final measurement per view, or the latest snapshot if
 there is no final event. Missing values contribute zero, as in summary. The
@@ -241,7 +237,7 @@ An ended reason on a snapshot does not count.
 With no views, both the average and ratio are null, while counts and total time
 are zero. With views but no measured time or observed end, these values are zero.
 All filters select the first start; matching later events can contribute even
-after the date window. Retention/deletion and missing browser delivery affect
+after the date window. Retention and missing browser delivery affect
 these metrics. Replays with a new view ID count as new attempts. Live videos and
 ongoing attempts can lower the reached-end rate. Seeking to the end can count,
 so this does not measure whether the whole video was watched.
@@ -251,11 +247,11 @@ so this does not measure whether the whole video was watched.
 `GET /v1/quality` returns startup time, buffering and observed fatal errors for
 one project's view cohort. It accepts the same optional date, video, viewer,
 browser, OS and device filters as summary. Pagination and event-name filters are
-not supported. Keep the read token on your backend.
+not supported. Keep the secret key on your backend.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/quality' \
-  -H "Authorization: Bearer $READ_TOKEN" \
+  -H "Authorization: Bearer $SECRET_KEY" \
   --data-urlencode 'from=2026-10-19T00:00:00Z' \
   --data-urlencode 'to=2026-10-21T00:00:00Z'
 ```
@@ -303,7 +299,3 @@ A final null value stays unknown. All filters select the first retained start;
 matching later measurements/errors contribute even after `to`. Start-only views
 have no startup/buffering sample. Views without a retained start are excluded.
 The MCP server provides the same result through `get_quality`.
-
-The server stores receipt time separately for retention and operations.
-Server operational messages use stdout/stderr and contain no keys. CLI commands
-that create or rotate project credentials return new secrets once on stdout.

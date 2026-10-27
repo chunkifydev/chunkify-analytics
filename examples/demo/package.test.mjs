@@ -12,7 +12,7 @@ test('shared archive excludes data and credentials even when stored under the ex
   const dependencyCanary = await mkdtemp(path.join(root, 'node_modules/@chunkify/analytics/dist/.private-package-test-'));
   try {
     await writeFile(path.join(dependencyCanary, 'keys.json'), 'SYNTHETIC-PRIVATE-CANARY');
-    await writeFile(path.join(canary, 'demo.json'), JSON.stringify({ read_token: 'SYNTHETIC-PRIVATE-CANARY' }));
+    await writeFile(path.join(canary, 'demo.json'), JSON.stringify({ secret_key: 'SYNTHETIC-PRIVATE-CANARY' }));
     await writeFile(path.join(canary, 'analytics.duckdb'), 'synthetic data');
     await exec(process.execPath, ['examples/demo/pack.mjs'], { cwd: root, timeout: 50000 });
     const prefix = `chunkify-analytics-demo-${process.platform}-${process.arch}`;

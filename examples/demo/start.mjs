@@ -30,7 +30,7 @@ async function prepareData(dir, binary, env, signal) {
     const content = await readFile(path.join(dir, 'demo.json'), 'utf8');
     let state;
     try { state = JSON.parse(content); } catch { throw new Error('Invalid demo.json. Restore the saved demo state or choose a new data directory.'); }
-    const hasKeys = id => ['read_token', 'ingest_key'].every(key => typeof state.projects?.[id]?.[key] === 'string' && state.projects[id][key].length > 0);
+    const hasKeys = id => ['secret_key', 'public_key'].every(key => typeof state.projects?.[id]?.[key] === 'string' && state.projects[id][key].length > 0);
     if (state.version !== 1 || typeof state.seeded !== 'boolean' || !hasKeys('demo') || !hasKeys('player') ||
       !/^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/.test(state.seedDate) || !Number.isFinite(Date.parse(state.seedDate))) throw new Error('Invalid demo state.');
     return state;
@@ -46,7 +46,7 @@ async function prepareData(dir, binary, env, signal) {
     const adminEnv = { ...env, COLLECTOR_DATA_DIR: staging };
     const run = async args => {
       signal.throwIfAborted();
-      try { return (await exec(binary, args, { env: adminEnv, signal, timeout: 30000 })).stdout; }
+      try { return (await exec(binary, args, { env: adminEnv, cwd: staging, signal, timeout: 30000 })).stdout; }
       catch { throw new Error(`Collector ${args[0]} failed. Check that the executable matches your OS and this repository version.`); }
     };
     await run(['init']);
@@ -71,7 +71,7 @@ async function seed(url, state, signal) {
     await Promise.all(events.slice(offset, offset + 8).map(async event => {
       for (let attempt = 0; ; attempt++) {
         const response = await fetch(url + '/v1/events', {
-          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': state.projects.demo.ingest_key },
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': state.projects.demo.public_key },
           body: JSON.stringify(event), signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]),
         });
         await response.body?.cancel();
@@ -113,13 +113,13 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COLLECTOR_')));
     Object.assign(env, {
       COLLECTOR_DATA_DIR: dir, COLLECTOR_BIND: '127.0.0.1:0',
-      COLLECTOR_ALLOWED_ORIGINS: [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'].join(','),
-      COLLECTOR_DUCKDB_THREADS: '1', COLLECTOR_RETENTION_SECONDS: '0', COLLECTOR_INGEST_PER_SECOND: '10000',
     });
     const state = await prepareData(dir, binary, env, signal);
+    const origins = [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'];
+    await writeFile(path.join(dir, 'collector.toml'), `server.allowed_origins = ${JSON.stringify(origins)}\nserver.ingest_per_second = 10000\nduckdb.threads = 1\nretention.seconds = 0\n`, { mode: 0o600 });
     signal.throwIfAborted();
     collectorLog = createWriteStream(path.join(dir, 'collector.log'), { flags: 'a', mode: 0o600 });
-    child = spawn(binary, ['serve'], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+    child = spawn(binary, ['serve'], { env, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(collectorLog, { end: false }); child.stderr.pipe(collectorLog, { end: false });
     const collectorUrl = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error(`Collector did not start. See ${path.join(dir, 'collector.log')}.`)), 30000);

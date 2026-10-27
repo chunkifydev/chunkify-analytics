@@ -21,7 +21,7 @@ impl Store {
             .as_deref()
             .map(|value| Cursor::<String>::decode(value, "videos", &filters, &project))
             .transpose()?;
-        self.read(if per_video { "videos" } else { "summary" }, move |connection| {
+        self.read(if per_video { "videos" } else { "summary" }, project.clone(), move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
             if !per_video {
@@ -67,7 +67,7 @@ impl Store {
             return Err(ApiError::bad("Unsupported engagement query parameter"));
         }
         let filters = query.filters()?;
-        self.read("engagement", move |connection| {
+        self.read("engagement", project.clone(), move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Engagement);
             let (views, playing, reached_end) = connection.query_row(
@@ -108,7 +108,7 @@ impl Store {
             return Err(ApiError::bad("Unsupported quality query parameter"));
         }
         let filters = query.filters()?;
-        self.read("quality", move |connection| {
+        self.read("quality", project.clone(), move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Quality);
             let (views, startup_samples, median, p95, buffering_samples, playing, buffering, affected) =
@@ -159,7 +159,7 @@ impl Store {
         query: TimeseriesQuery,
     ) -> Result<Value, ApiError> {
         let window = query.validate()?;
-        self.read("timeseries", move |connection| {
+        self.read("timeseries", project.clone(), move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, mut values) =
                 view_cohort(project, through, &window.filters, CohortMetrics::Basic);

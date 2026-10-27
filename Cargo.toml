@@ -10,14 +10,14 @@ description = "Self-hosted storage and queries for Chunkify playback analytics"
 axum = "0.8.9"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
-duckdb = { version = "=1.20000.0", features = ["bundled", "json"] }
+duckdb = { version = "=1.20000.0", features = ["bundled", "json", "parquet"] }
 flate2 = "1"
 futures = "0.3"
 ipnet = "2"
 ring = "0.17.14"
+rust-s3 = { version = "0.38", default-features = false, features = ["sync-rustls-tls"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 rmcp = { version = "3.5.1", default-features = false, features = ["server", "transport-io", "transport-streamable-http-server"] }
-rusqlite = { version = "=0.40.2", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "io-util"] }

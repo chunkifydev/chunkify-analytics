@@ -8,62 +8,101 @@ use crate::{
 };
 use duckdb::{Connection, params_from_iter, types::Value as SqlValue};
 use serde_json::{Value, json};
-use std::{path::Path, thread};
+use std::{path::Path, sync::Arc, thread};
 
 pub struct DatabaseWorker {
     database: thread::JoinHandle<duckdb::Result<()>>,
-    spool: Option<crate::spool::Workers>,
     reader: Option<thread::JoinHandle<()>>,
-    // Keep the writer alive until readers finish and the spool finishes replay.
+    // Keep the writer alive until readers finish.
     writer: Writer,
 }
 impl DatabaseWorker {
     pub fn join(self) -> thread::Result<Result<(), String>> {
         let reader = self.reader.map(|worker| worker.join()).transpose();
-        let spool = self.spool.map(|worker| worker.join()).transpose();
         drop(self.writer);
         let database = self.database.join();
         reader?;
-        Ok(spool?
-            .unwrap_or(Ok(()))
-            .and(database?.map_err(|e| e.to_string())))
+        Ok(database?.map_err(|e| e.to_string()))
     }
-}
-
-pub enum Receipt {
-    Committed(usize),
-    Queued,
 }
 
 #[derive(Clone)]
 pub struct Store {
     writer: Writer,
-    spool: Option<crate::spool::Spool>,
     reader: Option<Reader>,
+    remote: Option<RemoteReads>,
+}
+
+#[derive(Clone)]
+struct RemoteReads {
+    store: Arc<crate::s3_store::RemoteStore>,
+    projects: Arc<crate::projects::Registry>,
 }
 
 impl Store {
+    pub fn from_config(
+        config: &crate::config::Config,
+        projects: Arc<crate::projects::Registry>,
+    ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
+        let crate::backend::Backend::S3(settings) = &config.backend else {
+            return Self::open(
+                &config.database_path(),
+                config.batch.clone(),
+                config.profile,
+                config.checkpoint_threshold_mib,
+                config.separate_reads,
+                config.duckdb_threads,
+            );
+        };
+        let settings_db =
+            database_settings(config.checkpoint_threshold_mib, config.duckdb_threads)?;
+        let connection = Connection::open_in_memory_with_flags(settings_db)?;
+        let temporary = config.data_dir.join("temporary");
+        std::fs::create_dir_all(&temporary)?;
+        connection.execute_batch(&format!(
+            "SET temp_directory = {}; SET max_temp_directory_size = '1 GiB';",
+            crate::s3_store::literal(&temporary.to_string_lossy())
+        ))?;
+        let remote = Arc::new(crate::s3_store::RemoteStore::open(
+            settings.clone(),
+            &connection,
+            &config.data_dir,
+        )?);
+        let (writer, database) = Writer::start_with_storage(
+            connection,
+            config.batch.clone(),
+            config.profile,
+            Some(remote.clone()),
+        )?;
+        Ok((
+            Self {
+                writer: writer.clone(),
+                reader: None,
+                remote: Some(RemoteReads {
+                    store: remote,
+                    projects,
+                }),
+            },
+            DatabaseWorker {
+                database,
+                reader: None,
+                writer,
+            },
+        ))
+    }
+
     pub fn open(
         path: &Path,
         batch: BatchConfig,
         profile: bool,
         checkpoint_threshold_mib: u32,
-        spool_config: Option<crate::spool::SpoolConfig>,
         separate_reads: bool,
         duckdb_threads: Option<usize>,
     ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
-        let spool_path = path.with_file_name("ingestion.sqlite");
-        if spool_config.is_none() {
-            crate::spool::Spool::require_empty(&spool_path)?;
+        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
         }
-        let settings = duckdb::Config::default().with(
-            "checkpoint_threshold",
-            format!("{checkpoint_threshold_mib} MiB"),
-        )?;
-        let settings = match duckdb_threads {
-            Some(threads) => settings.with("threads", threads.to_string())?,
-            None => settings,
-        };
+        let settings = database_settings(checkpoint_threshold_mib, duckdb_threads)?;
         let mut connection = Connection::open_with_flags(path, settings)?;
         crate::storage::initialize(&mut connection)?;
         // Clone the connection to the same database instance, after migration.
@@ -75,58 +114,22 @@ impl Store {
             (None, None)
         };
         let (writer, worker) = Writer::start(connection, batch.clone(), profile)?;
-        let (spool, spool_worker) = if let Some(config) = spool_config {
-            let (spool, worker) =
-                crate::spool::Spool::start(&spool_path, config, batch, writer.clone())?;
-            (Some(spool), Some(worker))
-        } else {
-            (None, None)
-        };
         Ok((
             Self {
                 writer: writer.clone(),
-                spool,
                 reader,
+                remote: None,
             },
             DatabaseWorker {
                 database: worker,
-                spool: spool_worker,
                 reader: reader_worker,
                 writer,
             },
         ))
     }
 
-    pub fn ensure_healthy(&self) -> Result<(), ApiError> {
-        if let Some(spool) = &self.spool {
-            spool.ensure_healthy()?;
-        }
-        Ok(())
-    }
-    pub async fn ingestion(&self, project: String) -> Result<Value, ApiError> {
-        match &self.spool {
-            Some(spool) => {
-                Ok(json!({ "mode": "durable_queue", "queue": spool.stats(Some(project)).await? }))
-            }
-            None => Ok(json!({ "mode": "direct" })),
-        }
-    }
-
-    pub async fn drain(&self) -> Result<(), ApiError> {
-        if let Some(spool) = &self.spool {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-            loop {
-                let stats = spool.stats(None).await?;
-                if stats.failed || tokio::time::Instant::now() >= deadline {
-                    return Err(ApiError::unavailable());
-                }
-                if stats.pending_requests == 0 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        }
-        Ok(())
+    pub async fn ingestion(&self, _project: String) -> Result<Value, ApiError> {
+        Ok(json!({ "mode": "direct" }))
     }
 
     pub async fn call<T: Send + 'static>(
@@ -143,7 +146,7 @@ impl Store {
         key_id: &str,
         event: Value,
         request_context: Option<RequestContext>,
-    ) -> Result<Receipt, ApiError> {
+    ) -> Result<usize, ApiError> {
         self.insert_batch(
             project,
             key_id,
@@ -156,8 +159,24 @@ impl Store {
     async fn read<T: Send + 'static>(
         &self,
         name: &'static str,
+        project: String,
         operation: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
+        if let Some(remote) = self.remote.clone() {
+            return self
+                .writer
+                .call(name, move |connection| {
+                    let policy = remote
+                        .projects
+                        .retention
+                        .read()
+                        .map_err(|_| ApiError::internal())?;
+                    remote.store.prepare_read(connection, &project, &policy)?;
+                    drop(policy);
+                    crate::reader::snapshot(connection, operation)
+                })
+                .await;
+        }
         match &self.reader {
             Some(reader) => reader.call(name, operation).await,
             None => {
@@ -174,6 +193,7 @@ impl Store {
         &self,
         projects: std::sync::Arc<crate::projects::Registry>,
     ) -> Result<usize, ApiError> {
+        let remote = self.remote.as_ref().map(|remote| remote.store.clone());
         self.call("retention", move |connection| {
             // Read the current policy when the writer runs this job, and hold it
             // through commit so a successful live update cannot race a stale sweep.
@@ -184,23 +204,12 @@ impl Store {
             if !policy.enabled() {
                 return Ok(0);
             }
-            Ok(policy.purge(connection, chrono::Utc::now().timestamp_millis())?)
+            match remote {
+                Some(remote) => remote.purge(&policy, chrono::Utc::now().timestamp_millis()),
+                None => Ok(policy.purge(connection, chrono::Utc::now().timestamp_millis())?),
+            }
         })
         .await
-    }
-
-    pub async fn delete_viewer(
-        &self,
-        project: String,
-        viewer_id: String,
-    ) -> Result<usize, ApiError> {
-        self.call("delete_viewer", move |connection| {
-            let tx = connection.transaction()?;
-            tx.execute("DELETE FROM event_otlp WHERE (project_id, event_id) IN (SELECT project_id, event_id FROM events WHERE project_id = ? AND viewer_id = ?)", [&project, &viewer_id])?;
-            let removed = tx.execute("DELETE FROM events WHERE project_id = ? AND viewer_id = ?", [&project, &viewer_id])?;
-            tx.commit()?;
-            Ok(removed)
-        }).await
     }
 
     pub async fn insert_batch(
@@ -209,18 +218,10 @@ impl Store {
         key_id: &str,
         events: Vec<IncomingEvent>,
         request_context: Option<RequestContext>,
-    ) -> Result<Receipt, ApiError> {
-        if let Some(spool) = &self.spool {
-            spool
-                .insert(project, key_id, events, request_context)
-                .await?;
-            Ok(Receipt::Queued)
-        } else {
-            self.writer
-                .insert(project, key_id, events, request_context)
-                .await
-                .map(Receipt::Committed)
-        }
+    ) -> Result<usize, ApiError> {
+        self.writer
+            .insert(project, key_id, events, request_context)
+            .await
     }
 
     pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
@@ -243,7 +244,8 @@ impl Store {
         {
             return Err(ApiError::bad("Invalid cursor position"));
         }
-        self.read("events", move |connection| {
+        let remote = self.remote.is_some();
+        self.read("events", project.clone(), move |connection| {
             let through = match &cursor {
                 Some(c) => c.through,
                 None => watermark(connection, &project)?,
@@ -266,7 +268,11 @@ impl Store {
                 SqlValue::BigInt(upper),
                 SqlValue::BigInt((limit + 1) as i64),
             ]);
-            let mut statement = connection.prepare(&crate::storage::page_sql(
+            let mut statement = connection.prepare(&(if remote {
+                crate::storage::parquet_page_sql
+            } else {
+                crate::storage::page_sql
+            })(
                 &conditions,
                 matches!(order, EventOrder::Desc),
             ))?;
@@ -296,6 +302,20 @@ impl Store {
             Ok(json!({ "events": events, "next_cursor": next_cursor }))
         })
         .await
+    }
+}
+
+fn database_settings(
+    checkpoint_threshold_mib: u32,
+    threads: Option<usize>,
+) -> duckdb::Result<duckdb::Config> {
+    let settings = duckdb::Config::default().with(
+        "checkpoint_threshold",
+        format!("{checkpoint_threshold_mib} MiB"),
+    )?;
+    match threads {
+        Some(threads) => settings.with("threads", threads.to_string()),
+        None => Ok(settings),
     }
 }
 
@@ -330,7 +350,6 @@ mod tests {
             batch,
             false,
             64,
-            None,
             true,
             None,
         )

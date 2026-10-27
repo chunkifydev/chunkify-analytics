@@ -10,7 +10,7 @@ async function request(handler, url, method = 'GET') {
   return res;
 }
 function setup(fetchImpl) {
-  const env = { COLLECTOR_URL: 'http://127.0.0.1:9000', CHUNKIFY_LIVE_READ_TOKEN: randomBytes(24).toString('hex'), CHUNKIFY_STAGING_READ_TOKEN: randomBytes(24).toString('hex') };
+  const env = { COLLECTOR_URL: 'http://127.0.0.1:9000', CHUNKIFY_LIVE_SECRET_KEY: randomBytes(24).toString('hex'), CHUNKIFY_STAGING_SECRET_KEY: randomBytes(24).toString('hex') };
   return { env, handler: createHandler({ env, fetchImpl }) };
 }
 test('fixed project and route mapping, summary passthrough, exact filters and eight-row pages', async () => {
@@ -22,7 +22,7 @@ test('fixed project and route mapping, summary passthrough, exact filters and ei
   assert.equal(calls[0].url.pathname, '/v1/summary');
   assert.equal(calls[0].url.searchParams.get('video_id'), ' exact & ID ');
   assert.equal(calls[0].url.searchParams.has('limit'), false);
-  assert.equal(calls[0].options.headers.Authorization, `Bearer ${env.CHUNKIFY_STAGING_READ_TOKEN}`);
+  assert.equal(calls[0].options.headers.Authorization, `Bearer ${env.CHUNKIFY_STAGING_SECRET_KEY}`);
   assert.equal(calls[0].options.redirect, 'error');
   query.set('cursor', 'opaque+/=');
   await request(handler, `/api/videos?${query}`);
@@ -30,7 +30,7 @@ test('fixed project and route mapping, summary passthrough, exact filters and ei
   assert.equal(calls[1].url.searchParams.get('cursor'), 'opaque+/=');
   assert.equal(calls[1].url.searchParams.get('from'), query.get('from'));
   await request(handler, '/api/summary?project=live');
-  assert.equal(calls[2].options.headers.Authorization, `Bearer ${env.CHUNKIFY_LIVE_READ_TOKEN}`);
+  assert.equal(calls[2].options.headers.Authorization, `Bearer ${env.CHUNKIFY_LIVE_SECRET_KEY}`);
 });
 test('rejects arbitrary routes, projects, query keys, duplicate keys, dates and write methods without upstream access', async () => {
   const { handler } = setup(() => { throw new Error('Must not call upstream'); });
@@ -72,7 +72,7 @@ test('project discovery contains only configured labels, never secrets', async (
   const { env, handler } = setup(() => { throw new Error('No upstream request expected'); });
   const response = await request(handler, '/api/projects');
   assert.deepEqual(response.body.projects.map(p => p.id), ['live', 'staging']);
-  assert.equal(JSON.stringify(response.body).includes(env.CHUNKIFY_LIVE_READ_TOKEN), false);
+  assert.equal(JSON.stringify(response.body).includes(env.CHUNKIFY_LIVE_SECRET_KEY), false);
 });
 
 test('foreign hosts and origins cannot read the local credentialed proxy', async () => {

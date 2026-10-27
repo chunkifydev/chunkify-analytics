@@ -7,7 +7,7 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
 | `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch finishes storage, including empty batches. |
-| `POST /v1/projects` | `Authorization: Bearer CH_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
+| `POST /v1/projects` | `Authorization: Bearer COLLECTOR_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
 | `PUT /v1/project/allowed-origins` | `Authorization: Bearer SECRET_KEY` | Save additional project origins and apply them immediately. |
 | `GET /v1/project/keys` | `Authorization: Bearer SECRET_KEY` | Key IDs, names and permissions, without key values. |
 | `POST /v1/project/keys/{key_id}/rotate` | `Authorization: Bearer SECRET_KEY` | New key value; the previous value stops working immediately. |
@@ -29,7 +29,7 @@ Keys are never accepted in a query string. Responses are marked `no-store`.
 
 Public keys start with `ck_public_`; secret keys start with `ck_secret_`.
 Secret keys can read analytics and manage origins and keys in their own project.
-Project creation requires the separate `CH_ADMIN_KEY` environment secret.
+Project creation requires the separate `COLLECTOR_ADMIN_KEY` environment secret.
 See [project creation](administration.md#create-projects-through-the-api) and [live project management](administration.md#live-project-api) for requests.
 
 ### OTLP format and storage

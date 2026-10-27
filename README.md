@@ -301,7 +301,7 @@ In Docker, run these commands through
 management and retention changes work while serving on Linux and macOS. Stop the collector
 to rename projects or replace project settings. For automatic customer onboarding,
 use [project creation through the API](docs/administration.md#create-projects-through-the-api)
-with `CH_ADMIN_KEY`.
+with `COLLECTOR_ADMIN_KEY`.
 
 ## Storage and backups
 

@@ -95,13 +95,13 @@ than its buffer budget returns 413. Origin checks use the public key's project.
 
 ## Create projects through the API
 
-Set `CH_ADMIN_KEY` in the collector's environment or private `.env` file to enable
+Set `COLLECTOR_ADMIN_KEY` in the collector's environment or private `.env` file to enable
 `POST /v1/projects`. Use a separate random secret for your provisioning backend.
 An unset or empty value disables this endpoint with a 404 response.
 
 ```sh
 curl -X POST http://127.0.0.1:4174/v1/projects \
-  -H "Authorization: Bearer $CH_ADMIN_KEY" \
+  -H "Authorization: Bearer $COLLECTOR_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Customer website","allowed_origins":["https://customer.example"]}'
 ```

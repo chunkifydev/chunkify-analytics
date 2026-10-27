@@ -28,7 +28,7 @@ async function installation(t, storage, retention = 0, environment = {}) {
   let directory = await mkdtemp(join(tmpdir(), "chunkify-storage-test-"));
   const directories = [directory];
   let child, closed;
-  const inherited = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "CH_ADMIN_KEY" && !key.startsWith("COLLECTOR_"))),
+  const inherited = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("COLLECTOR_"))),
     ...environment };
   let config;
   async function configure() {
@@ -127,7 +127,7 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const adminKey = `s3-admin-${randomUUID()}`;
-  const app = await installation(t, s3Settings(), 0, { CH_ADMIN_KEY: adminKey });
+  const app = await installation(t, s3Settings(), 0, { COLLECTOR_ADMIN_KEY: adminKey });
   await app.command(["init"]);
   await app.start();
   const created = await fetch(`${app.url}/v1/projects`, { method: "POST", headers: {

@@ -4,9 +4,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_chunkify-analytics");
 
 fn run(args: &[&str]) -> Output {
     let mut command = Command::new(BINARY);
-    for (key, _) in
-        std::env::vars().filter(|(key, _)| key == "CH_ADMIN_KEY" || key.starts_with("COLLECTOR_"))
-    {
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("COLLECTOR_")) {
         command.env_remove(key);
     }
     let directory = std::env::temp_dir().join(format!("chunkify-cli-cwd-{}", uuid::Uuid::new_v4()));

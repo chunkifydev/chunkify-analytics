@@ -5,7 +5,7 @@ use std::{collections::HashMap, env, ffi::OsString, path::Path};
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
-    ("CH_ADMIN_KEY", "admin_key"),
+    ("COLLECTOR_ADMIN_KEY", "admin_key"),
     ("COLLECTOR_DATA_DIR", "data_dir"),
     ("COLLECTOR_BIND", "server.bind"),
     ("COLLECTOR_S3_URL", "storage.url"),

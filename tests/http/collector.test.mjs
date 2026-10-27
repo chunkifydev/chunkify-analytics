@@ -62,7 +62,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, CH_ADMIN_KEY: undefined, "data_dir": directory, "server.bind": "127.0.0.1:0",
+  const env = { ...process.env, COLLECTOR_ADMIN_KEY: undefined, "data_dir": directory, "server.bind": "127.0.0.1:0",
     "server.allowed_origins": "https://player.example", "server.store_ip": "true",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);
@@ -1740,7 +1740,7 @@ async function createProject(server, body, key) {
 
 test("admin project creation activates isolated projects immediately and persists across restart", async t => {
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { CH_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev",
+  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev",
     "server.ingest_per_second": "1000", "retention.seconds": "0" });
   const url = server.url;
   const request = { name: "Production / Europe", allowed_origins: ["https://customer.example", "https://customer.example"] };
@@ -1792,20 +1792,20 @@ test("project creation is disabled without an admin key and validates before sav
   assert.equal((await createProject(disabled, { name: "Disabled" }, disabled.keys.secret_key)).status, 404);
   await disabled.stop();
   const dotenvKey = `dotenv-${randomUUID()}`;
-  await writeFile(join(disabled.directory, ".env"), `CH_ADMIN_KEY=${dotenvKey}\n`, { mode: 0o600 });
+  await writeFile(join(disabled.directory, ".env"), `COLLECTOR_ADMIN_KEY=${dotenvKey}\n`, { mode: 0o600 });
   await disabled.start();
   assert.equal((await createProject(disabled, { name: "From dotenv" }, dotenvKey)).status, 201);
   await disabled.stop();
   const processKey = `process-${randomUUID()}`;
-  await disabled.start(binary, { CH_ADMIN_KEY: processKey });
+  await disabled.start(binary, { COLLECTOR_ADMIN_KEY: processKey });
   assert.equal((await createProject(disabled, { name: "Old key" }, dotenvKey)).status, 401);
   assert.equal((await createProject(disabled, { name: "Process key" }, processKey)).status, 201);
   await disabled.stop();
-  await disabled.start(binary, { CH_ADMIN_KEY: "" });
+  await disabled.start(binary, { COLLECTOR_ADMIN_KEY: "" });
   assert.equal((await createProject(disabled, { name: "Disabled" }, processKey)).status, 404);
   await disabled.stop();
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { CH_ADMIN_KEY: adminKey });
+  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey });
   const file = join(server.directory, "keys.json");
   const before = await readFile(file, "utf8");
   for (const body of [{}, { name: "" }, { name: "  " }, { name: "x".repeat(129) }, { name: 42 },

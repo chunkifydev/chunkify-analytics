@@ -8,9 +8,8 @@ import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 
-// Record a real SDK playback and the public adapters' wire output before timing.
+// Record a real SDK playback and the HTTP adapter's wire output before timing.
 // Load generation replays these templates with new identities and timestamps.
 export async function captureWorkload({ browserContext = false } = {}) {
   const events = [];
@@ -61,7 +60,7 @@ export async function captureWorkload({ browserContext = false } = {}) {
   // A repeatable 16 KiB mapper property tests larger payloads. It is synthetic,
   // moderately compressible text, not a claim about future browser metadata.
   const padding = Array.from({ length: 256 }, (_, i) => createHash("sha256").update(String(i)).digest("hex")).join("");
-const variants = {};
+  const variants = {};
   let context;
   try {
     const url = `http://127.0.0.1:${receiver.address().port}`;
@@ -75,9 +74,7 @@ const variants = {};
           const { createChunkifyAdapter } = await import("/chunkify.js");
           await createChunkifyAdapter(`${location.origin}/native`, { ingestKey: "benchmark-fixture" }).send(event);
         }, events[0]);
-        // OTLP drops null custom attributes. Use the same representable browser
-        // fields in both replay formats so mixed duplicates have equal payloads.
-        context = Object.fromEntries(Object.entries(captured.shift().browser_context).filter(([, value]) => value !== null));
+        context = captured.shift().browser_context;
         assert.equal(context.browser_name, "Chrome");
         assert.equal(context.viewport_width_px, 960);
       } finally { await browser.close(); }
@@ -86,15 +83,10 @@ const variants = {};
       const map = (event) => ({ ...event, ...(context ? { browser_context: context } : {}),
         ...(size === "large" ? { benchmark_payload: padding } : {}) });
       const native = createHttpAdapter(`${url}/native`, { mapEvent: map });
-      const otlp = createOtlpAdapter(`${url}/otlp`, { mapAttributes: map });
       variants[size] = [];
       for (const event of events) {
         await native.send(event);
-        const canonical = captured.shift();
-        await otlp.send(event);
-        const request = captured.shift();
-        const scope = request.resourceLogs[0].scopeLogs[0];
-        variants[size].push({ event: canonical, log: scope.logRecords[0], scope: scope.scope });
+        variants[size].push({ event: captured.shift() });
       }
     }
   } finally { await new Promise((resolve) => receiver.close(resolve)); }
@@ -104,17 +96,14 @@ const variants = {};
   const replayRecord = ({ position, large, fields }) => {
     const template = variants[large ? "large" : "small"][position];
     const event = { ...template.event, ...fields };
-    const log = { ...template.log, timeUnixNano: String(BigInt(Date.parse(event.occurred_at)) * 1000000n),
-      attributes: template.log.attributes.map((attribute) => Object.hasOwn(fields, attribute.key)
-        ? { key: attribute.key, value: { stringValue: fields[attribute.key] } } : attribute) };
-    return { event, log, scope: template.scope };
+    return { event };
   };
 
   return {
     description: { event_names: [...new Set(events.map((event) => event.event_name))],
       events_per_view: events.length, recorded_playing_time_ms: events.at(-1).playing_time_ms,
       large_property_bytes: padding.length, videos: 10, viewers: 1000,
-      browser_context: context ?? null, browser_context_nulls_omitted: Boolean(context) },
+      browser_context: context ?? null },
     replay: replayRecord,
     generator() {
       let index = 0;
@@ -142,12 +131,4 @@ const variants = {};
 // and Sets. This preserves the UUID bytes without retaining its component strings.
 function compactUuid() {
   return Buffer.from(randomUUID(), "ascii").toString("ascii");
-}
-
-export function otlpBody(records) {
-  return { resourceLogs: [{ scopeLogs: [{ scope: records[0].scope, logRecords: records.map(({ log }) => log) }] }] };
-}
-
-export function originalOtlp(record) {
-  return { resource_logs: {}, scope_logs: { scope: record.scope }, log_record: record.log };
 }

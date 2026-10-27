@@ -27,7 +27,6 @@ allowed_origins = ["http://localhost:3000"]
 trusted_proxies = []
 store_ip = true
 max_body_bytes = 65536
-max_otlp_records = 100
 ingest_per_second = 100
 
 [retention]

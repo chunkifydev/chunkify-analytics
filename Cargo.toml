@@ -14,7 +14,6 @@ axum = "0.8.9"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 duckdb = { version = "=1.20000.0", default-features = false }
-flate2 = "1"
 futures = "0.3"
 ipnet = "2"
 ring = "0.17.14"

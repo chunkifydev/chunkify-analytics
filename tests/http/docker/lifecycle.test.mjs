@@ -4,7 +4,6 @@ import { randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { containerCollector, docker } from "./support.mjs";
 
 test("the admin environment key provisions a project that survives container replacement", { timeout: 120000 }, async t => {
@@ -56,12 +55,11 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
   session.destroy();
   const headers = { "X-Chunkify-Ingest-Key": server.keys.public_key };
   const native = createHttpAdapter(`${server.url}/v1/events`, { headers });
-  const otlp = createOtlpAdapter(`${server.url}/v1/logs`, { headers });
   await native.send(events[0]);
-  for (const event of events.slice(1)) await otlp.send(event);
+  for (const event of events.slice(1)) await native.send(event);
   const stored = await server.get("/v1/events");
   assert.deepEqual(stored.events.map(({ event }) => event), events);
-  assert.ok(stored.events.at(-1).otlp);
+  assert.ok(stored.events.every(record => record.otlp === undefined));
   for (const record of stored.events) {
     assert.ok(isIP(record.event_context.peer_ip));
     assert.equal(record.event_context.client_ip, record.event_context.peer_ip);
@@ -73,7 +71,7 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
   assert.equal(stopped.OOMKilled, false);
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), stored);
-  await createOtlpAdapter(`${server.url}/v1/logs`, { headers }).send(events[0]);
+  await createHttpAdapter(`${server.url}/v1/events`, { headers }).send(events[0]);
   assert.deepEqual(await server.get("/v1/summary"), { views: 1, unique_viewers: 1, total_playing_time_ms: 0 });
   assert.deepEqual(await server.get("/v1/events"), stored);
   const logs = await docker(["logs", server.name]);

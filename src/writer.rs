@@ -432,7 +432,7 @@ fn write_bulk(
     batch: &[WriteRequest],
     profile: &mut Profile,
 ) -> Result<Vec<usize>, ApiError> {
-    // Deduplicate in admission order, including duplicates within an OTLP request.
+    // Deduplicate records in admission order.
     // RETURNING identifies which of these first occurrences are new to the database.
     let mut seen = HashSet::new();
     let rows: Vec<_> = batch
@@ -441,7 +441,7 @@ fn write_bulk(
         .flat_map(|(request, item)| item.rows.iter().map(move |row| (request, row)))
         .filter(|(_, row)| seen.insert((row.project(), row.id())))
         .collect();
-    // Empty OTLP exports are valid. Avoid an empty appender/INSERT cycle.
+    // Avoid an empty appender/INSERT cycle for empty internal write requests.
     if rows.is_empty() {
         return Ok(vec![0; batch.len()]);
     }

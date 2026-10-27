@@ -2,14 +2,11 @@ import assert from "node:assert/strict";
 import { statfs } from "node:fs/promises";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
-import { promisify } from "node:util";
-import { gzip } from "node:zlib";
 import { containerCollector, docker, image } from "./support.mjs";
-import { captureWorkload, originalOtlp, otlpBody } from "./workload.mjs";
+import { captureWorkload } from "./workload.mjs";
 import { containerMemoryGuardMiB, parseMemoryStats, resources } from "./resources.mjs";
 
 export { captureWorkload };
-const compress = promisify(gzip);
 const mib = 1024 * 1024;
 export const thresholds = { ingestion_p95_ms: 250, query_p95_ms: 500,
   successful_request_fraction: 0.99, scheduled_request_fraction: 0.99, schedule_lag_p95_ms: 20 };
@@ -96,9 +93,9 @@ function summaryAccumulator() {
 
 // Encode the replay fields once, omitting the event ID already used as Map key.
 // Strings avoid retaining several small objects for each of a million events.
-export function encodeSubmission(record, format) {
+export function encodeSubmission(record) {
   const { event_id, ...fields } = record.replay.fields;
-  return JSON.stringify([record.replay.position, record.replay.large, fields, format]);
+  return JSON.stringify([record.replay.position, record.replay.large, fields]);
 }
 
 function assertSummary(actual, expected) {
@@ -120,7 +117,7 @@ export async function verify(server, sent, acknowledged, preloadIds, workload, o
       const encoded = sent.get(id);
       assert.notEqual(encoded, null, "pagination must not repeat events");
       assert.ok(encoded, "stored event must have been submitted");
-      const [position, large, fields, format] = JSON.parse(encoded);
+      const [position, large, fields] = JSON.parse(encoded);
       const expected = workload.replay({ position, large, fields: { ...fields, event_id: id } });
       assert.deepEqual(record.event, expected.event, "full canonical payload must survive restart");
       if (expected.event.browser_context) {
@@ -129,8 +126,7 @@ export async function verify(server, sent, acknowledged, preloadIds, workload, o
         }
         assert.ok(record.event_context.client_ip, "request IP must remain alongside browser context");
       }
-      if (format === "otlp") assert.deepEqual(record.otlp, originalOtlp(expected), "original OTLP context must survive restart");
-      else assert.equal(record.otlp, undefined);
+      assert.equal(record.otlp, undefined);
       assert.ok(Number.isFinite(Date.parse(record.received_at)));
       totals.add(expected.event);
       // Mark the ID as verified and release its encoded replay data immediately.
@@ -156,11 +152,11 @@ export async function verify(server, sent, acknowledged, preloadIds, workload, o
   }
   return { summary, persisted_new: retained - preloadIds.size,
     persisted_without_ack: unacknowledged,
-    verification: { payloads: true, otlp_context: true, summary: true, per_video: true, acknowledged_events: acknowledged.size } };
+    verification: { payloads: true, summary: true, per_video: true, acknowledged_events: acknowledged.size } };
 }
 
 export async function measure(input, workload, { signal, fixture, onProgress = async () => {} } = {}) {
-  const config = { batch_size: 1, gzip: false, duplicate_every: 0, large_every: 0,
+  const config = { duplicate_every: 0, large_every: 0,
     preload: 0, concurrency: 128, shutdown: "stop", rate_limit: 10000, queries: true, profile: false, ...input };
   if (config.preload > safety.max_unique_events) throw new Error("Preload exceeds the unique-event safety limit");
   if (fixture?.volume) {
@@ -169,7 +165,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
   }
   if (await hostFreeBytes() < (safety.min_free_disk_mib + safety.max_data_mib) * mib) throw new Error("Benchmark requires its data budget plus the free-disk floor before starting");
   const settings = { "server.ingest_per_second": String(config.rate_limit), "server.max_body_bytes": "1048576",
-    "server.max_otlp_records": "100", "retention.seconds": "2592000", "retention.interval_seconds": "5",
+    "retention.seconds": "2592000", "retention.interval_seconds": "5",
     "profile": String(config.profile), ...config.write_settings };
   const server = await containerCollector({ resources, settings, seed: fixture?.volume });
   const sent = new Map();
@@ -209,37 +205,35 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
   function fresh(count) {
     return Array.from({ length: count }, () => makeRecord(config.large_every > 0 && ++generation % config.large_every === 0));
   }
-  async function send(batch, format, measured = true) {
+  async function send(record, measured = true) {
     const prepareStart = performance.now();
-    const json = JSON.stringify(format === "native" ? batch[0].event : otlpBody(batch));
-    const body = config.gzip && format === "otlp" ? await compress(json) : json;
+    const body = JSON.stringify(record.event);
     if (measured) {
       preparation.push(performance.now() - prepareStart);
       wireBytes += Buffer.byteLength(body);
-      decodedBytes += Buffer.byteLength(json);
+      decodedBytes += Buffer.byteLength(body);
       requests.sent++;
-      records.submitted += batch.length;
+      records.submitted++;
     }
-    for (const record of batch) if (!sent.has(record.event.event_id)) {
-      sent.set(record.event.event_id, encodeSubmission(record, format));
+    if (!sent.has(record.event.event_id)) {
+      sent.set(record.event.event_id, encodeSubmission(record));
     }
     const start = performance.now();
     const window = measured ? windowAt(start) : null;
     if (window) window.sent++;
     try {
-      const response = await fetch(`${server.url}${format === "native" ? "/v1/events" : "/v1/logs"}`, {
+      const response = await fetch(`${server.url}/v1/events`, {
         method: "POST", body, signal: AbortSignal.timeout(safety.request_timeout_ms),
-        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key,
-          ...(config.gzip && format === "otlp" ? { "Content-Encoding": "gzip" } : {}) },
+        headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
       });
       await response.text();
       if (measured) requests.statuses[response.status] = (requests.statuses[response.status] ?? 0) + 1;
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      for (const record of batch) acknowledged.add(record.event.event_id);
-      if (duplicatePool.length < 1000) duplicatePool.push(...batch.slice(0, 1000 - duplicatePool.length));
+      acknowledged.add(record.event.event_id);
+      if (duplicatePool.length < 1000) duplicatePool.push(record);
       if (measured) {
         requests.successful++;
-        records.acknowledged += batch.length;
+        records.acknowledged++;
         const latency = performance.now() - start;
         successLatencies.push(latency);
         window.successful++;
@@ -250,8 +244,8 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
       window.failed++;
       const reason = error.message.match(/^HTTP (\d+)$/)?.[1] ?? (error.name === "TimeoutError" ? "timeout" : "transport");
       requests.failures[reason] = (requests.failures[reason] ?? 0) + 1;
-      if (/^4\d\d$/.test(reason) || reason === "503") records.rejected += batch.length;
-      else records.uncertain += batch.length;
+      if (/^4\d\d$/.test(reason) || reason === "503") records.rejected++;
+      else records.uncertain++;
     } finally { if (measured) latencies.push(performance.now() - start); }
   }
 
@@ -267,7 +261,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     }
     for (let count = reusedFixture ? config.preload : 0; count < config.preload; count += 100) {
       if (signal?.aborted) throw new Error("Benchmark interrupted during preload");
-      await send(fresh(Math.min(100, config.preload - count)), "otlp", false);
+      await Promise.all(fresh(Math.min(100, config.preload - count)).map(record => send(record, false)));
       if (count % 1000 === 0) {
         const reason = checkSafety(await sample(server));
         if (reason) throw new Error(`Safety stop during preload: ${reason}`);
@@ -339,8 +333,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
       const scheduled = Math.ceil(phase.rate * phase.seconds);
       let lastProgress = performance.now();
       requests.scheduled += scheduled;
-      records.scheduled += config.format === "mixed" ? Math.ceil(scheduled / 2) + Math.floor(scheduled / 2) * config.batch_size
-        : scheduled * (config.format === "native" ? 1 : config.batch_size);
+      records.scheduled += scheduled;
       for (let ticket = 0; ticket < scheduled && !abortReason; ticket++) {
         const due = phaseStart + ticket * 1000 / phase.rate;
         if (due > performance.now()) await delay(Math.max(1, due - performance.now()));
@@ -355,14 +348,12 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
         window.scheduled++;
         if (lag > safety.max_schedule_lag_ms) { requests.skipped_late++; window.skipped_late++; continue; }
         if (inflight.size >= config.concurrency) { requests.skipped_concurrency++; window.skipped_concurrency++; continue; }
-        if (sent.size + config.batch_size > safety.max_unique_events) { abortReason = "unique event safety limit"; break; }
+        if (sent.size + 1 > safety.max_unique_events) { abortReason = "unique event safety limit"; break; }
         scheduleLag.push(lag);
         const requestIndex = requests.sent + inflight.size;
-        const format = config.format === "mixed" ? (ticket % 2 ? "otlp" : "native") : config.format;
-        const count = format === "native" ? 1 : config.batch_size;
         const duplicate = config.duplicate_every > 0 && (ticket + 1) % config.duplicate_every === 0 && duplicatePool.length > 0;
-        const batch = duplicate ? Array.from({ length: count }, (_, i) => duplicatePool[(requestIndex + i) % duplicatePool.length]) : fresh(count);
-        const promise = send(batch, format).catch((error) => { abortReason = `sender failed: ${error.message}`; });
+        const record = duplicate ? duplicatePool[requestIndex % duplicatePool.length] : fresh(1)[0];
+        const promise = send(record).catch((error) => { abortReason = `sender failed: ${error.message}`; });
         inflight.add(promise);
         maxInflight = Math.max(maxInflight, inflight.size);
         void promise.finally(() => inflight.delete(promise));

@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { captureWorkload, encodeSubmission, measure, safety, verify } from "./benchmark.mjs";
-import { originalOtlp } from "./workload.mjs";
 
 test("event limits reject oversized preloads and fixtures before starting Docker", async () => {
   await assert.rejects(measure({ preload: safety.max_unique_events + 1 }, null), /Preload exceeds/);
@@ -15,10 +14,10 @@ test("streamed verification preserves every payload check and rejects missing or
   const records = Array.from({ length: workload.description.events_per_view * 3 }, () => generate());
   const ids = records.map((record) => record.event.event_id);
   const summary = (views) => ({ views, unique_viewers: views, total_playing_time_ms: workload.description.recorded_playing_time_ms * views });
-  const pages = records.map((record, index) => ({ event: structuredClone(record.event),
-    received_at: new Date().toISOString(), ...(index % 2 ? { otlp: originalOtlp(record) } : {}) }));
+  const pages = records.map((record) => ({ event: structuredClone(record.event),
+    received_at: new Date().toISOString() }));
   async function check(change = () => {}) {
-    const sent = new Map(records.map((record, index) => [record.event.event_id, encodeSubmission(record, index % 2 ? "otlp" : "native")]));
+    const sent = new Map(records.map((record) => [record.event.event_id, encodeSubmission(record)]));
     const stored = structuredClone(pages);
     change(stored);
     let offset = 0;
@@ -41,5 +40,4 @@ test("streamed verification preserves every payload check and rejects missing or
   await t.test("missing acknowledged event", () => assert.rejects(check((rows) => rows.pop()), /every acknowledged event/));
   await t.test("duplicate across pages", () => assert.rejects(check((rows) => rows.push(rows[0])), /pagination must not repeat/));
   await t.test("changed payload", () => assert.rejects(check((rows) => { rows[0].event.video_id = "wrong"; }), /full canonical payload/));
-  await t.test("changed OTLP context", () => assert.rejects(check((rows) => { rows[1].otlp.scope_logs.scope.name = "wrong"; }), /original OTLP context/));
 });

@@ -6,7 +6,6 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | --- | --- | --- |
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
-| `POST /v1/logs` | `X-Chunkify-Ingest-Key` | OTLP JSON logs. 200 with `{}` after the whole batch finishes storage, including empty batches. |
 | `POST /v1/projects` | `Authorization: Bearer COLLECTOR_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
 | `DELETE /v1/project` | `Authorization: Bearer SECRET_KEY` | Delete the project and revoke all its keys. Events expire under the existing retention policy. |
 | `PATCH /v1/project` | `Authorization: Bearer SECRET_KEY` | Update the project name or additional origins immediately. |
@@ -24,7 +23,7 @@ version 1 event. It validates all seven event shapes emitted by the SDK. Malform
 or invalid payloads return 400; unsupported media types return 415; oversized bodies
 return 413. Missing or invalid keys return 401. Disallowed origins return 403.
 
-Only the ingest endpoints enable CORS, including preflight for the ingest header.
+Only the event ingestion endpoint enables CORS, including preflight for the ingest header.
 Read endpoints are intended for the customer's backend and do not enable CORS.
 Keys are never accepted in a query string. Responses are marked `no-store`.
 
@@ -33,58 +32,32 @@ Secret keys can read analytics, update the name or origins, manage keys and dele
 Project creation requires the separate `COLLECTOR_ADMIN_KEY` environment secret.
 See [project creation](administration.md#create-projects-through-the-api) and [live project management](administration.md#live-project-api) for requests.
 
-### OTLP format and storage
+### Ingestion and storage
 
-`POST /v1/logs` accepts `application/json`, with no content encoding or with
-`Content-Encoding: gzip`. It supports multiple `resourceLogs`, `scopeLogs`, and
-`logRecords` using the lower camel case field names in the
-[OTLP JSON specification](https://opentelemetry.io/docs/specs/otlp/#json-protobuf-encoding).
-Unknown OTLP message fields are ignored during normalization and preserved in
-the stored log and context. This endpoint accepts Chunkify analytics logs only.
-Binary Protobuf, gRPC, metrics, traces, and arbitrary log events are outside its scope.
+`POST /v1/events` is the collector's only ingestion endpoint. Use
+`createChunkifyAdapter` from `@chunkify/analytics/chunkify` to send events.
+Each request contains one complete JSON event. Request batching and gzip are
+not supported; the collector can still group concurrent requests into database
+transactions.
 
-The canonical event comes from each log's `attributes`. The decoder supports the
-SDK's string, boolean, integer, finite number, array, and key-value list values.
-Integer values may be decimal strings or JSON integers. Unsupported value types,
-duplicate attribute keys, and invalid Chunkify fields reject the export. Custom
-`mapAttributes` functions must retain all required schema fields. The collector
-restores known nullable fields omitted by the SDK, including nullable rendition
-fields. It cannot reconstruct additional null fields that a custom mapper omitted.
+Local storage deduplicates event IDs within each project. The first accepted
+payload and context win; later duplicates do not enrich or replace them.
+S3 stores every delivery as a separate row, including repeated event IDs, and
+returns 201 with `{"accepted":true,"duplicate":false}` on success.
 
-Every log is validated before storage. An invalid record rejects the entire
-batch with HTTP 400. Wire size, decompressed size, or record count violations return
-413. Unsupported content types or encodings return 415. OTLP errors use the JSON
-Status shape `{"message":"..."}`, including authentication and rate-limit errors.
-All records must pass validation before storage. Success is sent only after storage
-finishes. Local storage commits the batch atomically. S3 uploads are independent,
-so a storage failure can leave some objects written; retrying can repeat events.
-See [storage behavior](storage.md#events-and-expiration).
-
-The raw-event API returns the canonical `event` and, for an event first received
-through OTLP, an additional `otlp` object:
-
-```json
-{
-  "log_record": { "attributes": [], "eventName": "..." },
-  "resource_logs": { "resource": {}, "schemaUrl": "..." },
-  "scope_logs": { "scope": {}, "schemaUrl": "..." }
-}
-```
-
-`log_record` retains the original log object. `resource_logs` and `scope_logs`
-retain their original group fields, excluding the nested record/group arrays.
-Objects preserve JSON values, not original whitespace or key order. Native events
-have no `otlp` field. With local storage, deduplication is shared across formats:
-the first accepted payload and context win. Later duplicates do not enrich or
-replace them. With S3, every delivery is a separate row with its own context;
-repeated event IDs are not deduplicated. Native S3 writes always return 201 with
-`{"accepted":true,"duplicate":false}` on success.
-Both formats feed the same filters, pagination, and summary calculations.
+The former `POST /v1/logs` and `GET /v1/ingestion` endpoints have been removed.
+Applications using the OTLP adapter with this collector must switch to the
+Chunkify adapter and `/v1/events`. Remove `server.max_otlp_records` from existing
+TOML configuration files; that setting is no longer supported.
+Existing events remain readable, including
+an optional `otlp` object on events stored by earlier collector versions. That
+object preserves the original `log_record`, `resource_logs`, and `scope_logs`.
+The SDK's OTLP adapter can still send to other telemetry systems.
 
 ### Flat event context and request IP
 
 `GET /v1/events` returns a flat `event_context` alongside the original `event` and
-optional `otlp`. For example:
+optional legacy `otlp` context. For example:
 
 ```json
 {

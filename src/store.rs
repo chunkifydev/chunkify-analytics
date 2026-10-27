@@ -128,10 +128,6 @@ impl Store {
         ))
     }
 
-    pub async fn ingestion(&self, _project: String) -> Result<Value, ApiError> {
-        Ok(json!({ "mode": "direct" }))
-    }
-
     pub async fn call<T: Send + 'static>(
         &self,
         name: &'static str,

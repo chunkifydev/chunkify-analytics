@@ -8,7 +8,6 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
@@ -60,12 +59,11 @@ async function collector(t, separateReads) {
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
-    async send(event, otlp = false) {
+    async send(event, status = 201) {
       const headers = { "X-Chunkify-Ingest-Key": server.keys.public_key };
-      if (otlp) return createOtlpAdapter(`${server.url}/v1/logs`, { headers }).send(event);
       const response = await fetch(`${server.url}/v1/events`, { method: "POST",
         headers: { ...headers, "Content-Type": "application/json" }, body: JSON.stringify(event) });
-      assert.equal(response.status, 201, await response.text());
+      assert.equal(response.status, status, await response.text());
     },
   };
   t.after(async () => {
@@ -105,8 +103,7 @@ for (const separateReads of [false, true]) {
       undefined, { schema_version: 1, browser_name: 123, os_name: true, device_type: null },
       { schema_version: 1, browser_name: "null", os_name: "null", device_type: "tablet" },
     ].map((context, index) => view(`video-${index}`, context)[0]);
-    // Keep one native null-valued context; OTLP omits null attributes.
-    for (const [index, event] of fixtures.entries()) await server.send(event, index % 2 === 1 && index !== 3);
+    for (const event of fixtures) await server.send(event);
     assert.equal((await server.get("/v1/events")).events.length, fixtures.length);
     for (const [params, expected] of [
       [{ browser_name: "Chrome" }, [fixtures[0]]],
@@ -126,7 +123,7 @@ for (const separateReads of [false, true]) {
         expected.map((event) => event.event_id), JSON.stringify(params));
     }
     // First-delivery context stays authoritative even when a retry changes it.
-    await server.send({ ...fixtures[0], browser_context: safari }, true);
+    await server.send({ ...fixtures[0], browser_context: safari }, 200);
     assert.equal((await server.get("/v1/events", { browser_name: "Chrome" })).events.length, 1);
     const before = await server.get("/v1/events", { device_type: "desktop" });
     await server.stop();
@@ -141,21 +138,21 @@ for (const separateReads of [false, true]) {
     const gamma = view("video-c", chrome);
     const noContext = view("video-d");
     // The earliest start wins even when another start is received first.
-    await server.send({ ...alpha[0], event_id: randomUUID(), sequence: 2, browser_context: firefox }, true);
+    await server.send({ ...alpha[0], event_id: randomUUID(), sequence: 2, browser_context: firefox });
     await server.send(alpha[0]);
     await server.send({ ...alpha[1], sequence: 4, playing_time_ms: 1000, browser_context: safari,
-      occurred_at: "2026-10-16T12:00:00Z" }, true);
+      occurred_at: "2026-10-16T12:00:00Z" });
     await server.send({ ...alpha[0], event_id: randomUUID(), event_name: "chunkify.video.view_snapshot",
       sequence: 5, playing_time_ms: 9999 });
-    await server.send(beta[0], true);
+    await server.send(beta[0]);
     await server.send({ ...beta[1], playing_time_ms: 2000, browser_context: chrome });
     await server.send(gamma[0]);
     await server.send({ ...gamma[0], event_id: randomUUID(), event_name: "chunkify.video.view_snapshot",
-      sequence: 3, playing_time_ms: 3000, browser_context: safari }, true);
+      sequence: 3, playing_time_ms: 3000, browser_context: safari });
     await server.send({ ...gamma[0], event_id: randomUUID(), event_name: "chunkify.video.view_snapshot",
       sequence: 2, playing_time_ms: 500, browser_context: firefox });
     await server.send(noContext[0]);
-    await server.send({ ...noContext[1], playing_time_ms: 500, browser_context: chrome }, true);
+    await server.send({ ...noContext[1], playing_time_ms: 500, browser_context: chrome });
 
     assert.deepEqual(await server.get("/v1/summary"), totals(4, 6500));
     const params = { browser_name: "Chrome", os_name: "Linux", device_type: "desktop" };
@@ -182,7 +179,7 @@ for (const separateReads of [false, true]) {
     const params = { browser_name: "Chrome", os_name: "Linux", device_type: "desktop", limit: "1" };
     const paths = ["/v1/events", "/v1/videos"];
     const first = await Promise.all(paths.map((path) => server.get(path, params)));
-    await server.send(view("video-z", chrome)[0], true);
+    await server.send(view("video-z", chrome)[0]);
     for (const [index, path] of paths.entries()) {
       const cursor = first[index].next_cursor;
       assert.ok(cursor);

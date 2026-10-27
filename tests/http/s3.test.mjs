@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
-import { createOtlpAdapter } from "@chunkify/analytics/otlp";
+import { createHttpAdapter } from "@chunkify/analytics/http";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
 
@@ -124,7 +124,7 @@ function s3Settings() {
     url_style: "path", use_ssl: process.env.COLLECTOR_S3_TEST_USE_SSL === "true" };
 }
 
-test("S3 stores repeated events, preserves OTLP, isolates projects and survives task replacement", {
+test("S3 stores repeated events, isolates projects and survives task replacement", {
   skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const adminKey = `s3-admin-${randomUUID()}`;
@@ -145,12 +145,11 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   for (const event of records) await app.send(event);
   await app.send(records[0]);
   assert.equal((await app.get("/v1/events")).events.length, records.length + 1, "S3 does not deduplicate");
-  const adapter = createOtlpAdapter(`${app.url}/v1/logs`, { headers: { "X-Chunkify-Ingest-Key": live.public_key },
-    resourceAttributes: { "service.name": "s3-test" } });
+  const adapter = createHttpAdapter(`${app.url}/v1/events`, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   for (const event of records) await adapter.send(event);
   let liveRows = (await app.get("/v1/events", live.secret_key)).events;
   assert.equal(liveRows.length, records.length);
-  assert.ok(liveRows.every(row => row.project_id === live.project_id && row.otlp));
+  assert.ok(liveRows.every(row => row.project_id === live.project_id && !row.otlp));
   for (const path of ["/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos"]) {
     assert.deepEqual(await app.get(path), await app.get(path, live.secret_key));
   }

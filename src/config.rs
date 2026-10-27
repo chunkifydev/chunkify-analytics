@@ -18,7 +18,6 @@ pub struct Config {
     pub bind: SocketAddr,
     pub allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
-    pub max_otlp_records: usize,
     pub ingest_per_second: u32,
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
@@ -88,13 +87,6 @@ impl Config {
             .parse()?;
         if max_body_bytes == 0 {
             return Err("server.max_body_bytes must be positive".into());
-        }
-        let max_otlp_records = settings
-            .var("server.max_otlp_records")
-            .unwrap_or_else(|_| "100".into())
-            .parse()?;
-        if max_otlp_records == 0 {
-            return Err("server.max_otlp_records must be positive".into());
         }
         let ingest_per_second = settings
             .var("server.ingest_per_second")
@@ -214,7 +206,6 @@ impl Config {
             },
             allowed_origins,
             max_body_bytes,
-            max_otlp_records,
             ingest_per_second,
             retention_seconds,
             retention_interval_seconds,

@@ -6,7 +6,7 @@ on your own infrastructure, and its data stays in your storage.
 
 Chunkify Analytics includes:
 
-- Event ingestion through the Chunkify analytics SDK or OTLP/HTTP JSON logs.
+- Event ingestion through the Chunkify analytics adapter.
 - Separate projects and credentials for different websites or customers.
 - An HTTP API for building dashboards.
 - A read-only MCP endpoint for connecting AI tools.
@@ -224,11 +224,6 @@ The adapter includes browser and device context by default; set
 `collectBrowserContext: false` in
 its options to disable that collection.
 
-For OTLP/HTTP JSON logs, use `createOtlpAdapter` from
-`@chunkify/analytics/otlp`, point it at `/v1/logs`, and supply the public key in
-`X-Chunkify-Ingest-Key`. This endpoint accepts Chunkify playback events carried
-in OTLP logs; it is not a general metrics or traces backend.
-
 See the [API reference](docs/api.md) for payloads, authentication, filters, and
 error responses, or inspect the [OpenAPI specification](openapi.json).
 
@@ -251,7 +246,6 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/engagement` | Average watch time and observed reached-end rates. |
 | `GET /v1/quality` | Startup timing, buffering, and fatal-error metrics. |
 | `GET /v1/events` | Stored events, context, and pagination cursors. |
-| `GET /v1/ingestion` | Ingestion status. |
 
 Secret keys grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before

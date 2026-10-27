@@ -12,7 +12,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -105,7 +105,7 @@ pub fn router(
         .route("/healthz", get(health))
         .route("/v1/ingestion", get(ingestion_status))
         .route("/v1/projects", post(create_project))
-        .route("/v1/project/allowed-origins", put(project_origins))
+        .route("/v1/project", patch(update_project).delete(delete_project))
         .route("/v1/project/keys", get(project_keys))
         .route("/v1/project/keys/{key_id}/rotate", post(rotate_project_key))
         .route("/v1/summary", get(summary))
@@ -415,15 +415,6 @@ async fn project_action(
         .map(Json)
 }
 
-fn normalize_origins(mut origins: Vec<String>) -> Result<Vec<String>, ApiError> {
-    for origin in &origins {
-        crate::config::validate_origin(origin).map_err(ApiError::bad)?;
-    }
-    origins.sort();
-    origins.dedup();
-    Ok(origins)
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewProject {
@@ -441,7 +432,8 @@ async fn create_project(
         serde_json::from_value(read_json(request, app.max_body_bytes, false).await?)
             .map_err(|_| ApiError::bad("Expected a name and optional allowed_origins"))?;
     crate::projects::validate_name(&body.name).map_err(ApiError::bad)?;
-    let origins = normalize_origins(body.allowed_origins)?;
+    let mut origins = body.allowed_origins;
+    crate::projects::normalize_origins(&mut origins).map_err(ApiError::bad)?;
     let result =
         tokio::task::spawn_blocking(move || app.admin.create_project(&token, body.name, origins))
             .await
@@ -449,22 +441,26 @@ async fn create_project(
     Ok((StatusCode::CREATED, Json(result)))
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Origins {
-    allowed_origins: Vec<String>,
+async fn update_project(State(app): State<App>, request: Request) -> Result<Json<Value>, ApiError> {
+    let token = bearer(request.headers());
+    let mut update: crate::projects::Update =
+        serde_json::from_value(read_json(request, app.max_body_bytes, false).await?)
+            .map_err(|_| ApiError::bad("Expected optional name and allowed_origins"))?;
+    update.validate().map_err(ApiError::bad)?;
+    project_action(app, token, crate::admin::ProjectAction::Update(update)).await
 }
 
-async fn project_origins(
-    State(app): State<App>,
-    request: Request,
-) -> Result<Json<Value>, ApiError> {
+async fn delete_project(State(app): State<App>, request: Request) -> Result<Json<Value>, ApiError> {
     let token = bearer(request.headers());
-    let body: Origins =
-        serde_json::from_value(read_json(request, app.max_body_bytes, false).await?)
-            .map_err(|_| ApiError::bad("Expected allowed_origins as an array of origins"))?;
-    let origins = normalize_origins(body.allowed_origins)?;
-    project_action(app, token, crate::admin::ProjectAction::Origins(origins)).await
+    if request.uri().query().is_some_and(|query| !query.is_empty()) {
+        return Err(ApiError::bad(
+            "Project deletion does not accept query parameters",
+        ));
+    }
+    to_bytes(request.into_body(), 0)
+        .await
+        .map_err(|_| ApiError::bad("Project deletion does not accept a request body"))?;
+    project_action(app, token, crate::admin::ProjectAction::Delete).await
 }
 
 async fn project_keys(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {

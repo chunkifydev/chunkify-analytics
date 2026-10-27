@@ -57,6 +57,7 @@ async function installation(t, storage, retention = 0, environment = {}) {
       child = spawn(binary, ["--config", config, "serve"], { cwd: directory, env: inherited, stdio: "pipe" });
       closed = once(child, "close");
       let logs = "";
+      app.logs = () => logs;
       child.stderr.on("data", chunk => { logs += chunk; });
       app.url = await new Promise((ready, reject) => {
         const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`Storage startup timed out: ${logs}`)); }, 120000);
@@ -153,7 +154,7 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   for (const path of ["/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos"]) {
     assert.deepEqual(await app.get(path), await app.get(path, live.secret_key));
   }
-  await app.manage("/allowed-origins", "PUT", { allowed_origins: ["https://s3-customer.example"] }, live.secret_key);
+  await app.manage("", "PATCH", { name: "Renamed S3 customer", allowed_origins: ["https://s3-customer.example"] }, live.secret_key);
   const projectKeys = await app.manage("/keys", "GET", undefined, live.secret_key);
   const secretId = projectKeys.keys.find(key => key.permission === "secret").id;
   const oldSecret = live.secret_key;
@@ -164,6 +165,7 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   assert.equal(app.keys.public_key, originalKeys.public_key);
   assert.equal(app.keys.secret_key, originalKeys.secret_key);
   assert.equal(JSON.stringify(app.keys).includes(adminKey), false);
+  assert.equal(app.keys.projects.find(project => project.id === live.project_id).name, "Renamed S3 customer");
   assert.deepEqual(app.keys.projects.find(project => project.id === live.project_id).settings.allowed_origins, ["https://s3-customer.example"]);
   assert.equal((await fetch(`${app.url}/v1/project/keys`, { headers: { authorization: `Bearer ${oldSecret}` } })).status, 401);
   assert.equal((await app.get("/v1/events", dashboard.key)).events.length, records.length + 1);
@@ -206,4 +208,29 @@ test("S3 hides expired events before cleanup and deletes expired batches on star
   await app.stop();
   await app.start();
   assert.deepEqual((await app.get("/v1/events")).events, []);
+});
+
+test("S3 project deletion survives replacement and expires retained events with its own policy", {
+  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, s3Settings());
+  await app.command(["init"]);
+  await app.start();
+  const customer = JSON.parse(await app.command(["project", "create", "Deleted customer"]));
+  await app.command(["project", "retention", customer.project_id, "1"]);
+  const event = events()[0];
+  await app.send(event);
+  await app.send(event, customer.public_key);
+  const result = await app.manage("", "DELETE", undefined, customer.secret_key);
+  assert.equal(result.deleted, true);
+  assert.equal((await fetch(`${app.url}/v1/events`, { headers: { authorization: `Bearer ${customer.secret_key}` } })).status, 401);
+  await delay(1200);
+  await app.replaceTask();
+  assert.match(app.logs(), /Retention removed 1 events/);
+  assert.equal((await app.get("/v1/events")).events.length, 1);
+  const saved = app.keys.projects.find(project => project.id === customer.project_id);
+  assert.equal(saved.deleted, true);
+  assert.deepEqual(saved.keys, []);
+  assert.equal(saved.settings.retention_seconds, 1);
+  assert.equal((await fetch(`${app.url}/v1/events`, { headers: { authorization: `Bearer ${customer.secret_key}` } })).status, 401);
 });

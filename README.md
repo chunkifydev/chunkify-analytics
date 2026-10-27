@@ -117,7 +117,7 @@ The initial `default` project has two credentials:
 | Credential | Use |
 | --- | --- |
 | `public_key` | Starts with `ck_public_`. Use it in the player to send events. |
-| `secret_key` | Starts with `ck_secret_`. Read analytics and manage project origins and keys. Keep it on your backend. |
+| `secret_key` | Starts with `ck_secret_`. Read analytics, update or delete the project, and manage keys. Keep it on your backend. |
 
 Save these values privately. You can create separate named keys for each
 integration and revoke them independently.

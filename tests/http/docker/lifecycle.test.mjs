@@ -20,9 +20,21 @@ test("the admin environment key provisions a project that survives container rep
   assert.match(project.project_id, /^[0-9a-f-]{36}$/);
   const events = () => fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${project.secret_key}` } });
   assert.deepEqual((await (await events()).json()).events, []);
+  const update = await fetch(`${server.url}/v1/project`, { method: "PATCH", headers: {
+    authorization: `Bearer ${project.secret_key}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Renamed customer", allowed_origins: [] }) });
+  assert.equal(update.status, 200);
   await server.stop();
   await server.start();
   assert.equal((await events()).status, 200);
+  const listing = JSON.parse(await docker(["exec", server.name, "chunkify-analytics", "project", "list"]));
+  assert.equal(listing.find(p => p.id === project.project_id).name, "Renamed customer");
+  assert.equal((await fetch(`${server.url}/v1/project`, { method: "DELETE", headers: {
+    authorization: `Bearer ${project.secret_key}` } })).status, 200);
+  await server.stop();
+  await server.start();
+  assert.equal((await events()).status, 401);
+  assert.equal((await server.get("/v1/events")).events.length, 0);
   const logs = await docker(["logs", server.name]);
   for (const key of [adminKey, project.public_key, project.secret_key]) assert.ok(!logs.includes(key));
 });

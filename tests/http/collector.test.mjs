@@ -1653,17 +1653,17 @@ test("project origins update live, merge shared origins and persist without chan
   const send = origin => projectPost(server, live.public_key, sdkEvents()[0], { origin });
   assert.equal((await send("https://chunkify.dev")).status, 201);
   assert.equal((await send("https://customer.example")).status, 403);
-  assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", body: { allowed_origins: [] }, token: live.public_key })).status, 401);
+  assert.equal((await projectApi(server, "", { method: "PATCH", body: { allowed_origins: [] }, token: live.public_key })).status, 401);
   for (const body of [{ allowed_origins: null }, { allowed_origins: "https://customer.example" },
     { allowed_origins: ["https://customer.example/"] }, { allowed_origins: ["*"] },
     { allowed_origins: [], project_id: "default" }]) {
-    assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", body, token: live.secret_key })).status, 400);
+    assert.equal((await projectApi(server, "", { method: "PATCH", body, token: live.secret_key })).status, 400);
   }
-  const update = origins => projectApi(server, "/allowed-origins", { method: "PUT", body: { allowed_origins: origins }, token: live.secret_key });
+  const update = origins => projectApi(server, "", { method: "PATCH", body: { allowed_origins: origins }, token: live.secret_key });
   const response = await update(["https://customer.example", "https://customer.example"]);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await response.json(), { project_id: live.project_id, allowed_origins: ["https://customer.example"],
+  assert.deepEqual(await response.json(), { project_id: live.project_id, name: "live", allowed_origins: ["https://customer.example"],
     effective_allowed_origins: ["https://chunkify.dev", "https://customer.example"], restart_required: false });
   assert.equal((await send("https://customer.example")).status, 201);
   assert.equal((await send("https://old.example")).status, 403);
@@ -1725,7 +1725,7 @@ test("secret keys list and rotate only their own project keys", async t => {
   assert.match(secret, /^ck_secret_[0-9a-f]{64}$/);
   assert.equal((await projectApi(server, "/keys", options)).status, 401);
   assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
-  assert.equal((await projectApi(server, "/allowed-origins", { ...options, method: "PUT", body: { allowed_origins: [] } })).status, 401);
+  assert.equal((await projectApi(server, "", { ...options, method: "PATCH", body: { allowed_origins: [] } })).status, 401);
   await server.stop();
   await server.start();
   assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
@@ -1831,4 +1831,97 @@ test("project creation is disabled without an admin key and validates before sav
   assert.notEqual(api.project_id, cli.project_id);
   assert.equal((await projectCommand(server, ["project", "list"])).length, 3);
   for (const customer of [api, cli]) assert.deepEqual((await server.get("/v1/events", customer.secret_key)).events, []);
+});
+
+test("PATCH project updates only supplied fields and persists both fields atomically", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev" });
+  const customer = await projectCommand(server, ["project", "create", "Customer"]);
+  const update = body => projectApi(server, "", { method: "PATCH", token: customer.secret_key, body });
+  const state = async () => (await projectCommand(server, ["project", "list"])).find(p => p.id === customer.project_id);
+  assert.equal((await projectApi(server, "/allowed-origins", { method: "PUT", token: customer.secret_key,
+    body: { allowed_origins: [] } })).status, 404);
+  for (const token of [customer.public_key, adminKey, "invalid"]) {
+    assert.equal((await projectApi(server, "", { method: "PATCH", token, body: { name: "Forbidden" } })).status, 401);
+  }
+  for (const body of [{}, null, [], { name: "" }, { name: " " }, { name: "x".repeat(129) }, { name: 1 },
+    { name: null, allowed_origins: [] }, { name: "New name", allowed_origins: null },
+    { name: "New name", allowed_origins: ["*"] }, { project_id: "default", name: "Forbidden" }]) {
+    assert.equal((await update(body)).status, 400);
+    assert.equal((await state()).name, "Customer");
+  }
+  let response = await update({ name: "Renamed", allowed_origins: ["https://first.example"] });
+  assert.equal(response.status, 200);
+  component("Project", await response.json());
+  response = await update({ name: "Name only" });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).allowed_origins, ["https://first.example"]);
+  response = await update({ allowed_origins: ["https://second.example"] });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).name, "Name only");
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  await chmod(server.directory, 0o500);
+  try { assert.equal((await update({ name: "Unsaved", allowed_origins: ["https://unsaved.example"] })).status, 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal(await readFile(file, "utf8"), before);
+  const results = await Promise.all([update({ name: "Concurrent name" }), update({ allowed_origins: ["https://customer.example"] })]);
+  assert.ok(results.every(result => result.status === 200));
+  assert.equal((await state()).name, "Concurrent name");
+  assert.deepEqual((await state()).settings.allowed_origins, ["https://customer.example"]);
+  const listing = await projectCommand(server, ["project", "list"]);
+  assert.equal(listing.find(p => p.id === "default").name, "Default project");
+  await server.stop();
+  await server.start();
+  assert.equal((await state()).name, "Concurrent name");
+  assert.deepEqual((await state()).settings.allowed_origins, ["https://customer.example"]);
+  assert.equal((await projectPost(server, customer.public_key, sdkEvents()[0], { origin: "https://customer.example" })).status, 201);
+});
+
+test("DELETE project revokes all keys, preserves retention and isolates other projects", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev" });
+  const customer = await projectCommand(server, ["project", "create", "Deleted customer"]);
+  const extra = await projectCommand(server, ["key", "create", customer.project_id, "secret", "Dashboard"]);
+  const publicKey = await projectCommand(server, ["key", "create", customer.project_id, "public", "Website"]);
+  await projectCommand(server, ["project", "retention", customer.project_id, "60"]);
+  assert.equal((await projectApi(server, "", { method: "PATCH", token: customer.secret_key,
+    body: { allowed_origins: ["https://customer.example"] } })).status, 200);
+  await server.send(sdkEvents()[0]);
+  const remove = (token = customer.secret_key, path = "", body) => projectApi(server, path, { method: "DELETE", token, body });
+  for (const token of [customer.public_key, adminKey, "invalid"]) assert.equal((await remove(token)).status, 401);
+  assert.equal((await remove(customer.secret_key, "?project_id=default")).status, 400);
+  assert.equal((await remove(customer.secret_key, "", { project_id: "default" })).status, 400);
+  await chmod(server.directory, 0o500);
+  try { assert.equal((await remove()).status, 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal((await projectApi(server, "/keys", { token: customer.secret_key })).status, 200);
+  const response = await remove();
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  component("DeletedProject", await response.json());
+  for (const token of [customer.secret_key, extra.key]) {
+    for (const path of ["/v1/events", "/mcp", "/v1/project/keys"]) {
+      assert.equal((await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${token}` } })).status, 401);
+    }
+  }
+  for (const key of [customer.public_key, publicKey.key]) assert.equal((await projectPost(server, key, sdkEvents()[0])).status, 401);
+  assert.equal((await remove()).status, 401);
+  assert.equal((await projectApi(server, "", { method: "PATCH", token: customer.secret_key, body: { name: "Revive" } })).status, 401);
+  const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: { origin: "https://customer.example",
+    "access-control-request-method": "POST" } });
+  assert.equal(preflight.status, 403);
+  let listing = await projectCommand(server, ["project", "list"]);
+  const deleted = listing.find(p => p.id === customer.project_id);
+  assert.equal(deleted.deleted, true);
+  assert.deepEqual(deleted.keys, []);
+  assert.equal(deleted.settings.retention_seconds, 60);
+  assert.notEqual((await server.command(["key", "create", customer.project_id, "secret", "Revive"])).code, 0);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+  await server.stop();
+  await server.start();
+  assert.equal((await remove()).status, 401);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+  listing = await projectCommand(server, ["project", "list"]);
+  assert.equal(listing.find(p => p.id === customer.project_id).deleted, true);
 });

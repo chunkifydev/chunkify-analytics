@@ -18,6 +18,15 @@ try {
   await mkdir(path.join(bundle, 'bin'), { recursive: true });
   await copyFile(binary, path.join(bundle, 'bin/chunkify-analytics'));
   await chmod(path.join(bundle, 'bin/chunkify-analytics'), 0o755);
+  const library = process.platform === 'darwin' ? 'libduckdb.dylib' : 'libduckdb.so';
+  const libraryPath = path.resolve(path.dirname(binary), '../lib', library);
+  try {
+    await mkdir(path.join(bundle, 'lib'), { recursive: true });
+    await copyFile(libraryPath, path.join(bundle, 'lib', library));
+  } catch (error) {
+    // Source builds with bundled-duckdb do not need a separate shared library.
+    if (error.code !== 'ENOENT') throw error;
+  }
   // Explicit files only: custom --data-dir paths or local files can live anywhere.
   const sourceFiles = [
     'examples/dashboard/server.cjs', 'examples/dashboard/seed-events.mjs',

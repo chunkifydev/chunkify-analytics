@@ -2,4 +2,5 @@
 # generated version file says v2.0.0-dev88614. Use the release version so
 # signed extensions are downloaded and validated against the matching release.
 [env]
+DUCKDB_LIB_DIR = { value = "target/lib", relative = true }
 CXXFLAGS = '-DDUCKDB_VERSION="v2.0.0" -DDUCKDB_PATCH_VERSION="0"'

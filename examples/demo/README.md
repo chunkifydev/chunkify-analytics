@@ -5,17 +5,18 @@ Docker is not required.
 
 ## Build and start
 
-You need Node.js 24, Rust 1.99.0 and a C++17 compiler. See the
+You need Node.js 24, Rust 1.99.0 and your platform's C build tools. See the
 [installation guide](../../README.md#install-without-docker) for build requirements.
 From the repository root:
 
 ```sh
 npm ci
+sh scripts/install-duckdb.sh
 cargo build --locked
 npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
-The first build compiles DuckDB and can take several minutes. The launcher creates
+The setup script downloads and verifies prebuilt DuckDB 2.0.0. The launcher creates
 separate Demo data and Player test projects, loads 816 synthetic events for 268
 views, and opens the dashboard at `http://127.0.0.1:8787`.
 

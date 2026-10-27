@@ -1,20 +1,16 @@
 # syntax=docker/dockerfile:1
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS build
 WORKDIR /app
+ARG TARGETARCH
+COPY scripts/install-duckdb.sh /tmp/install-duckdb.sh
+RUN sh /tmp/install-duckdb.sh /opt/duckdb "$TARGETARCH"
+ENV DUCKDB_LIB_DIR=/opt/duckdb LD_LIBRARY_PATH=/opt/duckdb
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY .cargo ./.cargo
 COPY src ./src
 COPY openapi.json ./
-ARG TARGETARCH
 ARG BUILD_JOBS=2
-# CI changes this value to run Cargo even when image layers were restored.
-# Unlike --no-cache, this preserves the dependency cache mounts.
-ARG CI_BUILD_ID=local
-RUN --mount=type=cache,id=collector-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=collector-target-${TARGETARCH},target=/app/target \
-    printf 'Cargo build check: %s\n' "$CI_BUILD_ID" \
-    && cargo clean --release --package chunkify-analytics \
-    && cargo build --locked --release --jobs "$BUILD_JOBS" \
+RUN cargo build --locked --release --jobs "$BUILD_JOBS" \
     && cp target/release/chunkify-analytics /usr/local/bin/chunkify-analytics
 
 FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
@@ -31,6 +27,8 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin collector \
     && install -d -m 0700 -o 10001 -g 10001 /data
 COPY --from=build /usr/local/bin/chunkify-analytics /usr/local/bin/
+COPY --from=build /opt/duckdb/libduckdb.so /usr/local/lib/
+RUN ldconfig
 ENV COLLECTOR_DATA_DIR=/data COLLECTOR_BIND=0.0.0.0:4174
 USER 10001:10001
 WORKDIR /data

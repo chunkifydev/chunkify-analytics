@@ -1,7 +1,7 @@
 # Development and testing
 
-Use Rust 1.99.0, a C++17 compiler, and Node.js 24. The collector embeds DuckDB;
-its first build can take substantially longer than later builds. The lockfiles
+Use Rust 1.99.0, your platform's C build tools, and Node.js 24. Install the
+prebuilt DuckDB library once with `sh scripts/install-duckdb.sh`. The lockfiles
 pin Rust and JavaScript dependencies.
 
 ## Run the checks
@@ -49,14 +49,28 @@ Without an endpoint, remote tests skip; the custom local-path test still runs.
 
 ## DuckDB build and extensions
 
-The pinned `libduckdb-sys` 1.20000.0 bundles DuckDB's exact v2.0.0 release commit,
-`d54cbbe3df17e8e5ce68312f483b4155836112aa`, but its generated version file calls
-it `v2.0.0-dev88614`. `.cargo/config.toml` sets the release version macros so
-extension lookup and validation use the matching official signed release.
-Keep those defines when overriding `CXXFLAGS`. Recheck this workaround when
-updating the dependency. Parquet is bundled into the binary; S3 startup downloads
-`httpfs` and, for default credentials, `aws` into `data_dir/extensions`.
-Signature and version checks remain enabled.
+Local builds, CI, and Docker link the official DuckDB 2.0.0 shared library.
+The setup script supports Linux amd64/arm64 and macOS Intel/Apple Silicon,
+verifies the release archive's pinned SHA-256 checksum, and installs it under
+`target/lib`. Cargo reads that path from `.cargo/config.toml`. Executables look
+for DuckDB in `../lib`, relative to their own location, so they can run directly
+without a loader environment variable. Installed executables and demo bundles
+must include the library in that layout.
+
+Keep the installer version and checksums in sync with the `duckdb` dependency
+when upgrading it. To build DuckDB from source instead:
+
+```sh
+cargo build --locked --features bundled-duckdb
+```
+
+That optional feature needs a C++17 compiler and statically includes JSON and
+Parquet. The version defines in `.cargo/config.toml` correct the bundled
+source's `v2.0.0-dev88614` label to `v2.0.0` for signed extension validation.
+Keep those defines when overriding `CXXFLAGS`. The prebuilt library already
+reports the release version. S3 startup downloads `httpfs` and, for default
+credentials, `aws` into `data_dir/extensions`. Signature and version checks
+remain enabled.
 
 ## Docker checks
 
@@ -68,9 +82,11 @@ This builds `chunkify-analytics:test` and exercises the container lifecycle,
 credential management, persistence, and benchmark runner. The image runs as UID
 10001 and supports a read-only root filesystem with writable `/data` and `/tmp`.
 
-
-Docker caches dependencies and build output. An empty cache recompiles DuckDB.
-Linux uses `build.rs` to register statically linked extensions.
+The image includes the shared DuckDB library and requires no host installation.
+The workflow runs on pull requests and pushes to `main`, and cancels older runs
+for the same PR or branch. Docker uses the GitHub Actions layer cache directly;
+it no longer copies Cargo cache mounts into extra images to save them. Source
+changes invalidate the application build layer. Unchanged images reuse it.
 
 ## Run a benchmark
 

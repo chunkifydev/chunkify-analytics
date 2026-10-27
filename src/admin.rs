@@ -25,7 +25,8 @@ fn live_command(command: &str) -> bool {
         "project-list"
             | "project-create"
             | "project-retention"
-            | "project-origins"
+            | "project-update"
+            | "project-delete"
             | "key-create"
             | "key-rotate"
             | "key-revoke"
@@ -60,7 +61,7 @@ fn execute(
             .unwrap_or(config.retention_seconds)
             .into();
     }
-    if request.command == "project-origins" {
+    if request.command == "project-update" {
         let origins: Vec<String> = serde_json::from_value(output["allowed_origins"].clone())?;
         output["effective_allowed_origins"] = serde_json::json!(projects::effective_origins(
             &config.allowed_origins,
@@ -86,7 +87,7 @@ fn execute(
                 crate::retention::Policy::new(config.retention_seconds, &projects::projects(&next));
         }
         if let Some(registry) = registry {
-            if request.command == "project-origins" {
+            if request.command == "project-update" {
                 registry.replace_origins(
                     &request.args[0],
                     serde_json::from_value(output["effective_allowed_origins"].clone())?,
@@ -111,7 +112,8 @@ pub struct Controller {
 }
 
 pub enum ProjectAction {
-    Origins(Vec<String>),
+    Update(projects::Update),
+    Delete,
     Keys,
     RotateKey(String),
 }
@@ -143,7 +145,12 @@ impl Controller {
         use crate::api::ApiError;
         self.authorize_admin(secret)?;
         let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
-        if projects::projects(&keys).len() >= projects::MAX_PROJECTS {
+        if projects::projects(&keys)
+            .iter()
+            .filter(|project| !project.deleted)
+            .count()
+            >= projects::MAX_PROJECTS
+        {
             return Err(ApiError(
                 axum::http::StatusCode::CONFLICT,
                 "Project limit reached".into(),
@@ -195,11 +202,15 @@ impl Controller {
                     serde_json::json!({"project_id": id, "keys": project.keys.iter().map(|key| serde_json::json!({"id": key.id, "name": key.name, "permission": key.permission})).collect::<Vec<_>>() }),
                 );
             }
-            ProjectAction::Origins(origins) => Request {
-                command: "project-origins".into(),
+            ProjectAction::Delete => Request {
+                command: "project-delete".into(),
+                args: vec![id],
+            },
+            ProjectAction::Update(update) => Request {
+                command: "project-update".into(),
                 args: vec![
                     id,
-                    serde_json::to_string(&origins).map_err(|_| ApiError::internal())?,
+                    serde_json::to_string(&update).map_err(|_| ApiError::internal())?,
                 ],
             },
             ProjectAction::RotateKey(key) => {
@@ -645,6 +656,79 @@ mod tests {
         assert!(updated.admit(1).is_err());
         drop(permit);
         assert!(updated.admit(1).is_ok());
+    }
+
+    #[test]
+    fn deletion_revokes_default_keys_and_preserves_data_until_project_expiration() {
+        let mut fixture = Fixture::new();
+        Arc::get_mut(&mut fixture.config).unwrap().retention_seconds = 0;
+        execute(
+            &fixture.config,
+            &mut fixture.keys,
+            Some(&fixture.registry),
+            &request("project-retention", &["default", "10"]),
+        )
+        .unwrap();
+        let mut db = duckdb::Connection::open(fixture.config.database_path()).unwrap();
+        db.execute_batch(
+            "CREATE TABLE events(project_id VARCHAR, event_id VARCHAR, received_at_ms BIGINT);
+            CREATE TABLE event_otlp(project_id VARCHAR, event_id VARCHAR);
+            INSERT INTO events VALUES ('default', 'retained', 1000);
+            INSERT INTO event_otlp VALUES ('default', 'retained');",
+        )
+        .unwrap();
+        let controller = Controller::new(
+            fixture.config.clone(),
+            fixture.registry.clone(),
+            fixture.keys.clone(),
+        );
+        let result = controller
+            .project(&fixture.keys.secret_key, ProjectAction::Delete)
+            .ok()
+            .unwrap();
+        assert_eq!(result["deleted"], true);
+        assert_eq!(result["restart_required"], false);
+        assert!(
+            fixture
+                .registry
+                .authorize(&fixture.keys.public_key, projects::Permission::Public)
+                .is_err()
+        );
+        assert!(
+            fixture
+                .registry
+                .authorize(&fixture.keys.secret_key, projects::Permission::Secret)
+                .is_err()
+        );
+        let saved = fixture.config.keys().unwrap();
+        assert!(saved.projects.as_ref().unwrap()[0].deleted);
+        assert!(saved.projects.as_ref().unwrap()[0].keys.is_empty());
+        let restored = Registry::new(&saved, &fixture.config).unwrap();
+        assert!(
+            restored
+                .authorize(&saved.secret_key, projects::Permission::Secret)
+                .is_err()
+        );
+        let policy = restored.retention.read().unwrap();
+        assert_eq!(policy.purge(&mut db, 11000).unwrap(), 0);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM events", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(policy.purge(&mut db, 11001).unwrap(), 1);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM event_otlp", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert!(
+            controller
+                .project(&fixture.keys.secret_key, ProjectAction::Delete)
+                .is_err()
+        );
     }
 
     #[test]

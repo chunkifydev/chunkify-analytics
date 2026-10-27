@@ -88,9 +88,60 @@ pub struct Settings {
     pub queue_bytes: Option<usize>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Update {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub name: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub allowed_origins: Option<Vec<String>>,
+}
+
+fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+impl Update {
+    pub fn validate(&mut self) -> Result<(), String> {
+        if self.name.is_none() && self.allowed_origins.is_none() {
+            return Err("Provide name or allowed_origins".into());
+        }
+        if let Some(name) = &self.name {
+            validate_name(name)?;
+        }
+        if let Some(origins) = &mut self.allowed_origins {
+            normalize_origins(origins)?;
+        }
+        Ok(())
+    }
+}
+
+pub fn normalize_origins(origins: &mut Vec<String>) -> Result<(), String> {
+    for origin in origins.iter() {
+        crate::config::validate_origin(origin)?;
+    }
+    origins.sort();
+    origins.dedup();
+    Ok(())
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
+    #[serde(default)]
+    pub deleted: bool,
     pub id: String,
     pub name: String,
     pub keys: Vec<Credential>,
@@ -101,6 +152,7 @@ pub struct Project {
 pub fn projects(keys: &Keys) -> Vec<Project> {
     keys.projects.clone().unwrap_or_else(|| {
         vec![Project {
+            deleted: false,
             id: default_project(),
             name: "Default project".into(),
             settings: Settings::default(),
@@ -145,14 +197,17 @@ pub fn validate_name(name: &str) -> Result<(), String> {
 
 pub fn validate(projects: &[Project]) -> Result<(), String> {
     if projects.is_empty()
-        || projects.len() > MAX_PROJECTS
+        || projects.iter().filter(|project| !project.deleted).count() > MAX_PROJECTS
         || !projects.iter().any(|p| p.id == DEFAULT_PROJECT)
     {
-        return Err("Expected 1..1024 projects including default".into());
+        return Err("Expected default and at most 1024 active projects".into());
     }
     let mut ids = HashSet::new();
     let mut hashes = HashSet::new();
     for project in projects {
+        if project.deleted && !project.keys.is_empty() {
+            return Err("Deleted projects cannot have keys".into());
+        }
         validate_id(&project.id)?;
         validate_name(&project.name)?;
         if !ids.insert(&project.id) {
@@ -333,10 +388,12 @@ impl Registry {
     // or rotating keys. New projects receive a share of the installation limits.
     pub fn replace_keys(&self, keys: &Keys, config: &Config) {
         let next = projects(keys);
-        let count = next.len();
+        let count = next.iter().filter(|project| !project.deleted).count();
         let mut projects = self.projects.write().expect("projects lock");
         let mut credentials = HashMap::new();
-        for project in next {
+        let mut active = HashSet::new();
+        for project in next.into_iter().filter(|project| !project.deleted) {
+            active.insert(project.id.clone());
             let access = projects
                 .entry(project.id.clone())
                 .or_insert_with(|| Arc::new(Access::new(&project, config, count)));
@@ -353,6 +410,7 @@ impl Registry {
                 );
             }
         }
+        projects.retain(|id, _| active.contains(id));
         *self.credentials.write().expect("credentials lock") = credentials;
     }
 
@@ -397,6 +455,16 @@ pub fn effective_origins(shared: &[String], extra: Option<&[String]>) -> Vec<Str
     origins
 }
 
+fn active_project_mut<'a>(
+    projects: &'a mut [Project],
+    id: &str,
+) -> Result<&'a mut Project, &'static str> {
+    projects
+        .iter_mut()
+        .find(|project| project.id == id && !project.deleted)
+        .ok_or("Unknown project")
+}
+
 pub fn apply_command(
     keys: &mut Keys,
     command: &str,
@@ -406,7 +474,7 @@ pub fn apply_command(
     let mut output = serde_json::json!({"restart_required": true});
     match (command, args) {
             ("project-list", []) => {
-                return Ok(serde_json::json!(list.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "settings": p.settings,
+                return Ok(serde_json::json!(list.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "deleted": p.deleted, "settings": p.settings,
                     "keys": p.keys.iter().map(|k| serde_json::json!({"id": k.id, "name": k.name, "permission": k.permission})).collect::<Vec<_>>() })).collect::<Vec<_>>()));
             }
             ("rotate-key", [kind]) => {
@@ -417,7 +485,7 @@ pub fn apply_command(
                 else { keys.secret_key = secret; }
                 // Keep the legacy format until named projects/keys are used.
                 if keys.projects.is_none() { return Ok(output); }
-                let project = list.iter_mut().find(|p| p.id == DEFAULT_PROJECT).ok_or("Missing default project")?;
+                let project = active_project_mut(&mut list, DEFAULT_PROJECT)?;
                 project.keys.retain(|k| k.id != key.id);
                 project.keys.push(key);
             }
@@ -430,43 +498,52 @@ pub fn apply_command(
                 if let Some(origins) = args.get(1) {
                     settings.allowed_origins = Some(serde_json::from_str(origins)?);
                 }
-                list.push(Project { id, name: name.clone(), settings, keys: vec![ingest, project_key] });
+                list.push(Project { id, name: name.clone(), settings, keys: vec![ingest, project_key], deleted: false });
             }
             ("project-rename", [id, name]) => {
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                let project = active_project_mut(&mut list, id)?;
                 project.name = name.clone();
             }
             ("project-retention", [id, value]) => {
                 let seconds = if value == "inherit" { None } else {
                     Some(value.parse::<u64>().map_err(|_| "Expected retention seconds as a non-negative whole number, or inherit")?)
                 };
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                let project = active_project_mut(&mut list, id)?;
                 project.settings.retention_seconds = seconds;
                 output = serde_json::json!({"project_id": id, "retention_seconds": seconds, "restart_required": true});
             }
-            ("project-origins", [id, value]) => {
-                let origins: Vec<String> = serde_json::from_str(value)?;
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
-                project.settings.allowed_origins = Some(origins.clone());
-                output = serde_json::json!({"project_id": id, "allowed_origins": origins, "restart_required": true});
+            ("project-delete", [id]) => {
+                let project = active_project_mut(&mut list, id)?;
+                project.deleted = true;
+                project.keys.clear();
+                // Keep the project and its retention override so stored events expire as before.
+                output = serde_json::json!({"project_id": id, "deleted": true, "restart_required": true});
+            }
+            ("project-update", [id, value]) => {
+                let mut update: Update = serde_json::from_str(value)?;
+                update.validate()?;
+                let project = active_project_mut(&mut list, id)?;
+                if let Some(name) = update.name { project.name = name; }
+                if let Some(origins) = update.allowed_origins { project.settings.allowed_origins = Some(origins); }
+                output = serde_json::json!({"project_id": id, "name": project.name, "allowed_origins": project.settings.allowed_origins.clone().unwrap_or_default(), "restart_required": true});
             }
             ("project-configure", [id, file]) => {
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                let project = active_project_mut(&mut list, id)?;
                 project.settings = serde_json::from_slice(&std::fs::read(file)?)?;
             }
             ("key-create", [id, kind, name]) => {
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                let project = active_project_mut(&mut list, id)?;
                 let (key, secret) = credential(name, Permission::parse(kind)?);
                 output = serde_json::json!({"project_id": id, "key_id": key.id, "key": secret, "permission": key.permission, "restart_required": true});
                 project.keys.push(key);
             }
             ("key-revoke", [id, key_id]) => {
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                let project = active_project_mut(&mut list, id)?;
                 let index = project.keys.iter().position(|k| &k.id == key_id).ok_or("Unknown key")?;
                 project.keys.remove(index);
             }
             ("key-rotate", [id, key_id]) => {
-                let project = list.iter_mut().find(|p| &p.id == id).ok_or("Unknown project")?;
+                let project = active_project_mut(&mut list, id)?;
                 let old = project.keys.iter_mut().find(|k| &k.id == key_id).ok_or("Unknown key")?;
                 let (new, secret) = credential(&old.name, old.permission);
                 old.hash = new.hash;

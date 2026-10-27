@@ -4,7 +4,7 @@
   "info": {
     "title": "Chunkify analytics collector API",
     "version": "1.1.0",
-    "description": "Collect playback events, query analytics, and manage origins and keys for your project.",
+    "description": "Collect playback events, query analytics, and manage your project.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -1883,152 +1883,6 @@
         }
       }
     },
-    "/v1/project/allowed-origins": {
-      "put": {
-        "operationId": "updateProjectOrigins",
-        "summary": "Update project origins",
-        "description": "Replace this project's additional origins. Shared TOML origins stay allowed. Changes apply immediately.",
-        "tags": [
-          "Projects"
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ProjectOriginsRequest"
-              },
-              "example": {
-                "allowed_origins": [
-                  "https://customer.example"
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Origins saved and active.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ProjectOrigins"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid origins or request fields.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid secret key.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Request body exceeds the size limit.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "415": {
-            "description": "Expected uncompressed JSON.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "The change could not be saved.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The service is temporarily unavailable.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/project/keys": {
       "get": {
         "operationId": "listProjectKeys",
@@ -2386,6 +2240,248 @@
           }
         }
       }
+    },
+    "/v1/project": {
+      "patch": {
+        "operationId": "updateProject",
+        "summary": "Update your project",
+        "description": "Update the name or additional origins of your project. Omitted fields stay unchanged.",
+        "tags": [
+          "Projects"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectUpdate"
+              },
+              "example": {
+                "name": "Customer website",
+                "allowed_origins": [
+                  "https://customer.example"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Project updated.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid name, origins or request fields.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body exceeds the size limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Expected uncompressed JSON.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The change could not be saved.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Projects"
+        ],
+        "operationId": "deleteProject",
+        "summary": "Delete your project",
+        "description": "Revoke all project keys. Stored events remain until their retention expires.",
+        "responses": {
+          "200": {
+            "description": "Project deleted and all its keys revoked.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeletedProject"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Delete requests accept no body or query parameters.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The change could not be saved.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2399,7 +2495,7 @@
       "secretKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Secret key starting with ck_secret_. Reads analytics and manages origins and keys in one project. Keep it on your backend."
+        "description": "Secret key starting with ck_secret_. Reads analytics and manages one project. Keep it on your backend."
       },
       "adminKey": {
         "type": "http",
@@ -4995,56 +5091,6 @@
         },
         "description": "Observed watch time and end-of-media for the same start cohort as summary. Missing delivery can undercount both."
       },
-      "ProjectOriginsRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "allowed_origins": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Additional project origins. Shared TOML origins are always included."
-          }
-        },
-        "required": [
-          "allowed_origins"
-        ]
-      },
-      "ProjectOrigins": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "project_id": {
-            "type": "string"
-          },
-          "allowed_origins": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "effective_allowed_origins": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "Combined shared and project origins."
-          },
-          "restart_required": {
-            "const": false
-          },
-          "warning": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "project_id",
-          "allowed_origins",
-          "effective_allowed_origins",
-          "restart_required"
-        ]
-      },
       "ProjectKey": {
         "type": "object",
         "additionalProperties": false,
@@ -5180,6 +5226,97 @@
           "name",
           "public_key",
           "secret_key",
+          "restart_required"
+        ]
+      },
+      "ProjectUpdate": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional project origins. Shared TOML origins are always included."
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "name"
+            ]
+          },
+          {
+            "required": [
+              "allowed_origins"
+            ]
+          }
+        ]
+      },
+      "Project": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "effective_allowed_origins": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Combined shared and project origins."
+          },
+          "restart_required": {
+            "const": false
+          },
+          "warning": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "allowed_origins",
+          "effective_allowed_origins",
+          "restart_required",
+          "name"
+        ]
+      },
+      "DeletedProject": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "project_id": {
+            "type": "string"
+          },
+          "deleted": {
+            "const": true
+          },
+          "restart_required": {
+            "const": false
+          },
+          "warning": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "deleted",
           "restart_required"
         ]
       }

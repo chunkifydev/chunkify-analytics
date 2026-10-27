@@ -102,6 +102,7 @@ mod tests {
 
     fn project(id: &str, seconds: Option<u64>) -> Project {
         Project {
+            deleted: false,
             id: id.into(),
             name: id.into(),
             keys: Vec::new(),

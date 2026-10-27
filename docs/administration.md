@@ -113,8 +113,7 @@ project ID alongside your customer record. The project is ready immediately.
 `name` is required, with 1 to 128 characters. Names can repeat. `allowed_origins`
 is optional and adds to the shared TOML origins. Supplying an ID is rejected.
 Project secret keys cannot create projects. The admin key does not grant access
-to project analytics or MCP. The installation supports up to 1024 projects,
-including the initial default project.
+to project analytics or MCP. The installation supports up to 1024 active projects.
 
 ## Live project API
 
@@ -123,25 +122,43 @@ It can manage only that project.
 
 | Endpoint | Use |
 | --- | --- |
-| `PUT /v1/project/allowed-origins` | Replace additional origins without restarting. |
+| `PATCH /v1/project` | Update the name or additional origins without restarting. |
+| `DELETE /v1/project` | Delete this project and revoke all its keys. |
 | `GET /v1/project/keys` | List key IDs, names and types. |
 | `POST /v1/project/keys/{key_id}/rotate` | Replace a key and return its new value. |
 
 For example, keep `https://chunkify.dev` in TOML and add a customer's website:
 
 ```sh
-curl --request PUT http://127.0.0.1:4174/v1/project/allowed-origins \
+curl --request PATCH http://127.0.0.1:4174/v1/project \
   -H "Authorization: Bearer $SECRET_KEY" \
   -H 'Content-Type: application/json' \
   --data '{"allowed_origins":["https://customer.example"]}'
 ```
 
 Both origins then work for this project. Other projects keep their own lists.
-Send `[]` to remove the additions. Changes are saved before they take effect.
+Supply `name` to rename the project. Omitted fields stay unchanged; send
+`allowed_origins: []` to clear additions. Empty requests and null fields are
+rejected. Changes are saved together before they take effect.
 
 Rotation invalidates the old key immediately. Save the returned `key` value;
 key listings never reveal it. Rotating the secret key used by the request means
 subsequent calls must use its replacement.
+
+## Delete a project
+
+```sh
+curl --request DELETE http://127.0.0.1:4174/v1/project \
+  -H "Authorization: Bearer $SECRET_KEY"
+```
+
+All of the project's public and secret keys stop working. Other projects are
+unaffected. Requests already authenticated may finish.
+
+Stored events expire under the project's existing retention policy. Unlimited
+retention keeps them indefinitely. The project record remains marked `deleted`
+in `project list` to preserve that policy. Deleted projects cannot receive new
+keys and do not count toward the active project limit.
 
 ## Retention
 

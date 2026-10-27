@@ -23,6 +23,7 @@ fn live_command(command: &str) -> bool {
     matches!(
         command,
         "project-list"
+            | "project-create"
             | "project-retention"
             | "project-origins"
             | "key-create"
@@ -91,7 +92,7 @@ fn execute(
                     serde_json::from_value(output["effective_allowed_origins"].clone())?,
                 );
             } else if request.command != "project-retention" {
-                registry.replace_keys(&next);
+                registry.replace_keys(&next, config);
             }
             output["restart_required"] = false.into();
         }
@@ -116,6 +117,49 @@ pub enum ProjectAction {
 }
 
 impl Controller {
+    pub fn authorize_admin(&self, secret: &str) -> std::result::Result<(), crate::api::ApiError> {
+        use crate::api::ApiError;
+        let expected = self.config.admin_key_hash.as_ref().ok_or_else(|| {
+            ApiError(
+                axum::http::StatusCode::NOT_FOUND,
+                "Project creation is disabled".into(),
+            )
+        })?;
+        if *expected != projects::hash(secret) {
+            return Err(ApiError(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Missing or invalid admin key".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn create_project(
+        &self,
+        secret: &str,
+        name: String,
+        origins: Vec<String>,
+    ) -> std::result::Result<Value, crate::api::ApiError> {
+        use crate::api::ApiError;
+        self.authorize_admin(secret)?;
+        let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
+        if projects::projects(&keys).len() >= projects::MAX_PROJECTS {
+            return Err(ApiError(
+                axum::http::StatusCode::CONFLICT,
+                "Project limit reached".into(),
+            ));
+        }
+        let request = Request {
+            command: "project-create".into(),
+            args: vec![
+                name,
+                serde_json::to_string(&origins).map_err(|_| ApiError::internal())?,
+            ],
+        };
+        execute(&self.config, &mut keys, Some(&self.registry), &request)
+            .map_err(|_| ApiError::internal())
+    }
+
     fn new(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Self {
         Self {
             config,
@@ -564,6 +608,23 @@ mod tests {
             .unwrap()
             .project;
         let permit = access.admit(access.queue_bytes).ok().unwrap();
+        let created = execute(
+            &fixture.config,
+            &mut fixture.keys,
+            Some(&fixture.registry),
+            &request("project-create", &["New customer"]),
+        )
+        .unwrap();
+        assert_eq!(created["restart_required"], false);
+        let customer = fixture
+            .registry
+            .authorize(
+                created["public_key"].as_str().unwrap(),
+                projects::Permission::Public,
+            )
+            .ok()
+            .unwrap();
+        assert_eq!(customer.project.id, created["project_id"]);
         let output = execute(
             &fixture.config,
             &mut fixture.keys,
@@ -653,7 +714,7 @@ mod tests {
         for body in [
             "invalid".into(),
             "x".repeat(16385),
-            serde_json::to_string(&request("project-create", &["blocked"])).unwrap(),
+            serde_json::to_string(&request("project-rename", &["default", "blocked"])).unwrap(),
             r#"{"command":"project-list","args":[],"unexpected":true}"#.into(),
         ] {
             let mut stream = UnixStream::connect(&path).await.unwrap();

@@ -52,7 +52,7 @@ async function prepareData(dir, binary, env, signal) {
     await run(['init']);
     const state = { version: 1, seedDate: new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString(), seeded: false, projects: {} };
     for (const [id, name] of [['demo', 'Synthetic demo data'], ['player', 'Player test']]) {
-      state.projects[id] = JSON.parse(await run(['project', 'create', id, '--name', name]));
+      state.projects[id] = JSON.parse(await run(['project', 'create', name]));
     }
     await saveState(staging, state);
     signal.throwIfAborted();

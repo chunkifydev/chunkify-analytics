@@ -10,6 +10,7 @@ use uuid::Uuid;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct Config {
+    pub admin_key_hash: Option<String>,
     pub backend: crate::backend::Backend,
     pub data_dir: PathBuf,
     pub mcp_enabled: bool,
@@ -165,6 +166,11 @@ impl Config {
             return Err("S3 storage uses a single worker; disable read_worker".into());
         }
         Ok(Self {
+            admin_key_hash: settings
+                .var("admin_key")
+                .ok()
+                .filter(|key| !key.trim().is_empty())
+                .map(|key| crate::projects::hash(&key)),
             backend,
             mcp_enabled: settings
                 .var("mcp.enabled")

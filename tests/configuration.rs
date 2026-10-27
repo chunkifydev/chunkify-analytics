@@ -159,6 +159,7 @@ fn unknown_fields_types_and_missing_files_fail_without_echoing_configuration() {
     );
     for source in [
         "unknown = 'private-test-secret'",
+        "admin_key = 'private-test-secret'",
         "[server]\nbnid = 'private-test-secret'",
         "[retention]\nseconds = 'private-test-secret'",
         "[mcp]\nsecret_key = 'private-test-secret",

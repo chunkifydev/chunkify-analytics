@@ -104,6 +104,7 @@ pub fn router(
         .merge(mcp)
         .route("/healthz", get(health))
         .route("/v1/ingestion", get(ingestion_status))
+        .route("/v1/projects", post(create_project))
         .route("/v1/project/allowed-origins", put(project_origins))
         .route("/v1/project/keys", get(project_keys))
         .route("/v1/project/keys/{key_id}/rotate", post(rotate_project_key))
@@ -166,7 +167,10 @@ async fn access(
     let mcp = app.mcp_enabled && request.uri().path() == "/mcp";
     let ingest = matches!(request.uri().path(), "/v1/events" | "/v1/logs")
         && matches!(*request.method(), Method::POST | Method::OPTIONS);
-    let resolved = if ingest && request.method() != Method::OPTIONS {
+    let resolved = if request.uri().path() == "/v1/projects" {
+        app.admin.authorize_admin(&bearer(request.headers()))?;
+        None
+    } else if ingest && request.method() != Method::OPTIONS {
         Some(
             app.projects.authorize(
                 request
@@ -193,7 +197,7 @@ async fn access(
             Some(origin)
                 if origin.to_str().is_ok_and(|s| {
                     resolved.as_ref().map_or_else(
-                        || app.projects.projects.values().any(|p| p.allows_origin(s)),
+                        || app.projects.allows_origin(s),
                         |r| r.project.allows_origin(s),
                     )
                 }) =>
@@ -411,6 +415,40 @@ async fn project_action(
         .map(Json)
 }
 
+fn normalize_origins(mut origins: Vec<String>) -> Result<Vec<String>, ApiError> {
+    for origin in &origins {
+        crate::config::validate_origin(origin).map_err(ApiError::bad)?;
+    }
+    origins.sort();
+    origins.dedup();
+    Ok(origins)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NewProject {
+    name: String,
+    #[serde(default)]
+    allowed_origins: Vec<String>,
+}
+
+async fn create_project(
+    State(app): State<App>,
+    request: Request,
+) -> Result<impl IntoResponse, ApiError> {
+    let token = bearer(request.headers());
+    let body: NewProject =
+        serde_json::from_value(read_json(request, app.max_body_bytes, false).await?)
+            .map_err(|_| ApiError::bad("Expected a name and optional allowed_origins"))?;
+    crate::projects::validate_name(&body.name).map_err(ApiError::bad)?;
+    let origins = normalize_origins(body.allowed_origins)?;
+    let result =
+        tokio::task::spawn_blocking(move || app.admin.create_project(&token, body.name, origins))
+            .await
+            .map_err(|_| ApiError::unavailable())??;
+    Ok((StatusCode::CREATED, Json(result)))
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Origins {
@@ -425,12 +463,7 @@ async fn project_origins(
     let body: Origins =
         serde_json::from_value(read_json(request, app.max_body_bytes, false).await?)
             .map_err(|_| ApiError::bad("Expected allowed_origins as an array of origins"))?;
-    for origin in &body.allowed_origins {
-        crate::config::validate_origin(origin).map_err(ApiError::bad)?;
-    }
-    let mut origins = body.allowed_origins;
-    origins.sort();
-    origins.dedup();
+    let origins = normalize_origins(body.allowed_origins)?;
     project_action(app, token, crate::admin::ProjectAction::Origins(origins)).await
 }
 

@@ -126,10 +126,17 @@ function s3Settings() {
 test("S3 stores repeated events, preserves OTLP, isolates projects and survives task replacement", {
   skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
-  const app = await installation(t, s3Settings());
+  const adminKey = `s3-admin-${randomUUID()}`;
+  const app = await installation(t, s3Settings(), 0, { COLLECTOR_ADMIN_KEY: adminKey });
   await app.command(["init"]);
-  const live = JSON.parse(await app.command(["project", "create", "live"]));
   await app.start();
+  const created = await fetch(`${app.url}/v1/projects`, { method: "POST", headers: {
+    authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Live website" }) });
+  assert.equal(created.status, 201, await created.clone().text());
+  const live = await created.json();
+  assert.match(live.project_id, /^[0-9a-f-]{36}$/);
+  assert.equal(live.restart_required, false);
   assert.deepEqual((await app.get("/v1/events")).events, []);
   assert.equal((await app.get("/v1/summary")).views, 0);
   const dashboard = JSON.parse(await app.command(["key", "create", "default", "secret", "S3 dashboard"]));
@@ -142,7 +149,7 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   for (const event of records) await adapter.send(event);
   let liveRows = (await app.get("/v1/events", live.secret_key)).events;
   assert.equal(liveRows.length, records.length);
-  assert.ok(liveRows.every(row => row.project_id === "live" && row.otlp));
+  assert.ok(liveRows.every(row => row.project_id === live.project_id && row.otlp));
   for (const path of ["/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos"]) {
     assert.deepEqual(await app.get(path), await app.get(path, live.secret_key));
   }
@@ -156,7 +163,8 @@ test("S3 stores repeated events, preserves OTLP, isolates projects and survives 
   await app.replaceTask();
   assert.equal(app.keys.public_key, originalKeys.public_key);
   assert.equal(app.keys.secret_key, originalKeys.secret_key);
-  assert.deepEqual(app.keys.projects.find(project => project.id === "live").settings.allowed_origins, ["https://s3-customer.example"]);
+  assert.equal(JSON.stringify(app.keys).includes(adminKey), false);
+  assert.deepEqual(app.keys.projects.find(project => project.id === live.project_id).settings.allowed_origins, ["https://s3-customer.example"]);
   assert.equal((await fetch(`${app.url}/v1/project/keys`, { headers: { authorization: `Bearer ${oldSecret}` } })).status, 401);
   assert.equal((await app.get("/v1/events", dashboard.key)).events.length, records.length + 1);
   const next = await app.get(`/v1/events?limit=100&cursor=${encodeURIComponent(first.next_cursor)}`);

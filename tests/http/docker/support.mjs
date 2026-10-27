@@ -18,7 +18,7 @@ async function containerLogs(name) {
 }
 
 // Docker CLI and public HTTP interfaces only. Never open the database directly.
-export async function containerCollector({ settings = {}, resources = [], seed } = {}) {
+export async function containerCollector({ settings = {}, resources = [], environment = {}, seed } = {}) {
   const volume = `chunkify-collector-test-${randomUUID()}`;
   let name;
   const server = {
@@ -29,6 +29,7 @@ export async function containerCollector({ settings = {}, resources = [], seed }
       await docker(["run", "-d", "--name", name, "--read-only", "--tmpfs", "/tmp:rw,nosuid,noexec,size=64m",
         "--cap-drop=ALL", "--security-opt=no-new-privileges", "-p", "127.0.0.1::4174",
         "--mount", `type=volume,src=${volume},dst=/data`,
+        ...Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
         ...resources, image]);
       const address = await docker(["port", name, "4174/tcp"]);
       server.url = `http://${address}`;

@@ -1,6 +1,7 @@
 import { sdkDist } from "./sdk-path.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,6 +14,7 @@ import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { createOtlpAdapter } from "@chunkify/analytics/otlp";
+import { component } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
@@ -60,7 +62,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, "data_dir": directory, "server.bind": "127.0.0.1:0",
+  const env = { ...process.env, COLLECTOR_ADMIN_KEY: undefined, "data_dir": directory, "server.bind": "127.0.0.1:0",
     "server.allowed_origins": "https://player.example", "server.store_ip": "true",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);
@@ -80,7 +82,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
     },
     async start(executable = binary, overrides = {}) {
       await writeConfig(directory, { ...env, ...overrides });
-      child = spawn(executable, ["serve"], { cwd: directory, env: collectorEnvironment(env), stdio: "pipe" });
+      child = spawn(executable, ["serve"], { cwd: directory, env: collectorEnvironment({ ...env, ...overrides }), stdio: "pipe" });
       // Drain stdout/stderr as well as waiting for the process to exit.
       exited = once(child, "close");
       let output = "";
@@ -1252,11 +1254,11 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
     "batch.insert_mode": mode === "row" ? "row" : "bulk",
     "batch.delay_ms": "100" });
   await server.stop();
-  const live = await projectCommand(server, ["project", "create", "live", "--name", "Production website"]);
-  const second = await projectCommand(server, ["key", "create", "live", "public", "Mobile app"]);
+  const live = await projectCommand(server, ["project", "create", "Production website"]);
+  const second = await projectCommand(server, ["key", "create", live.project_id, "public", "Mobile app"]);
   const list = await projectCommand(server, ["project", "list"]);
-  const firstKey = list.find(p => p.id === "live").keys.find(k => k.permission === "public").id;
-  assert.equal(list.find(p => p.id === "live").name, "Production website");
+  const firstKey = list.find(p => p.id === live.project_id).keys.find(k => k.permission === "public").id;
+  assert.equal(list.find(p => p.id === live.project_id).name, "Production website");
   assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.key)));
   const configuration = await readFile(join(server.directory, "keys.json"), "utf8");
   for (const secret of [live.public_key, live.secret_key, second.key]) assert.ok(!configuration.includes(secret));
@@ -1264,7 +1266,7 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   const events = sdkEvents("shared-video", "shared-viewer");
   events.at(-1).playing_time_ms = 1200;
   // The same identifiers are independent across projects. Body properties never route storage.
-  events[0].project_id = "live";
+  events[0].project_id = live.project_id;
   const liveEvents = structuredClone(events);
   liveEvents[0].project_id = "default";
   liveEvents.at(-1).playing_time_ms = 5400;
@@ -1284,7 +1286,7 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   assert.equal(defaultRows.length, events.length);
   assert.equal(liveRows.length, events.length);
   assert.ok(defaultRows.every(r => r.project_id === "default" && r.ingest_key_id === "primary-public" && !r.otlp));
-  assert.ok(liveRows.every(r => r.project_id === "live" && r.ingest_key_id === firstKey && r.otlp));
+  assert.ok(liveRows.every(r => r.project_id === live.project_id && r.ingest_key_id === firstKey && r.otlp));
   assert.deepEqual(await server.get("/v1/summary"), { views: 1, unique_viewers: 1, total_playing_time_ms: 1200 });
   assert.deepEqual(await server.get("/v1/summary", live.secret_key), { views: 1, unique_viewers: 1, total_playing_time_ms: 5400 });
   assert.equal((await server.get("/v1/videos?viewer_id=shared-viewer", live.secret_key)).videos[0].total_playing_time_ms, 5400);
@@ -1294,12 +1296,12 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   assert.equal(response.status, 400);
   // Cursors are positions, not authorization: even a forged scope cannot leak another project.
   const cursor = JSON.parse(Buffer.from(page.next_cursor, "base64url"));
-  cursor.project_id = "live";
+  cursor.project_id = live.project_id;
   cursor.after = 0;
   cursor.through = Number.MAX_SAFE_INTEGER;
   const forged = Buffer.from(JSON.stringify(cursor)).toString("base64url");
   const forgedPage = await server.get(`/v1/events?cursor=${forged}`, live.secret_key);
-  assert.ok(forgedPage.events.every(r => r.project_id === "live"));
+  assert.ok(forgedPage.events.every(r => r.project_id === live.project_id));
   for (const path of ["/v1/events?project_id=live", "/v1/summary?project_id=live", "/v1/videos?project_id=live"]) {
     response = await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${server.keys.secret_key}` } });
     assert.equal(response.status, 400);
@@ -1307,12 +1309,12 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${live.public_key}` } })).status, 401);
   assert.equal((await projectPost(server, live.secret_key, events[0])).status, 401);
   await server.stop();
-  await projectCommand(server, ["project", "rename", "live", "Customer A — Live"]);
+  await projectCommand(server, ["project", "rename", live.project_id, "Customer A — Live"]);
   await server.start();
   assert.equal((await server.get("/v1/events")).events.length, events.length);
   assert.deepEqual((await server.get("/v1/events", live.secret_key)).events, liveRows);
   await server.stop();
-  assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").name, "Customer A — Live");
+  assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === live.project_id).name, "Customer A — Live");
   await server.start();
   assert.deepEqual((await server.get("/v1/events", live.secret_key)).events, liveRows);
 });
@@ -1321,15 +1323,15 @@ test("project credentials rotate and revoke independently without changing owner
   const server = await collector(t);
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
-  const extra = await projectCommand(server, ["key", "create", "live", "public", "Website"]);
-  const extraRead = await projectCommand(server, ["key", "create", "live", "secret", "Dashboard"]);
+  const extra = await projectCommand(server, ["key", "create", live.project_id, "public", "Website"]);
+  const extraRead = await projectCommand(server, ["key", "create", live.project_id, "secret", "Dashboard"]);
   const events = sdkEvents();
   await server.start();
   assert.equal((await projectPost(server, extra.key, events[0])).status, 201);
   await server.stop();
-  const rotated = await projectCommand(server, ["key", "rotate", "live", extra.key_id]);
+  const rotated = await projectCommand(server, ["key", "rotate", live.project_id, extra.key_id]);
   assert.equal(rotated.key_id, extra.key_id);
-  await projectCommand(server, ["key", "revoke", "live", extraRead.key_id]);
+  await projectCommand(server, ["key", "revoke", live.project_id, extraRead.key_id]);
   await server.start();
   assert.equal((await projectPost(server, extra.key, events[1])).status, 401);
   assert.equal((await projectPost(server, rotated.key, events[1])).status, 201);
@@ -1349,7 +1351,7 @@ test("project retention updates live, preserves other settings, and persists acr
   const live = await projectCommand(server, ["project", "create", "live"]);
   const settings = join(server.directory, "live-settings.json");
   await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], retention_seconds: 60 }));
-  await projectCommand(server, ["project", "configure", "live", settings]);
+  await projectCommand(server, ["project", "configure", live.project_id, settings]);
   await server.start();
   const url = server.url;
   const events = sdkEvents("shared-video");
@@ -1359,29 +1361,29 @@ test("project retention updates live, preserves other settings, and persists acr
     await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   }
   await delay(1200);
-  const result = await projectCommand(server, ["project", "retention", "live", "1"]);
-  assert.deepEqual(result, { project_id: "live", retention_seconds: 1, effective_retention_seconds: 1, restart_required: false });
+  const result = await projectCommand(server, ["project", "retention", live.project_id, "1"]);
+  assert.deepEqual(result, { project_id: live.project_id, retention_seconds: 1, effective_retention_seconds: 1, restart_required: false });
   const deadline = Date.now() + 7000;
   while ((await server.get("/v1/events", live.secret_key)).events.length && Date.now() < deadline) await delay(100);
   assert.equal((await server.get("/v1/events", live.secret_key)).events.length, 0);
   assert.equal((await server.get("/v1/summary", live.secret_key)).total_playing_time_ms, 0);
   assert.equal((await server.get("/v1/events")).events.length, events.length);
   assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 1200);
-  const listed = (await projectCommand(server, ["project", "list"])).find(p => p.id === "live");
+  const listed = (await projectCommand(server, ["project", "list"])).find(p => p.id === live.project_id);
   assert.deepEqual(listed.settings.allowed_origins, ["https://live.example"]);
   assert.equal(listed.effective_retention_seconds, 1);
   assert.equal(server.url, url, "retention change must not restart the HTTP server");
   // A retry after expiration is new data. Disable expiry before resending it.
-  await projectCommand(server, ["project", "retention", "live", "0"]);
+  await projectCommand(server, ["project", "retention", live.project_id, "0"]);
   for (const event of events) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": live.public_key } });
   await delay(2200);
   assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   await server.stop("SIGKILL");
   await server.start();
-  assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === "live").effective_retention_seconds, 0);
+  assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === live.project_id).effective_retention_seconds, 0);
   assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
   // The running server's default is authoritative, even if the CLI has a different environment.
-  const inherited = await server.command(["project", "retention", "live", "inherit"], { "retention.seconds": "1" });
+  const inherited = await server.command(["project", "retention", live.project_id, "inherit"], { "retention.seconds": "1" });
   assert.equal(inherited.code, 0, inherited.stderr);
   assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 0);
   assert.equal(JSON.parse(inherited.stdout).retention_seconds, null);
@@ -1404,15 +1406,15 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   for (const project of projects) await server.sendOtlp(event, { headers: { "X-Chunkify-Ingest-Key": project.public_key } });
   await server.stop();
   for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
-    assert.equal((await projectCommand(server, ["project", "retention", id, seconds])).restart_required, true);
+    assert.equal((await projectCommand(server, ["project", "retention", projects.find(project => project.name === id).project_id, seconds])).restart_required, true);
   }
   await delay(1200);
   await server.start(binary, { "retention.seconds": "1" });
   assert.equal((await server.get("/v1/events")).events.length, 0);
-  for (const project of projects) assert.equal((await server.get("/v1/events", project.secret_key)).events.length, project.project_id === "short" ? 0 : 1);
+  for (const project of projects) assert.equal((await server.get("/v1/events", project.secret_key)).events.length, project.name === "short" ? 0 : 1);
   await server.stop();
   // Removing an override makes existing data eligible under the inherited policy at startup.
-  await projectCommand(server, ["project", "retention", "long", "inherit"]);
+  await projectCommand(server, ["project", "retention", projects[1].project_id, "inherit"]);
   await server.start(binary, { "retention.seconds": "1" });
   assert.equal((await server.get("/v1/events", projects[1].secret_key)).events.length, 0);
   assert.equal((await server.get("/v1/events", projects[2].secret_key)).events.length, 1);
@@ -1449,10 +1451,10 @@ test("project origin policies and rate quotas apply across all of its keys", asy
   const server = await collector(t, { "server.ingest_per_second": "1000" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "live"]);
-  const extra = await projectCommand(server, ["key", "create", "live", "public", "Another integration"]);
+  const extra = await projectCommand(server, ["key", "create", live.project_id, "public", "Another integration"]);
   const settings = join(server.directory, "live-settings.json");
   await writeFile(settings, JSON.stringify({ allowed_origins: ["https://live.example"], ingest_per_second: 2 }));
-  await projectCommand(server, ["project", "configure", "live", settings]);
+  await projectCommand(server, ["project", "configure", live.project_id, settings]);
   await server.start();
   const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
     origin: "https://live.example", "access-control-request-method": "POST", "access-control-request-headers": "x-chunkify-ingest-key,content-type" } });
@@ -1485,8 +1487,8 @@ test("project administration rejects invalid changes without overwriting credent
   const server = await collector(t);
   await server.stop();
   const keyFile = join(server.directory, "keys.json");
-  for (const args of [["project", "create", "bad/id"], ["project", "create", "live", "--name", "   "],
-    ["project", "create", "default"], ["project", "rename", "missing", "New name"], ["key", "create", "default", "admin", "Wrong kind"]]) {
+  for (const args of [["project", "create", ""], ["project", "create", "   "],
+    ["project", "create", "x".repeat(129)], ["project", "rename", "missing", "New name"], ["key", "create", "default", "admin", "Wrong kind"]]) {
     const before = await readFile(keyFile, "utf8");
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
@@ -1562,7 +1564,7 @@ test("live administration serializes concurrent commands and rejects invalid cha
   const before = await readFile(keyFile, "utf8");
   for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "secret", ""],
     ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-public"],
-    ["project", "create", "other"], ["project", "configure", "default", "missing.json"]]) {
+    ["project", "rename", "default", "New name"], ["project", "configure", "default", "missing.json"]]) {
     assert.notEqual((await server.command(args)).code, 0);
     assert.equal(await readFile(keyFile, "utf8"), before);
   }
@@ -1646,7 +1648,7 @@ test("project origins update live, merge shared origins and persist without chan
   const live = await projectCommand(server, ["project", "create", "live"]);
   const file = join(server.directory, "origin-settings.json");
   await writeFile(file, JSON.stringify({ allowed_origins: ["https://old.example"], retention_seconds: 86400, ingest_per_second: 100 }));
-  await projectCommand(server, ["project", "configure", "live", file]);
+  await projectCommand(server, ["project", "configure", live.project_id, file]);
   await server.start();
   const send = origin => projectPost(server, live.public_key, sdkEvents()[0], { origin });
   assert.equal((await send("https://chunkify.dev")).status, 201);
@@ -1661,7 +1663,7 @@ test("project origins update live, merge shared origins and persist without chan
   const response = await update(["https://customer.example", "https://customer.example"]);
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await response.json(), { project_id: "live", allowed_origins: ["https://customer.example"],
+  assert.deepEqual(await response.json(), { project_id: live.project_id, allowed_origins: ["https://customer.example"],
     effective_allowed_origins: ["https://chunkify.dev", "https://customer.example"], restart_required: false });
   assert.equal((await send("https://customer.example")).status, 201);
   assert.equal((await send("https://old.example")).status, 403);
@@ -1673,12 +1675,12 @@ test("project origins update live, merge shared origins and persist without chan
   assert.equal((await send("https://customer.example")).status, 201);
   assert.equal((await send("https://unsaved.example")).status, 403);
   const [updated, created] = await Promise.all([update(["https://next.example"]),
-    server.command(["key", "create", "live", "secret", "Concurrent integration"])]);
+    server.command(["key", "create", live.project_id, "secret", "Concurrent integration"])]);
   assert.equal(updated.status, 200);
   assert.equal(created.code, 0, created.stderr);
   const token = JSON.parse(created.stdout).key;
   assert.equal((await projectApi(server, "/keys", { token })).status, 200);
-  const settings = (await projectCommand(server, ["project", "list"])).find(project => project.id === "live").settings;
+  const settings = (await projectCommand(server, ["project", "list"])).find(project => project.id === live.project_id).settings;
   assert.equal(settings.retention_seconds, 86400);
   assert.equal(settings.ingest_per_second, 100);
   await server.stop();
@@ -1701,7 +1703,7 @@ test("secret keys list and rotate only their own project keys", async t => {
   let response = await projectApi(server, "/keys", options);
   assert.equal(response.status, 200);
   const list = await response.json();
-  assert.equal(list.project_id, "live");
+  assert.equal(list.project_id, live.project_id);
   assert.deepEqual(list.keys.map(key => key.permission).sort(), ["public", "secret"]);
   for (const key of list.keys) assert.deepEqual(Object.keys(key).sort(), ["id", "name", "permission"]);
   assert.equal((await projectApi(server, "/keys", { token: live.public_key })).status, 401);
@@ -1728,4 +1730,105 @@ test("secret keys list and rotate only their own project keys", async t => {
   await server.start();
   assert.equal((await projectApi(server, "/keys", { token: secret })).status, 200);
   assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
+});
+
+async function createProject(server, body, key) {
+  return fetch(`${server.url}/v1/projects`, { method: "POST",
+    headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) },
+    body: JSON.stringify(body) });
+}
+
+test("admin project creation activates isolated projects immediately and persists across restart", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev",
+    "server.ingest_per_second": "1000", "retention.seconds": "0" });
+  const url = server.url;
+  const request = { name: "Production / Europe", allowed_origins: ["https://customer.example", "https://customer.example"] };
+  for (const key of [undefined, "wrong", server.keys.public_key, server.keys.secret_key]) {
+    assert.equal((await createProject(server, request, key)).status, 401);
+  }
+  const response = await createProject(server, request, adminKey);
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("access-control-allow-origin"), null);
+  const project = await response.json();
+  component("CreatedProject", project);
+  assert.match(project.project_id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(project.name, request.name);
+  assert.equal(project.restart_required, false);
+  assert.match(project.public_key, /^ck_public_[0-9a-f]{64}$/);
+  assert.match(project.secret_key, /^ck_secret_[0-9a-f]{64}$/);
+  assert.equal(server.url, url);
+  const event = sdkEvents()[0];
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://customer.example" })).status, 201);
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://chunkify.dev" })).status, 200);
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://wrong.example" })).status, 403);
+  assert.equal((await projectPost(server, server.keys.public_key, event, { origin: "https://customer.example" })).status, 403);
+  assert.deepEqual((await server.get("/v1/events", project.secret_key)).events.map(row => row.project_id), [project.project_id]);
+  assert.deepEqual((await server.get("/v1/events")).events, []);
+  assert.equal((await createProject(server, { name: "Forbidden" }, project.secret_key)).status, 401);
+  for (const path of ["/v1/events", "/v1/project/keys", "/mcp"]) {
+    assert.equal((await fetch(`${server.url}${path}`, { headers: { authorization: `Bearer ${adminKey}` } })).status, 401);
+  }
+  const preflight = await fetch(`${server.url}/v1/events`, { method: "OPTIONS", headers: {
+    origin: "https://customer.example", "access-control-request-method": "POST" } });
+  assert.equal(preflight.status, 204);
+  const sameName = await (await createProject(server, request, adminKey)).json();
+  assert.notEqual(sameName.project_id, project.project_id);
+  assert.deepEqual((await server.get("/v1/events", sameName.secret_key)).events, []);
+  const listing = await projectCommand(server, ["project", "list"]);
+  assert.deepEqual(listing.find(p => p.id === project.project_id).settings.allowed_origins, ["https://customer.example"]);
+  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  for (const secret of [adminKey, project.public_key, project.secret_key]) assert.ok(!stored.includes(secret));
+  await server.stop();
+  await server.start();
+  assert.equal((await server.get("/v1/events", project.secret_key)).events.length, 1);
+  assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
+  assert.equal((await projectPost(server, project.public_key, event, { origin: "https://customer.example" })).status, 200);
+});
+
+test("project creation is disabled without an admin key and validates before saving", async t => {
+  const disabled = await collector(t);
+  assert.equal((await createProject(disabled, { name: "Disabled" }, disabled.keys.secret_key)).status, 404);
+  await disabled.stop();
+  const dotenvKey = `dotenv-${randomUUID()}`;
+  await writeFile(join(disabled.directory, ".env"), `COLLECTOR_ADMIN_KEY=${dotenvKey}\n`, { mode: 0o600 });
+  await disabled.start();
+  assert.equal((await createProject(disabled, { name: "From dotenv" }, dotenvKey)).status, 201);
+  await disabled.stop();
+  const processKey = `process-${randomUUID()}`;
+  await disabled.start(binary, { COLLECTOR_ADMIN_KEY: processKey });
+  assert.equal((await createProject(disabled, { name: "Old key" }, dotenvKey)).status, 401);
+  assert.equal((await createProject(disabled, { name: "Process key" }, processKey)).status, 201);
+  await disabled.stop();
+  await disabled.start(binary, { COLLECTOR_ADMIN_KEY: "" });
+  assert.equal((await createProject(disabled, { name: "Disabled" }, processKey)).status, 404);
+  await disabled.stop();
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey });
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  for (const body of [{}, { name: "" }, { name: "  " }, { name: "x".repeat(129) }, { name: 42 },
+    { name: "Customer", id: "chosen" }, { name: "Customer", project_id: "chosen" },
+    { name: "Customer", allowed_origins: null }, { name: "Customer", allowed_origins: "https://customer.example" },
+    { name: "Customer", allowed_origins: ["*"] }, { name: "Customer", allowed_origins: ["https://customer.example/"] }]) {
+    const result = await createProject(server, body, adminKey);
+    assert.equal(result.status, 400, await result.clone().text());
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+  await chmod(server.directory, 0o500);
+  try { assert.equal((await createProject(server, { name: "Unsaved" }, adminKey)).status, 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal(await readFile(file, "utf8"), before);
+  assert.equal((await projectCommand(server, ["project", "list"])).length, 1);
+  const [apiResponse, cli] = await Promise.all([
+    createProject(server, { name: "API customer" }, adminKey),
+    projectCommand(server, ["project", "create", "CLI customer"]),
+  ]);
+  assert.equal(apiResponse.status, 201);
+  assert.equal(cli.restart_required, false);
+  const api = await apiResponse.json();
+  assert.notEqual(api.project_id, cli.project_id);
+  assert.equal((await projectCommand(server, ["project", "list"])).length, 3);
+  for (const customer of [api, cli]) assert.deepEqual((await server.get("/v1/events", customer.secret_key)).events, []);
 });

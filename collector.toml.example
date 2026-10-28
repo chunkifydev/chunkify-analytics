@@ -22,6 +22,8 @@ backend = "local"
 # See docs/storage.md for setup, expiration and single-writer operation.
 
 [server]
+# External base URL for CSV download links behind an ingress or URL prefix:
+# public_url = "https://analytics.example.com/"
 bind = "127.0.0.1:4174"
 allowed_origins = ["http://localhost:3000"]
 trusted_proxies = []

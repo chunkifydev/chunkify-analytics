@@ -342,3 +342,41 @@ fn s3_environment_overrides_toml_and_validates_addressing() {
         assert!(!error.contains("private-test-token"));
     }
 }
+
+#[test]
+fn public_download_base_rejects_credentials_queries_and_unsupported_schemes() {
+    let fixture = Fixture::new();
+    for url in [
+        "https://analytics.example.com/collector/",
+        "http://localhost:4174",
+    ] {
+        std::fs::write(
+            fixture.0.join("collector.toml"),
+            format!(
+                "server.public_url = {}\n",
+                serde_json::to_string(url).unwrap()
+            ),
+        )
+        .unwrap();
+        assert!(fixture.run(&["config", "check"]).status.success());
+    }
+    for url in [
+        "invalid",
+        "file:///tmp/export",
+        "https://user:private-test@example.com",
+        "https://example.com?key=private-test",
+        "https://example.com/#private-test",
+    ] {
+        std::fs::write(
+            fixture.0.join("collector.toml"),
+            format!(
+                "server.public_url = {}\n",
+                serde_json::to_string(url).unwrap()
+            ),
+        )
+        .unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test"));
+    }
+}

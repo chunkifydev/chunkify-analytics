@@ -8,6 +8,7 @@ mod settings;
 use clap::Parser;
 mod context;
 mod event;
+mod exports;
 mod mcp;
 mod profile;
 mod projects;

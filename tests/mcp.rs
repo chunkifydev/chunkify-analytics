@@ -345,7 +345,7 @@ async fn exercise_project_queries(http: bool) {
     )
     .await;
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 9);
     let names = tools
         .iter()
         .map(|tool| tool.name.as_ref())
@@ -357,7 +357,11 @@ async fn exercise_project_queries(http: bool) {
             "get_metrics",
             "get_timeseries",
             "list_video_metrics",
-            "list_events"
+            "list_events",
+            "list_views",
+            "get_view",
+            "list_dimension_values",
+            "export_data"
         ]
     );
     let metric_schema = &tools
@@ -368,7 +372,7 @@ async fn exercise_project_queries(http: bool) {
     assert_eq!(metric_schema["required"], json!(["kind"]));
     assert_eq!(
         metric_schema["properties"]["kind"]["enum"],
-        json!(["summary", "quality", "engagement"])
+        json!(["summary", "quality", "engagement", "errors"])
     );
     for arguments in [
         json!({}),
@@ -786,7 +790,7 @@ async fn video_pages_accept_a_thousand_rows_while_events_keep_their_smaller_limi
             overview["limits"],
             json!({
                 "default_page_size": 10,
-                "max_page_size": {"get_metrics": 100, "list_events": 100, "list_video_metrics": 1000},
+                "max_page_size": {"get_metrics": 100, "list_events": 100, "list_video_metrics": 1000,"list_views":100,"get_view":100,"list_dimension_values":100},
                 "max_response_bytes": 1048576,
                 "max_filter_json_bytes": 4096,
                 "timeout_seconds": 15,
@@ -1162,7 +1166,7 @@ async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
         .unwrap();
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 5);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 9);
     client.cancel().await.unwrap();
 }
 
@@ -1186,7 +1190,7 @@ async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
         .unwrap();
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 5);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 9);
     client.cancel().await.unwrap();
 }
 
@@ -1279,7 +1283,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
     let collector = Collector::start();
     let created = collector.admin(&["key", "create", "default", "secret", "MCP", "--read-only"]);
     let client = connect_http(&collector.url, created["key"].as_str().unwrap(), true).await;
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 5);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 9);
     let rotated = collector.admin(&[
         "key",
         "rotate",
@@ -1385,7 +1389,7 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
         )
         .await;
         let tools = client.list_tools(None).await.unwrap().tools;
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 9);
         for (tool, path) in [
             ("summary", "/v1/summary"),
             ("quality", "/v1/quality"),
@@ -1506,4 +1510,172 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
         client.cancel().await.unwrap();
         live.cancel().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn exploration_tools_and_export_links_match_http_on_both_transports() {
+    let collector = Collector::start();
+    collector.seed().await;
+    let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    let mut error=contract["paths"]["/v1/events"]["post"]["requestBody"]["content"]["application/json"]["example"].clone();
+    let view = "00000000-0000-4000-8000-000000000000";
+    error["event_id"] = json!(uuid::Uuid::new_v4().to_string());
+    error["view_id"] = json!(view);
+    error["video_id"] = json!("a");
+    error["viewer_id"] = json!("same-viewer");
+    error["event_name"] = json!("chunkify.video.playback_error");
+    error["sequence"] = json!(4);
+    error["error_category"] = json!("network");
+    error["error_code"] = json!("E_TEST");
+    error["error_fatal"] = json!(true);
+    let http = reqwest::Client::new();
+    assert_eq!(
+        http.post(format!("{}/v1/events", collector.url))
+            .header(
+                "X-Chunkify-Ingest-Key",
+                collector.keys["public_key"].as_str().unwrap()
+            )
+            .json(&error)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+    let key = collector.admin(&[
+        "key",
+        "create",
+        "default",
+        "secret",
+        "Exploration",
+        "--read-only",
+    ]);
+    let token = key["key"].as_str().unwrap();
+    let mut last_url = String::new();
+    for embedded in [false, true] {
+        let client = connect_mode(&collector.url, token, true, embedded).await;
+        for (tool, args, path) in [
+            (
+                "list_views",
+                json!({"limit":1}),
+                "/v1/views?limit=1".to_owned(),
+            ),
+            (
+                "list_views",
+                json!({"has_fatal_error":true}),
+                "/v1/views?has_fatal_error=true&limit=10".to_owned(),
+            ),
+            (
+                "get_view",
+                json!({"view_id":view,"limit":1}),
+                format!("/v1/views/{view}?limit=1"),
+            ),
+            (
+                "list_dimension_values",
+                json!({"dimension":"browser_name"}),
+                "/v1/dimensions/browser_name?limit=10".to_owned(),
+            ),
+        ] {
+            let result = call(&client, tool, args, false).await;
+            assert_eq!(result["data"], collector.get(&path, token).await);
+            assert_eq!(result["coverage"]["kind"], "page");
+        }
+        let first = call(
+            &client,
+            "get_view",
+            json!({"view_id":view,"limit":1}),
+            false,
+        )
+        .await;
+        let mut page = first.clone();
+        let mut events = 1;
+        while page["data"]["next_cursor"].is_string() {
+            page = call(
+                &client,
+                "get_view",
+                json!({"view_id":view,"limit":1,"cursor":page["data"]["next_cursor"]}),
+                false,
+            )
+            .await;
+            assert_eq!(page["data"]["view"], first["data"]["view"]);
+            events += page["data"]["events"].as_array().unwrap().len();
+        }
+        assert_eq!(events, 4);
+        assert_eq!(page["data"]["view"]["has_fatal_error"], true);
+        let metrics = call_metrics(&client, "errors", json!({}), false).await;
+        assert_eq!(
+            metrics["data"],
+            collector.get("/v1/errors?limit=10", token).await
+        );
+        assert_eq!(metrics["data"]["errors"][0]["error_code"], "E_TEST");
+        for kind in ["summary", "quality", "engagement"] {
+            let args = json!({"kind":kind,"from":"2026-10-19T00:00:00Z","to":"2026-10-21T00:00:00Z","interval":"day"});
+            let data = call(&client, "get_timeseries", args, false).await;
+            assert_eq!(data["data"],collector.get(&format!("/v1/timeseries?kind={kind}&from=2026-10-19T00:00:00Z&to=2026-10-21T00:00:00Z&interval=day"),token).await);
+        }
+        for invalid in [
+            json!({"resource":"projects"}),
+            json!({"resource":"events","query":{"limit":100}}),
+            json!({"resource":"events","query":{"project_id":"live"}}),
+            json!({"resource":"views","query":{"has_fatal_error":"true"}}),
+        ] {
+            assert_eq!(
+                call(&client, "export_data", invalid, true).await["error"]["code"],
+                "invalid_arguments"
+            );
+        }
+        assert_eq!(
+            call(
+                &client,
+                "list_dimension_values",
+                json!({"dimension":"country"}),
+                true
+            )
+            .await["error"]["code"],
+            "invalid_arguments"
+        );
+        assert_eq!(
+            call(
+                &client,
+                "get_view",
+                json!({"view_id":uuid::Uuid::new_v4().to_string()}),
+                true
+            )
+            .await["error"]["http_status"],
+            404
+        );
+        let result = client
+            .call_tool(params(
+                "export_data",
+                json!({"resource":"events","query":{"view_id":view}}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        let blocks = serde_json::to_value(&result.content).unwrap();
+        let export = result.structured_content.unwrap();
+        assert!(blocks.as_array().unwrap().iter().any(|block| {
+            block["type"] == "resource_link"
+                && block["uri"] == export["data"]["download_url"]
+                && block["mimeType"] == "text/csv"
+        }));
+        assert_eq!(export["coverage"]["kind"], "download");
+        assert!(!export.to_string().contains(token));
+        last_url = export["data"]["download_url"].as_str().unwrap().to_owned();
+        let response = http.get(&last_url).send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/csv")
+        );
+        let csv = response.text().await.unwrap();
+        assert_eq!(csv.lines().count(), 5);
+        assert!(csv.contains("E_TEST"));
+        assert!(!csv.contains("7500"));
+        client.cancel().await.unwrap();
+    }
+    collector.admin(&["key", "rotate", "default", key["key_id"].as_str().unwrap()]);
+    assert_eq!(http.get(last_url).send().await.unwrap().status(), 404);
 }

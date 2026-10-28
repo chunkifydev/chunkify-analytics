@@ -16,6 +16,7 @@ pub struct Config {
     pub mcp_enabled: bool,
     pub mcp_allowed_hosts: Vec<String>,
     pub bind: SocketAddr,
+    pub public_url: Option<reqwest::Url>,
     pub allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
     pub ingest_per_second: u32,
@@ -157,7 +158,31 @@ impl Config {
         {
             return Err("S3 storage uses a single worker; disable read_worker".into());
         }
+        let public_url = settings
+            .var("server.public_url")
+            .ok()
+            .map(|value| {
+                let mut url =
+                    reqwest::Url::parse(&value).map_err(|_| "Invalid server.public_url")?;
+                if !matches!(url.scheme(), "http" | "https")
+                    || url.host_str().is_none()
+                    || !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    return Err(
+                        "server.public_url must be HTTP(S), without credentials, query or fragment",
+                    );
+                }
+                if !url.path().ends_with('/') {
+                    url.set_path(&format!("{}/", url.path()));
+                }
+                Ok(url)
+            })
+            .transpose()?;
         Ok(Self {
+            public_url,
             admin_key_hash: settings
                 .var("admin_key")
                 .ok()

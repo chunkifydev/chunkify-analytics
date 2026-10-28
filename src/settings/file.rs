@@ -23,6 +23,7 @@ struct FileConfig {
 #[serde(default, deny_unknown_fields)]
 struct Server {
     bind: Option<String>,
+    public_url: Option<String>,
     allowed_origins: Option<Vec<String>>,
     trusted_proxies: Option<Vec<String>>,
     store_ip: Option<bool>,
@@ -159,6 +160,11 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
     }
     if let Some(value) = config.server.bind {
         settings.values.insert("server.bind".into(), value.into());
+    }
+    if let Some(value) = config.server.public_url {
+        settings
+            .values
+            .insert("server.public_url".into(), value.into());
     }
     if let Some(value) = config.server.allowed_origins {
         settings

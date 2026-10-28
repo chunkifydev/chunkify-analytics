@@ -8,7 +8,7 @@ Chunkify Analytics includes:
 
 - Event ingestion through the Chunkify analytics adapter.
 - Separate projects and credentials for different websites or customers.
-- An HTTP API for building dashboards.
+- An HTTP API for building dashboards and exporting CSV reports.
 - A read-only MCP endpoint for connecting AI tools.
 - Local or S3-compatible storage with configurable expiration.
 
@@ -247,6 +247,11 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/engagement` | Average watch time and observed reached-end rates. |
 | `GET /v1/quality` | Startup timing, buffering, and fatal-error metrics. |
 | `GET /v1/events` | Stored events, context, and pagination cursors. |
+| `GET /v1/views` | Playback attempts, with an optional fatal-error filter. |
+| `GET /v1/views/{view_id}` | One attempt's metrics and retained event history. |
+| `GET /v1/errors` | Error codes and fatal status, with affected-view counts. |
+| `GET /v1/dimensions/{dimension}` | Available filter values and view counts. |
+| `POST /v1/exports` | A scoped download link for a complete CSV report. |
 
 Secret keys grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before
@@ -279,11 +284,15 @@ your AI client:
 
 - "Show my top 10 videos by watch time over the past seven days."
 - "Compare startup time, buffering and fatal-error rates across browsers."
+- "Find failed playback attempts and inspect what happened in one of them."
+- "Export last month's per-video metrics as CSV."
 - "Build a dashboard with daily views, watch time and engagement for the past
   seven days."
 
 See the [MCP guide](docs/mcp.md) for client setup, available tools and the
-optional stdio adapter.
+optional stdio adapter. API and MCP exports return a download link; the collector
+streams CSV when it is opened. The link needs no project key and expires after
+30 minutes. See [CSV exports](docs/api.md#csv-exports).
 
 ## Configure the service
 

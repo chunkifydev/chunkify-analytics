@@ -5,12 +5,18 @@ on:
     tags: ["v*"]
   # Manual runs build and test the release packages without publishing.
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release-tag:
+        description: Tag created by Release Please to build and publish
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.release-tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -23,14 +29,22 @@ jobs:
       tag: ${{ steps.metadata.outputs.tag }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
       image: ${{ steps.metadata.outputs.image }}
+      sha: ${{ steps.metadata.outputs.sha }}
+      publish: ${{ steps.metadata.outputs.publish }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.release-tag || github.ref }}
       - name: Validate tag and Cargo version
         id: metadata
+        env:
+          REQUESTED_TAG: ${{ inputs.release-tag }}
+          PUBLISH_RELEASE: ${{ inputs.release-tag != '' || github.event_name == 'push' }}
         run: |
           python3 - <<'PY'
           import os
           import re
+          import subprocess
           import tomllib
 
           with open("Cargo.toml", "rb") as manifest:
@@ -43,18 +57,23 @@ jobs:
                   if identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0"):
                       raise SystemExit("Numeric prerelease identifiers must not have leading zeroes")
           tag = f"v{version}"
-          if os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REF_NAME"] != tag:
+          requested_tag = os.environ.get("REQUESTED_TAG") or (os.environ["GITHUB_REF_NAME"] if os.environ["GITHUB_REF_TYPE"] == "tag" else "")
+          if requested_tag and requested_tag != tag:
               raise SystemExit(f"Tag must match Cargo.toml version: {tag}")
+          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"version={version}\ntag={tag}\n")
               output.write(f"prerelease={'true' if '-' in version else 'false'}\n")
               output.write(f"image=ghcr.io/{os.environ['GITHUB_REPOSITORY'].lower()}\n")
+              output.write(f"sha={sha}\npublish={os.environ['PUBLISH_RELEASE']}\n")
           PY
 
   checks:
     name: Run CI
     needs: prepare
     uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.prepare.outputs.sha }}
 
   binaries:
     name: Build ${{ matrix.target }}
@@ -83,6 +102,8 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - name: Install Rust toolchain
         run: rustup toolchain install 1.99.0 --profile minimal --target "$TARGET"
       - name: Restore Rust dependencies
@@ -140,9 +161,11 @@ jobs:
     env:
       RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
       TARGET: ${{ matrix.target }}
-      STAGING_IMAGE: ${{ needs.prepare.outputs.image }}:sha-${{ github.sha }}-${{ matrix.arch }}
+      STAGING_IMAGE: ${{ needs.prepare.outputs.image }}:sha-${{ needs.prepare.outputs.sha }}-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -171,7 +194,7 @@ jobs:
           tags: chunkify-analytics:test
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
             org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
             org.opencontainers.image.licenses=MIT
           cache-from: type=gha,scope=collector-runtime-${{ matrix.arch }}
@@ -179,14 +202,14 @@ jobs:
       - name: Test release container lifecycle and benchmark runner
         run: node --test tests/http/docker/*.test.mjs
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.publish == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Stage tested image
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.publish == 'true'
         run: |
           docker tag chunkify-analytics:test "$STAGING_IMAGE"
           docker push "$STAGING_IMAGE"
@@ -204,8 +227,13 @@ jobs:
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
       PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
       IMAGE: ${{ needs.prepare.outputs.image }}
+      RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - name: Download release archives
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
@@ -225,36 +253,46 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           overwrite: true
+      - name: Prepare draft GitHub Release and upload assets
+        if: needs.prepare.outputs.publish == 'true'
+        run: |
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "Release $RELEASE_TAG is already published; refusing to replace its assets." >&2
+              exit 1
+            fi
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "$RELEASE_TAG" --generate-notes \
+              --notes "Docker image: \`$IMAGE:$RELEASE_VERSION\`"
+          fi
+          gh release upload "$RELEASE_TAG" target/release-dist/* --clobber
       - name: Set up Docker Buildx
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.publish == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Log in to GitHub Container Registry
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.publish == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Publish multi-platform image
-        if: github.event_name == 'push'
+        if: needs.prepare.outputs.publish == 'true'
         run: |
           tags=(--tag "$IMAGE:$RELEASE_VERSION")
           if [ "$PRERELEASE" = false ]; then
             tags+=(--tag "$IMAGE:latest")
           fi
           docker buildx imagetools create "${tags[@]}" \
-            "$IMAGE:sha-$GITHUB_SHA-amd64" \
-            "$IMAGE:sha-$GITHUB_SHA-arm64"
+            "$IMAGE:sha-$RELEASE_SHA-amd64" \
+            "$IMAGE:sha-$RELEASE_SHA-arm64"
       - name: Publish GitHub Release
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
+        if: needs.prepare.outputs.publish == 'true'
         run: |
-          flags=(--latest)
+          latest=true
           if [ "$PRERELEASE" = true ]; then
-            flags=(--prerelease --latest=false)
+            latest=false
           fi
-          gh release create "$RELEASE_TAG" target/release-dist/* \
-            --verify-tag --title "$RELEASE_TAG" --generate-notes \
-            --notes "Docker image: \`$IMAGE:$RELEASE_VERSION\`" "${flags[@]}"
+          gh release edit "$RELEASE_TAG" --draft=false \
+            --prerelease="$PRERELEASE" --latest="$latest"

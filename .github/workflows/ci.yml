@@ -6,13 +6,18 @@ on:
   pull_request:
   workflow_dispatch:
   workflow_call:
+    inputs:
+      ref:
+        description: Commit to check when called by the release workflow
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
   # Keep this separate from the caller's concurrency group when reused for releases.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.workflow }}-${{ inputs.ref || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -27,6 +32,8 @@ jobs:
       CHUNKIFY_BINARY: ${{ github.workspace }}/target/ci/chunkify-analytics
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc

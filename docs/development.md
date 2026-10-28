@@ -172,5 +172,6 @@ Follow the commit conventions in [AGENTS.md](../AGENTS.md).
 
 ## Releases
 
-See [the release guide](releasing.md) for version tags, release packages, Docker
-images, and a manual build that checks the release without publishing.
+See [the release guide](releasing.md) for automatic release PRs, version tags,
+release packages, Docker images, and a manual build that checks the release
+without publishing.

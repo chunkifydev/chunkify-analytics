@@ -20,9 +20,7 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(BINARY);
         command.current_dir(&self.directory);
-        for (key, _) in std::env::vars()
-            .filter(|(k, _)| k.starts_with("COLLECTOR_") || k.starts_with("CHUNKIFY_MCP_"))
-        {
+        for (key, _) in std::env::vars().filter(|(k, _)| k.starts_with("CHUNKIFY_")) {
             command.env_remove(key);
         }
         command

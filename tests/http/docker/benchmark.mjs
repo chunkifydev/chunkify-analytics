@@ -15,9 +15,9 @@ function limit(name, fallback, min, max) {
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be ${min}..${max}`);
   return value;
 }
-export const safety = { max_data_mib: limit("COLLECTOR_LOAD_MAX_DATA_MIB", 512, 512, 4096), min_free_disk_mib: 4096,
+export const safety = { max_data_mib: limit("CHUNKIFY_LOAD_MAX_DATA_MIB", 512, 512, 4096), min_free_disk_mib: 4096,
   max_container_memory_mib: containerMemoryGuardMiB, max_generator_rss_mib: 1024,
-  max_unique_events: limit("COLLECTOR_LOAD_MAX_EVENTS", 200000, 1, 1000000), request_timeout_ms: 10000, max_schedule_lag_ms: 50,
+  max_unique_events: limit("CHUNKIFY_LOAD_MAX_EVENTS", 200000, 1, 1000000), request_timeout_ms: 10000, max_schedule_lag_ms: 50,
   max_generator_pause_ms: 5000 };
 export { resources };
 

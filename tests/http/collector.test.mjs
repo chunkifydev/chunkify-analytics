@@ -15,7 +15,7 @@ import { createHttpAdapter } from "@chunkify/analytics/http";
 import { component } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
+const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 
 function postEvent(server, body, headers = {}) {
   return fetch(`${server.url}/v1/events`, { method: "POST", body,
@@ -40,7 +40,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, COLLECTOR_ADMIN_KEY: undefined,
+  const env = { ...process.env, CHUNKIFY_ADMIN_KEY: undefined,
     "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
     "data_dir": directory, "server.bind": "127.0.0.1:0",
@@ -923,9 +923,9 @@ test("ingestion rate limits reject excess requests without storing more events",
 });
 
 test("upgrading a previous collector preserves events and keys and accepts new events", {
-  skip: !process.env.COLLECTOR_PREVIOUS_BINARY && "Set COLLECTOR_PREVIOUS_BINARY to test a previous executable",
+  skip: !process.env.CHUNKIFY_PREVIOUS_BINARY && "Set CHUNKIFY_PREVIOUS_BINARY to test a previous executable",
 }, async (t) => {
-  const server = await collector(t, {}, process.env.COLLECTOR_PREVIOUS_BINARY);
+  const server = await collector(t, {}, process.env.CHUNKIFY_PREVIOUS_BINARY);
   const events = sdkPlayback(t).map((event, index) => index % 2 ? event : {
     ...event, browser_context: { schema_version: 1, browser_name: "Firefox", device_type: "desktop" },
   });
@@ -1507,7 +1507,7 @@ async function createProject(server, body, key) {
 
 test("admin project creation activates isolated projects immediately and persists across restart", async t => {
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev",
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev",
     "server.ingest_per_second": "1000", "retention.seconds": "0" });
   const url = server.url;
   const request = { name: "Production / Europe", allowed_origins: ["https://customer.example", "https://customer.example"] };
@@ -1559,20 +1559,20 @@ test("project creation is disabled without an admin key and validates before sav
   assert.equal((await createProject(disabled, { name: "Disabled" }, disabled.keys.secret_key)).status, 404);
   await disabled.stop();
   const dotenvKey = `dotenv-${randomUUID()}`;
-  await writeFile(join(disabled.directory, ".env"), `COLLECTOR_ADMIN_KEY=${dotenvKey}\n`, { mode: 0o600 });
+  await writeFile(join(disabled.directory, ".env"), `CHUNKIFY_ADMIN_KEY=${dotenvKey}\n`, { mode: 0o600 });
   await disabled.start();
   assert.equal((await createProject(disabled, { name: "From dotenv" }, dotenvKey)).status, 201);
   await disabled.stop();
   const processKey = `process-${randomUUID()}`;
-  await disabled.start(binary, { COLLECTOR_ADMIN_KEY: processKey });
+  await disabled.start(binary, { CHUNKIFY_ADMIN_KEY: processKey });
   assert.equal((await createProject(disabled, { name: "Old key" }, dotenvKey)).status, 401);
   assert.equal((await createProject(disabled, { name: "Process key" }, processKey)).status, 201);
   await disabled.stop();
-  await disabled.start(binary, { COLLECTOR_ADMIN_KEY: "" });
+  await disabled.start(binary, { CHUNKIFY_ADMIN_KEY: "" });
   assert.equal((await createProject(disabled, { name: "Disabled" }, processKey)).status, 404);
   await disabled.stop();
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey });
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey });
   const file = join(server.directory, "keys.json");
   const before = await readFile(file, "utf8");
   for (const body of [{}, { name: "" }, { name: "  " }, { name: "x".repeat(129) }, { name: 42 },
@@ -1602,7 +1602,7 @@ test("project creation is disabled without an admin key and validates before sav
 
 test("PATCH project updates only supplied fields and persists both fields atomically", async t => {
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev" });
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev" });
   const customer = await projectCommand(server, ["project", "create", "Customer"]);
   const update = body => projectApi(server, "", { method: "PATCH", token: customer.secret_key, body });
   const state = async () => (await projectCommand(server, ["project", "list"])).find(p => p.id === customer.project_id);
@@ -1647,7 +1647,7 @@ test("PATCH project updates only supplied fields and persists both fields atomic
 
 test("DELETE project revokes all keys, preserves retention and isolates other projects", async t => {
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { COLLECTOR_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev" });
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "server.allowed_origins": "https://chunkify.dev" });
   const customer = await projectCommand(server, ["project", "create", "Deleted customer"]);
   const extra = await projectCommand(server, ["key", "create", customer.project_id, "secret", "Dashboard"]);
   const publicKey = await projectCommand(server, ["key", "create", customer.project_id, "public", "Website"]);
@@ -1695,7 +1695,7 @@ test("DELETE project revokes all keys, preserves retention and isolates other pr
 
 test("read-only private keys read analytics live and cannot manage projects or keys", async t => {
   const adminKey = `admin-${randomUUID()}`;
-  const server = await collector(t, { "retention.seconds": "0", COLLECTOR_ADMIN_KEY: adminKey });
+  const server = await collector(t, { "retention.seconds": "0", CHUNKIFY_ADMIN_KEY: adminKey });
   const project = await projectCommand(server, ["project", "create", "Read-only customer"]);
   const created = await projectCommand(server, ["key", "create", project.project_id, "secret", "Dashboard", "--read-only"]);
   assert.equal(created.restart_required, false);

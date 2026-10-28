@@ -18,12 +18,12 @@ function integer(name, fallback, min, max) {
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be ${min}..${max}`);
   return value;
 }
-const seconds = integer("COLLECTOR_LOAD_SECONDS", 30, 5, 300);
-const preload = integer("COLLECTOR_LOAD_PRELOAD_EVENTS", 50000, 0, 100000);
-const concurrency = integer("COLLECTOR_LOAD_CONCURRENCY", 128, 1, 4096);
-const profile = integer("COLLECTOR_LOAD_PROFILE", 0, 0, 1) === 1;
-const queries = integer("COLLECTOR_LOAD_QUERIES", 1, 0, 1) === 1;
-const browserContext = integer("COLLECTOR_LOAD_BROWSER_CONTEXT", 0, 0, 1) === 1;
+const seconds = integer("CHUNKIFY_LOAD_SECONDS", 30, 5, 300);
+const preload = integer("CHUNKIFY_LOAD_PRELOAD_EVENTS", 50000, 0, 100000);
+const concurrency = integer("CHUNKIFY_LOAD_CONCURRENCY", 128, 1, 4096);
+const profile = integer("CHUNKIFY_LOAD_PROFILE", 0, 0, 1) === 1;
+const queries = integer("CHUNKIFY_LOAD_QUERIES", 1, 0, 1) === 1;
+const browserContext = integer("CHUNKIFY_LOAD_BROWSER_CONTEXT", 0, 0, 1) === 1;
 const write_settings = {};
 const writeFields = { BATCH_MAX_EVENTS: "batch.max_events", BATCH_MAX_BYTES: "batch.max_bytes",
   BATCH_DELAY_MS: "batch.delay_ms", QUEUE_MAX_BYTES: "batch.queue_max_bytes", QUEUE_MAX_REQUESTS: "batch.queue_max_requests",
@@ -34,14 +34,14 @@ for (const [name, fallback, min, max] of [
   ["QUEUE_MAX_REQUESTS", 256, 1, 4096],
   ["CHECKPOINT_THRESHOLD_MIB", 16, 1, 1024],
 ]) {
-  if (process.env[`COLLECTOR_LOAD_${name}`] !== undefined) {
-    write_settings[writeFields[name]] = String(integer(`COLLECTOR_LOAD_${name}`, fallback, min, max));
+  if (process.env[`CHUNKIFY_LOAD_${name}`] !== undefined) {
+    write_settings[writeFields[name]] = String(integer(`CHUNKIFY_LOAD_${name}`, fallback, min, max));
   }
 }
-if (process.env.COLLECTOR_LOAD_READ_WORKER === "1") write_settings["experimental.read_worker"] = "true";
-const insertMode = process.env.COLLECTOR_LOAD_INSERT_MODE;
+if (process.env.CHUNKIFY_LOAD_READ_WORKER === "1") write_settings["experimental.read_worker"] = "true";
+const insertMode = process.env.CHUNKIFY_LOAD_INSERT_MODE;
 if (insertMode !== undefined) {
-  if (!["row", "bulk"].includes(insertMode)) throw new Error("COLLECTOR_LOAD_INSERT_MODE must be row or bulk");
+  if (!["row", "bulk"].includes(insertMode)) throw new Error("CHUNKIFY_LOAD_INSERT_MODE must be row or bulk");
   write_settings["batch.insert_mode"] = insertMode;
 }
 const cases = [
@@ -57,11 +57,11 @@ const cases = [
   ] },
   { name: "rate-cap", rate: 400, rate_limit: 100 },
 ];
-const selected = process.env.COLLECTOR_LOAD_CASES?.split(",");
-for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure COLLECTOR_LOAD_* environment variables.`);
+const selected = process.env.CHUNKIFY_LOAD_CASES?.split(",");
+for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure CHUNKIFY_LOAD_* environment variables.`);
 for (const name of selected ?? []) if (!cases.some((item) => item.name === name)) throw new Error(`Unknown benchmark case: ${name}`);
 let plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, profile, queries, write_settings, ...item }));
-const compareReads = integer("COLLECTOR_LOAD_COMPARE_READS", 0, 0, 1) === 1;
+const compareReads = integer("CHUNKIFY_LOAD_COMPARE_READS", 0, 0, 1) === 1;
 if (compareReads) {
   if (plan.length !== 1) throw new Error("Read-worker comparison requires exactly one selected workload");
   plan = [
@@ -117,7 +117,7 @@ if (process.argv.includes("--list")) {
     plan, results: [], status: "running",
   };
   const save = async () => {
-    if (process.env.COLLECTOR_LOAD_REPORT) await writeFile(process.env.COLLECTOR_LOAD_REPORT, `${JSON.stringify(report, null, 2)}\n`);
+    if (process.env.CHUNKIFY_LOAD_REPORT) await writeFile(process.env.CHUNKIFY_LOAD_REPORT, `${JSON.stringify(report, null, 2)}\n`);
   };
   const workload = await captureWorkload({ browserContext });
   report.workload = workload.description;
@@ -153,5 +153,5 @@ if (process.argv.includes("--list")) {
   await save();
   process.off("SIGINT", interrupt);
   process.off("SIGTERM", interrupt);
-  if (!process.env.COLLECTOR_LOAD_REPORT) console.log(JSON.stringify(report, null, 2));
+  if (!process.env.CHUNKIFY_LOAD_REPORT) console.log(JSON.stringify(report, null, 2));
 }

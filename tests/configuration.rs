@@ -18,9 +18,7 @@ impl Fixture {
     fn command(&self) -> Command {
         let mut command = Command::new(BINARY);
         command.current_dir(&self.0);
-        for (key, _) in std::env::vars()
-            .filter(|(key, _)| key.starts_with("COLLECTOR_") || key.starts_with("CHUNKIFY_MCP_"))
-        {
+        for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("CHUNKIFY_")) {
             command.env_remove(key);
         }
         command
@@ -42,14 +40,14 @@ fn dotenv_is_automatic_and_process_environment_has_priority() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.0.join(".env"),
-        "COLLECTOR_DATA_DIR=from-dotenv\nCOLLECTOR_BIND=invalid\n",
+        "CHUNKIFY_DATA_DIR=from-dotenv\nCHUNKIFY_BIND=invalid\n",
     )
     .unwrap();
     assert!(!fixture.run(&["config", "check"]).status.success());
     let output = fixture
         .command()
         .args(["init"])
-        .env("COLLECTOR_BIND", "127.0.0.1:4174")
+        .env("CHUNKIFY_BIND", "127.0.0.1:4174")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -59,8 +57,8 @@ fn dotenv_is_automatic_and_process_environment_has_priority() {
 #[test]
 fn an_explicit_env_file_replaces_dotenv_and_cli_overrides_its_data_directory() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.0.join(".env"), "COLLECTOR_BIND=invalid\n").unwrap();
-    std::fs::write(fixture.0.join("custom.env"), "COLLECTOR_DATA_DIR=unused\n").unwrap();
+    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_BIND=invalid\n").unwrap();
+    std::fs::write(fixture.0.join("custom.env"), "CHUNKIFY_DATA_DIR=unused\n").unwrap();
     let output = fixture.run(&["--env-file", "custom.env", "init", "--data-dir", "chosen"]);
     assert!(output.status.success(), "{output:?}");
     assert!(fixture.0.join("chosen/keys.json").is_file());
@@ -89,7 +87,7 @@ fn missing_explicit_and_malformed_env_files_fail_without_echoing_values() {
 #[test]
 fn dotenv_does_not_search_parent_directories() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.0.join(".env"), "COLLECTOR_BIND=invalid\n").unwrap();
+    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_BIND=invalid\n").unwrap();
     std::fs::create_dir(fixture.0.join("child")).unwrap();
     let output = fixture
         .command()
@@ -110,13 +108,13 @@ fn toml_dotenv_environment_and_cli_are_merged_in_priority_order() {
     .unwrap();
     assert!(fixture.run(&["init"]).status.success());
     assert!(fixture.0.join("toml-data/keys.json").is_file());
-    std::fs::write(fixture.0.join(".env"), "COLLECTOR_DATA_DIR=dotenv-data\n").unwrap();
+    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_DATA_DIR=dotenv-data\n").unwrap();
     assert!(fixture.run(&["init"]).status.success());
     assert!(fixture.0.join("dotenv-data/keys.json").is_file());
     let output = fixture
         .command()
         .args(["init"])
-        .env("COLLECTOR_DATA_DIR", "environment-data")
+        .env("CHUNKIFY_DATA_DIR", "environment-data")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -124,7 +122,7 @@ fn toml_dotenv_environment_and_cli_are_merged_in_priority_order() {
     let output = fixture
         .command()
         .args(["init", "--data-dir", "cli-data"])
-        .env("COLLECTOR_DATA_DIR", "unused")
+        .env("CHUNKIFY_DATA_DIR", "unused")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -196,27 +194,27 @@ fn application_settings_are_toml_only_except_deployment_overrides() {
     )
     .unwrap();
     let removed = [
-        "COLLECTOR_LOCAL_PATH",
-        "COLLECTOR_PROFILE",
-        "COLLECTOR_ALLOWED_ORIGINS",
-        "COLLECTOR_STORE_IP",
-        "COLLECTOR_TRUSTED_PROXIES",
-        "COLLECTOR_MAX_BODY_BYTES",
-        "COLLECTOR_MAX_OTLP_RECORDS",
-        "COLLECTOR_INGEST_PER_SECOND",
-        "COLLECTOR_RETENTION_SECONDS",
-        "COLLECTOR_RETENTION_INTERVAL_SECONDS",
-        "COLLECTOR_BATCH_MAX_EVENTS",
-        "COLLECTOR_BATCH_MAX_BYTES",
-        "COLLECTOR_BATCH_DELAY_MS",
-        "COLLECTOR_QUEUE_MAX_BYTES",
-        "COLLECTOR_QUEUE_MAX_REQUESTS",
-        "COLLECTOR_INSERT_MODE",
-        "COLLECTOR_DUCKDB_THREADS",
-        "COLLECTOR_CHECKPOINT_THRESHOLD_MIB",
-        "COLLECTOR_EXPERIMENTAL_READ_WORKER",
-        "COLLECTOR_MCP_ENABLED",
-        "COLLECTOR_MCP_ALLOWED_HOSTS",
+        "CHUNKIFY_LOCAL_PATH",
+        "CHUNKIFY_PROFILE",
+        "CHUNKIFY_ALLOWED_ORIGINS",
+        "CHUNKIFY_STORE_IP",
+        "CHUNKIFY_TRUSTED_PROXIES",
+        "CHUNKIFY_MAX_BODY_BYTES",
+        "CHUNKIFY_MAX_OTLP_RECORDS",
+        "CHUNKIFY_INGEST_PER_SECOND",
+        "CHUNKIFY_RETENTION_SECONDS",
+        "CHUNKIFY_RETENTION_INTERVAL_SECONDS",
+        "CHUNKIFY_BATCH_MAX_EVENTS",
+        "CHUNKIFY_BATCH_MAX_BYTES",
+        "CHUNKIFY_BATCH_DELAY_MS",
+        "CHUNKIFY_QUEUE_MAX_BYTES",
+        "CHUNKIFY_QUEUE_MAX_REQUESTS",
+        "CHUNKIFY_INSERT_MODE",
+        "CHUNKIFY_DUCKDB_THREADS",
+        "CHUNKIFY_CHECKPOINT_THRESHOLD_MIB",
+        "CHUNKIFY_EXPERIMENTAL_READ_WORKER",
+        "CHUNKIFY_MCP_ENABLED",
+        "CHUNKIFY_MCP_ALLOWED_HOSTS",
     ];
     std::fs::write(
         fixture.0.join(".env"),
@@ -289,7 +287,7 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
         fixture
             .command()
             .args(["config", "check"])
-            .env("COLLECTOR_S3_REGION", "us-east-1")
+            .env("CHUNKIFY_S3_REGION", "us-east-1")
             .output()
             .unwrap()
             .status
@@ -300,7 +298,7 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
 #[test]
 fn storage_backend_dotenv_works_without_toml_and_process_environment_has_priority() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.0.join(".env"), "COLLECTOR_STORAGE_BACKEND=s3\n").unwrap();
+    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_STORAGE_BACKEND=s3\n").unwrap();
     let output = fixture.run(&["config", "check"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("S3 storage requires storage.url"));
@@ -308,7 +306,7 @@ fn storage_backend_dotenv_works_without_toml_and_process_environment_has_priorit
     let output = fixture
         .command()
         .args(["config", "check"])
-        .env("COLLECTOR_S3_URL", "s3://analytics/production/")
+        .env("CHUNKIFY_S3_URL", "s3://analytics/production/")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -317,7 +315,7 @@ fn storage_backend_dotenv_works_without_toml_and_process_environment_has_priorit
     let output = fixture
         .command()
         .args(["config", "check"])
-        .env("COLLECTOR_STORAGE_BACKEND", "local")
+        .env("CHUNKIFY_STORAGE_BACKEND", "local")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
@@ -332,15 +330,15 @@ fn s3_environment_overrides_toml_and_validates_addressing() {
     )
     .unwrap();
     let overrides = [
-        ("COLLECTOR_STORAGE_BACKEND", "s3"),
-        ("COLLECTOR_S3_URL", "s3://analytics/production/"),
-        ("COLLECTOR_S3_ENDPOINT", "account.r2.cloudflarestorage.com"),
-        ("COLLECTOR_S3_REGION", "auto"),
-        ("COLLECTOR_S3_ACCESS_KEY_ID", "test-access"),
-        ("COLLECTOR_S3_SECRET_ACCESS_KEY", "private-test-secret"),
-        ("COLLECTOR_S3_SESSION_TOKEN", "private-test-token"),
-        ("COLLECTOR_S3_URL_STYLE", "vhost"),
-        ("COLLECTOR_S3_USE_SSL", "true"),
+        ("CHUNKIFY_STORAGE_BACKEND", "s3"),
+        ("CHUNKIFY_S3_URL", "s3://analytics/production/"),
+        ("CHUNKIFY_S3_ENDPOINT", "account.r2.cloudflarestorage.com"),
+        ("CHUNKIFY_S3_REGION", "auto"),
+        ("CHUNKIFY_S3_ACCESS_KEY_ID", "test-access"),
+        ("CHUNKIFY_S3_SECRET_ACCESS_KEY", "private-test-secret"),
+        ("CHUNKIFY_S3_SESSION_TOKEN", "private-test-token"),
+        ("CHUNKIFY_S3_URL_STYLE", "vhost"),
+        ("CHUNKIFY_S3_USE_SSL", "true"),
     ];
     let output = fixture
         .command()
@@ -350,12 +348,12 @@ fn s3_environment_overrides_toml_and_validates_addressing() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     for (key, value) in [
-        ("COLLECTOR_STORAGE_BACKEND", "invalid"),
-        ("COLLECTOR_STORAGE_BACKEND", ""),
-        ("COLLECTOR_S3_URL_STYLE", "invalid"),
-        ("COLLECTOR_S3_USE_SSL", "invalid"),
-        ("COLLECTOR_S3_URL", "https://invalid"),
-        ("COLLECTOR_S3_ENDPOINT", "https://invalid"),
+        ("CHUNKIFY_STORAGE_BACKEND", "invalid"),
+        ("CHUNKIFY_STORAGE_BACKEND", ""),
+        ("CHUNKIFY_S3_URL_STYLE", "invalid"),
+        ("CHUNKIFY_S3_USE_SSL", "invalid"),
+        ("CHUNKIFY_S3_URL", "https://invalid"),
+        ("CHUNKIFY_S3_ENDPOINT", "https://invalid"),
     ] {
         let output = fixture
             .command()

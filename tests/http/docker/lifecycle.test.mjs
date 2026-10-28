@@ -8,7 +8,7 @@ import { containerCollector, docker } from "./support.mjs";
 
 test("the admin environment key provisions a project that survives container replacement", { timeout: 120000 }, async t => {
   const adminKey = `admin-${randomUUID()}`;
-  const server = await containerCollector({ environment: { COLLECTOR_ADMIN_KEY: adminKey } });
+  const server = await containerCollector({ environment: { CHUNKIFY_ADMIN_KEY: adminKey } });
   t.after(() => server.close());
   const response = await fetch(`${server.url}/v1/projects`, { method: "POST", headers: {
     authorization: `Bearer ${adminKey}`, "content-type": "application/json" },

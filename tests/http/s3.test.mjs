@@ -10,7 +10,7 @@ import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
+const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 
 function events() {
   const media = Object.assign(new EventTarget(), { duration: 120, currentTime: 0, src: "", currentSrc: "",
@@ -28,7 +28,7 @@ async function installation(t, storage, retention = 0, environment = {}) {
   let directory = await mkdtemp(join(tmpdir(), "chunkify-storage-test-"));
   const directories = [directory];
   let child, closed;
-  const inherited = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("COLLECTOR_"))),
+  const inherited = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("CHUNKIFY_"))),
     ...environment };
   let config;
   async function configure() {
@@ -115,20 +115,20 @@ test("local storage honors a database path relative to the TOML file", async t =
   await assert.rejects(stat(join(app.directory(), "state/analytics.duckdb")), { code: "ENOENT" });
 });
 
-const endpoint = process.env.COLLECTOR_S3_TEST_ENDPOINT;
+const endpoint = process.env.CHUNKIFY_S3_TEST_ENDPOINT;
 function s3Settings() {
-  return { backend: "s3", url: `s3://${process.env.COLLECTOR_S3_TEST_BUCKET ?? "chunkify-analytics-test"}/test-${randomUUID()}/`,
-    endpoint, region: process.env.COLLECTOR_S3_TEST_REGION ?? "us-east-1",
-    access_key_id: process.env.COLLECTOR_S3_TEST_ACCESS_KEY_ID ?? "test",
-    secret_access_key: process.env.COLLECTOR_S3_TEST_SECRET_ACCESS_KEY ?? "test",
-    url_style: "path", use_ssl: process.env.COLLECTOR_S3_TEST_USE_SSL === "true" };
+  return { backend: "s3", url: `s3://${process.env.CHUNKIFY_S3_TEST_BUCKET ?? "chunkify-analytics-test"}/test-${randomUUID()}/`,
+    endpoint, region: process.env.CHUNKIFY_S3_TEST_REGION ?? "us-east-1",
+    access_key_id: process.env.CHUNKIFY_S3_TEST_ACCESS_KEY_ID ?? "test",
+    secret_access_key: process.env.CHUNKIFY_S3_TEST_SECRET_ACCESS_KEY ?? "test",
+    url_style: "path", use_ssl: process.env.CHUNKIFY_S3_TEST_USE_SSL === "true" };
 }
 
 test("S3 stores repeated events, isolates projects and survives task replacement", {
-  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const adminKey = `s3-admin-${randomUUID()}`;
-  const app = await installation(t, s3Settings(), 0, { COLLECTOR_ADMIN_KEY: adminKey });
+  const app = await installation(t, s3Settings(), 0, { CHUNKIFY_ADMIN_KEY: adminKey });
   await app.command(["init"]);
   await app.start();
   const created = await fetch(`${app.url}/v1/projects`, { method: "POST", headers: {
@@ -188,7 +188,7 @@ test("S3 stores repeated events, isolates projects and survives task replacement
 });
 
 test("S3 uses the AWS credential chain when explicit storage keys are omitted", {
-  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const storage = s3Settings();
   const environment = { AWS_ACCESS_KEY_ID: storage.access_key_id, AWS_SECRET_ACCESS_KEY: storage.secret_access_key,
@@ -205,7 +205,7 @@ test("S3 uses the AWS credential chain when explicit storage keys are omitted", 
 });
 
 test("S3 hides expired events before cleanup and deletes expired batches on startup", {
-  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const app = await installation(t, s3Settings(), 2);
   await app.command(["init"]);
@@ -220,7 +220,7 @@ test("S3 hides expired events before cleanup and deletes expired batches on star
 });
 
 test("S3 project deletion survives replacement and expires retained events with its own policy", {
-  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const app = await installation(t, s3Settings());
   await app.command(["init"]);
@@ -245,7 +245,7 @@ test("S3 project deletion survives replacement and expires retained events with 
 });
 
 test("S3 video rankings preserve metric ties and cursors across task replacement", {
-  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const app = await installation(t, s3Settings());
   await app.command(["init"]);
@@ -279,7 +279,7 @@ test("S3 video rankings preserve metric ties and cursors across task replacement
 });
 
 test("S3 grouped metrics preserve context, project isolation and page watermarks across replacement", {
-  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {
   const app = await installation(t, s3Settings());
   await app.command(["init"]);
@@ -322,7 +322,7 @@ test(
   {
     skip:
       !endpoint &&
-      "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+      "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
   },
   async (t) => {
     const app = await installation(t, s3Settings());

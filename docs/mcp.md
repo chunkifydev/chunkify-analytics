@@ -1,11 +1,11 @@
 # Connect an MCP client
 
-Connect directly to a running collector with Streamable HTTP. The MCP client
+Connect directly to a running analytics server with Streamable HTTP. The MCP client
 does not need a local Chunkify binary.
 
 ## Connect by URL
 
-The collector serves a read-only MCP endpoint alongside its HTTP API:
+The analytics server serves a read-only MCP endpoint alongside its HTTP API:
 
 ```text
 URL: http://127.0.0.1:4174/mcp
@@ -24,7 +24,7 @@ chunkify-analytics key create PROJECT_ID secret "MCP" --read-only
 Use the returned `key` as the bearer token, including for the stdio fallback.
 It can also read analytics through the HTTP API. Project and key management
 requires a full-access private key. Creation and rotation take effect immediately
-while the collector runs; no restart is needed.
+while the analytics server runs; no restart is needed.
 
 MCP is enabled by default. Add your public hostname to the allowlist:
 
@@ -39,7 +39,7 @@ under `[mcp]` to disable the endpoint.
 
 ### Claude Code
 
-Set your private secret key, then register the collector's URL:
+Set your private secret key, then register the analytics server's URL:
 
 ```sh
 export CHUNKIFY_MCP_SECRET_KEY="YOUR_PRIVATE_SECRET_KEY"
@@ -76,7 +76,7 @@ to check the connection. See the
 
 For clients without Streamable HTTP support, install the Chunkify binary on the
 client machine and let the client launch `chunkify-analytics mcp`. This optional
-adapter connects to the running collector over HTTP and needs no database volume
+adapter connects to the running analytics server over HTTP and needs no database volume
 or `init` command.
 For a client using `mcpServers` JSON:
 
@@ -98,7 +98,7 @@ For a client using `mcpServers` JSON:
 The adapter also accepts `[mcp].collector_url` and `[mcp].secret_key` in TOML.
 Use `--config /path/to/config.toml mcp` for an explicit file. Environment values
 can come from `.env` or `--env-file`. Keep files containing tokens private.
-The client starts and stops the adapter; use matching collector and adapter versions.
+The client starts and stops the adapter; use matching analytics server and adapter versions.
 
 ### Claude Code with stdio
 
@@ -199,7 +199,7 @@ page. `limit` and `cursor` require `group_by` for summary, quality and engagemen
 Error groups always paginate. Session pages, session event histories and dimension
 values also default to 10 rows and accept at most 100.
 Each adapter and the embedded endpoint allow up to four concurrent queries.
-The collector also applies project budgets shared with HTTP and other keys:
+The analytics server also applies project budgets shared with HTTP and other keys:
 120 analytics reads/minute with a burst of 20, at most 2 queued/running reads per
 project and 8 across the server. Rate or concurrency rejections return
 `error.code: "rate_limited"`, HTTP status 429 and `error.retry_after_seconds`.
@@ -255,9 +255,9 @@ The result contains `data.download_url`, `filename`, `content_type` and
 `expires_at`, plus a CSV resource link. Open the URL to download the CSV; it
 requires no project key. Anyone holding the URL can download that specific
 report, so keep it private. Links expire after 30 minutes and stop working after
-issuer-key rotation/revocation, project deletion or collector restart.
+issuer-key rotation/revocation, project deletion or analytics server restart.
 
-The Rust collector generates and streams CSV when the URL is opened. All
+The Rust analytics server generates and streams CSV when the URL is opened. All
 matching rows are included; `limit` and `cursor` are rejected. No CSV contents
 are embedded in MCP responses, and no export file is retained. The query reads
 one snapshot on a separate connection, so a slow download does not occupy the

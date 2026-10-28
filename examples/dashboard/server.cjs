@@ -42,7 +42,7 @@ function createHandler({ env = process.env, fetchImpl = fetch, demo = null } = {
     if (!token) throw new SafeError(503, 'Secret key is not configured for this project.');
     let base;
     try {
-      base = new URL(env.COLLECTOR_URL);
+      base = new URL(env.CHUNKIFY_URL);
       if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || !['', '/'].includes(base.pathname)) throw new Error();
     } catch { throw new SafeError(503, 'Collector URL must be an HTTP(S) origin.'); }
     const target = new URL(route, base);

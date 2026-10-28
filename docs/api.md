@@ -6,7 +6,7 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | --- | --- | --- |
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
-| `POST /v1/projects` | `Authorization: Bearer COLLECTOR_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
+| `POST /v1/projects` | `Authorization: Bearer CHUNKIFY_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
 | `DELETE /v1/project` | Full-access `Authorization: Bearer SECRET_KEY` | Delete the project and revoke all its keys. Events expire under the existing retention policy. |
 | `PATCH /v1/project` | Full-access `Authorization: Bearer SECRET_KEY` | Update the project name or additional origins immediately. |
 | `GET /v1/project/keys` | Full-access `Authorization: Bearer SECRET_KEY` | Key IDs, names, permissions and `read_only`, without key values. |
@@ -36,15 +36,15 @@ on project and key management routes, including key listings. Key metadata
 includes `read_only`, which remains unchanged when rotating a key. Existing
 private keys retain full access.
 
-Project creation requires the separate `COLLECTOR_ADMIN_KEY` environment secret.
+Project creation requires the separate `CHUNKIFY_ADMIN_KEY` environment secret.
 See [project creation](administration.md#create-projects-through-the-api) and [live project management](administration.md#live-project-api) for requests.
 
 ### Ingestion and storage
 
-`POST /v1/events` is the collector's only ingestion endpoint. Use
+`POST /v1/events` is the analytics server's only ingestion endpoint. Use
 `createChunkifyAdapter` from `@chunkify/analytics/chunkify` to send events.
 Each request contains one complete JSON event. Request batching and gzip are
-not supported; the collector can still group concurrent requests into database
+not supported; the analytics server can still group concurrent requests into database
 transactions.
 
 Local storage deduplicates event IDs within each project. The first accepted
@@ -53,11 +53,11 @@ S3 stores every delivery as a separate row, including repeated event IDs, and
 returns 201 with `{"accepted":true,"duplicate":false}` on success.
 
 The former `POST /v1/logs` and `GET /v1/ingestion` endpoints have been removed.
-Applications using the OTLP adapter with this collector must switch to the
+Applications using the OTLP adapter with this analytics server must switch to the
 Chunkify adapter and `/v1/events`. Remove `server.max_otlp_records` from existing
 TOML configuration files; that setting is no longer supported.
 Existing events remain readable, including
-an optional `otlp` object on events stored by earlier collector versions. That
+an optional `otlp` object on events stored by earlier analytics server versions. That
 object preserves the original `log_record`, `resource_logs`, and `scope_logs`.
 The SDK's OTLP adapter can still send to other telemetry systems.
 
@@ -79,10 +79,10 @@ optional legacy `otlp` context. For example:
 }
 ```
 
-The collector copies the supported scalar or null fields from schema version 1
+The analytics server copies the supported scalar or null fields from schema version 1
 `event.browser_context` into this object. Unsupported fields and nested values
 remain only in the original payload. Browser values are client-reported, not
-verified identity. Only the collector supplies `peer_ip`, `client_ip`, and
+verified identity. Only the analytics server supplies `peer_ip`, `client_ip`, and
 `client_ip_source`. When IP collection is disabled, these fields are absent and
 browser context is still available. Without either source, `event_context` is
 omitted. This context schema has its own `schema_version: 1`.
@@ -95,7 +95,7 @@ trusted_proxies = ["10.20.1.2", "2001:db8:abcd::/48"]
 ```
 
 Trusted proxies must supply the actual client through `X-Forwarded-For`.
-The collector selects the first untrusted address from the right. Missing or
+The analytics server selects the first untrusted address from the right. Missing or
 invalid forwarding information leaves `client_ip` unavailable; the event is
 still accepted. Other forwarding headers are ignored.
 
@@ -271,7 +271,7 @@ curl --get 'http://127.0.0.1:4174/v1/engagement' \
 The average uses all selected attempts, including failed and ongoing views.
 Label it **Average watch time per attempt**.
 
-The collector uses one final measurement per view, or the latest snapshot if
+The analytics server uses one final measurement per view, or the latest snapshot if
 there is no final event. Missing values contribute zero, as in summary. The
 selected final event must have `reason: ended` to count as reaching the end.
 Closing a page, destroying a player or changing source does not count. Multiple
@@ -418,7 +418,7 @@ curl --fail --output videos.csv "$DOWNLOAD_URL"
 `GET /v1/exports/{token}` needs no Authorization header. The 256-bit random token
 authorizes only its saved project and filters; URL query overrides are rejected.
 Treat the URL as a credential. Tokens expire after 30 minutes and are invalidated
-by issuer-key rotation/revocation, project deletion or collector restart. Expiry
+by issuer-key rotation/revocation, project deletion or analytics server restart. Expiry
 is checked before a download starts; it does not interrupt an active download.
 
 CSV generation starts when the link is opened. It uses one read snapshot on a
@@ -468,7 +468,7 @@ objects during a download can abort it. Large queries still consume database CPU
 memory and storage I/O.
 
 Behind an HTTPS ingress or a URL prefix, set `server.public_url` to the externally
-reachable collector base, for example `https://analytics.example.com/collector/`.
-Otherwise the collector derives the URL from the request Host and scheme; it only
+reachable analytics server base, for example `https://analytics.example.com/collector/`.
+Otherwise the analytics server derives the URL from the request Host and scheme; it only
 trusts `X-Forwarded-Proto` from configured trusted proxies. In-memory tokens belong
-to one collector process; route downloads to the process that issued their link.
+to one analytics server process; route downloads to the process that issued their link.

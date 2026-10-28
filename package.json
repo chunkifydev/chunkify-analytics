@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "license": "MIT",
-  "description": "Self-hosted Chunkify analytics collector and its integration tests",
+  "description": "Self-hosted Chunkify analytics server and its integration tests",
   "engines": {
     "node": ">=24 <25",
     "npm": ">=11 <12"

@@ -1,6 +1,6 @@
 # Administration
 
-Run commands with the collector's configuration and data directory:
+Run commands with the analytics server's configuration and data directory:
 
 ```sh
 chunkify-analytics --config /path/to/config.toml project list
@@ -13,9 +13,9 @@ docker exec chunkify-analytics chunkify-analytics project list
 ```
 
 On Linux and macOS, project creation, key management and retention changes work
-while the collector runs. Stop it before renaming projects or replacing
+while the analytics server runs. Stop it before renaming projects or replacing
 project settings.
-Other platforms require stopping the collector for all administration.
+Other platforms require stopping the analytics server for all administration.
 
 ## Projects and named keys
 
@@ -60,7 +60,7 @@ retrying. If you lose a new key's secret, rotate or revoke it.
 
 The initial default credentials remain available in the private key registry:
 `data_dir/keys.json` for local storage or `data_dir/s3-keys.json` for S3. S3 keeps
-the registry in the bucket as well. Do not edit it while the collector runs.
+the registry in the bucket as well. Do not edit it while the analytics server runs.
 
 To replace a default primary credential:
 
@@ -90,7 +90,7 @@ To replace a project's overrides, save a JSON file:
 }
 ```
 
-Then stop the collector and apply it:
+Then stop the analytics server and apply it:
 
 ```sh
 chunkify-analytics project configure PROJECT_ID /path/to/settings.json
@@ -106,13 +106,13 @@ than its buffer budget returns 413. Origin checks use the public key's project.
 
 ## Create projects through the API
 
-Set `COLLECTOR_ADMIN_KEY` in the collector's environment or private `.env` file to enable
+Set `CHUNKIFY_ADMIN_KEY` in the analytics server's environment or private `.env` file to enable
 `POST /v1/projects`. Use a separate random secret for your provisioning backend.
 An unset or empty value disables this endpoint with a 404 response.
 
 ```sh
 curl -X POST http://127.0.0.1:4174/v1/projects \
-  -H "Authorization: Bearer $COLLECTOR_ADMIN_KEY" \
+  -H "Authorization: Bearer $CHUNKIFY_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
   -d '{"name":"Customer website","allowed_origins":["https://customer.example"]}'
 ```
@@ -197,7 +197,7 @@ prevents startup. See [storage](storage.md) for S3 file expiration.
 
 ## Backup and restore
 
-Stop the collector before taking or restoring a backup. Save the TOML configuration
+Stop the analytics server before taking or restoring a backup. Save the TOML configuration
 and deployment credentials separately. Keep backups private.
 
 For local storage, copy the complete data directory. Include a custom
@@ -219,7 +219,7 @@ For S3, back up and restore the complete prefix, including `keys.json`. A local
 credential cache alone is not a backup. Start the replacement with the same S3
 configuration.
 
-Use the same collector version or one supporting the saved database schema.
+Use the same analytics server version or one supporting the saved database schema.
 Check `/healthz`, events and summaries before sending traffic. A restore also
 restores old credentials and retention settings; reapply later changes as needed.
 Startup expiration still applies to restored data.

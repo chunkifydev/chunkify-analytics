@@ -43,7 +43,7 @@ async function prepareData(dir, binary, env, signal) {
   await mkdir(path.dirname(dir), { recursive: true });
   const staging = await mkdtemp(dir + '.setup-');
   try {
-    const adminEnv = { ...env, COLLECTOR_DATA_DIR: staging };
+    const adminEnv = { ...env, CHUNKIFY_DATA_DIR: staging };
     const run = async args => {
       signal.throwIfAborted();
       try { return (await exec(binary, args, { env: adminEnv, cwd: staging, signal, timeout: 30000 })).stdout; }
@@ -85,7 +85,7 @@ async function seed(url, state, signal) {
 export async function launchDemo({ collector, dataDir = path.join(root, 'demo-data'), port = 8787, open = true, signal = new AbortController().signal, log = console.log } = {}) {
   if (Number(process.versions.node.split('.')[0]) !== 24) throw new Error('Use Node.js 24 for this demo.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be between 0 and 65535.');
-  const binary = await findCollector(collector || process.env.CHUNKIFY_COLLECTOR_BIN);
+  const binary = await findCollector(collector || process.env.CHUNKIFY_BINARY);
   const dir = path.resolve(dataDir);
   let handler, child, collectorLog, stopping;
   const server = createServer((req, res) => {
@@ -110,9 +110,9 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
     try { await once(server, 'listening'); }
     catch { throw new Error(`Dashboard port ${port} is unavailable. Stop the other demo, or use --port 0 to choose a free port.`); }
     const dashboardUrl = `http://127.0.0.1:${server.address().port}`;
-    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('COLLECTOR_')));
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CHUNKIFY_')));
     Object.assign(env, {
-      COLLECTOR_DATA_DIR: dir, COLLECTOR_BIND: '127.0.0.1:0',
+      CHUNKIFY_DATA_DIR: dir, CHUNKIFY_BIND: '127.0.0.1:0',
     });
     const state = await prepareData(dir, binary, env, signal);
     const origins = [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'];

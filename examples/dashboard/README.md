@@ -5,15 +5,15 @@ At runtime, the backend reads the HTTP API; the browser never receives a secret 
 
 For automatic native setup with sample data and a preconfigured player, use the
 [local demo launcher](../demo/README.md). The manual setup below connects this
-dashboard to an existing collector.
+dashboard to an existing analytics server.
 
 ## Run
 
-Use Node.js 24 and a matching collector. From the repository root, set the
-collector URL and a private secret key:
+Use Node.js 24 and a matching analytics server. From the repository root, set the
+analytics server URL and a private secret key:
 
 ```sh
-export COLLECTOR_URL=http://127.0.0.1:4174
+export CHUNKIFY_URL=http://127.0.0.1:4174
 export CHUNKIFY_PLAYER_SECRET_KEY=YOUR_SECRET_KEY
 node examples/dashboard/server.cjs
 ```
@@ -28,8 +28,8 @@ The project selector only lists configured tokens:
 | `CHUNKIFY_LIVE_SECRET_KEY` | Live |
 | `CHUNKIFY_STAGING_SECRET_KEY` | Staging |
 
-Each token belongs to the project you created in the collector. These labels
-are dashboard configuration, not collector project overrides. Keep tokens out
+Each token belongs to the project you created in the analytics server. These labels
+are dashboard configuration, not analytics server project overrides. Keep tokens out
 of the source, Git, screenshots and browser code.
 
 This example binds to loopback and has no dashboard login. Anyone with access
@@ -56,7 +56,7 @@ watched. See [metric definitions](../../docs/api.md#metric-definitions).
 
 Use a **separate demo project**. Create it with
 `project create "Dashboard demo"`, save the returned credentials privately,
-and restart the collector. See the root README for native and Docker commands.
+and restart the analytics server. See the root README for native and Docker commands.
 Set that project's secret key as `CHUNKIFY_DEMO_SECRET_KEY` above.
 
 The optional seed script uses the repository's installed analytics SDK to create

@@ -1,7 +1,7 @@
 # Configuration
 
 Copy [config.toml.example](../config.toml.example) to `config.toml`.
-The collector loads it from the working directory, or use `--config`:
+The analytics server loads it from the working directory, or use `--config`:
 
 ```sh
 chunkify-analytics --config /etc/chunkify/config.toml config check
@@ -11,30 +11,37 @@ chunkify-analytics --config /etc/chunkify/config.toml serve
 Relative TOML paths resolve beside the file. CLI and environment paths resolve
 from the working directory. `config check` validates without creating storage
 or contacting S3. Unknown fields and invalid values fail startup. Restart the
-collector after changing installation settings.
+analytics server after changing installation settings.
 
 ## Environment overrides
 
-TOML holds application settings. These deployment variables can override it:
+TOML holds application settings. Copy [.env.example](../.env.example) to `.env`
+for deployment overrides, or set these variables directly in your container:
 
 | Variable | TOML field | Use |
 | --- | --- | --- |
-| `COLLECTOR_ADMIN_KEY` | Environment only | Enables project creation through the API. Unset or empty disables it. |
-| `COLLECTOR_DATA_DIR` | `data_dir` | Container state directory. |
-| `COLLECTOR_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
-| `COLLECTOR_STORAGE_BACKEND` | `storage.backend` | Select `local` or `s3` storage. |
-| `COLLECTOR_S3_URL`, `COLLECTOR_S3_ENDPOINT`, `COLLECTOR_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
-| `COLLECTOR_S3_ACCESS_KEY_ID`, `COLLECTOR_S3_SECRET_ACCESS_KEY`, `COLLECTOR_S3_SESSION_TOKEN` | Corresponding `storage` fields | Inject credentials without putting them in TOML. |
-| `COLLECTOR_S3_URL_STYLE`, `COLLECTOR_S3_USE_SSL` | Corresponding `storage` fields | Provider addressing and TLS. |
+| `CHUNKIFY_ADMIN_KEY` | Environment only | Enables project creation through the API. Unset or empty disables it. |
+| `CHUNKIFY_DATA_DIR` | `data_dir` | Container state directory. |
+| `CHUNKIFY_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
+| `CHUNKIFY_STORAGE_BACKEND` | `storage.backend` | Select `local` or `s3` storage. |
+| `CHUNKIFY_S3_URL`, `CHUNKIFY_S3_ENDPOINT`, `CHUNKIFY_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
+| `CHUNKIFY_S3_ACCESS_KEY_ID`, `CHUNKIFY_S3_SECRET_ACCESS_KEY`, `CHUNKIFY_S3_SESSION_TOKEN` | Corresponding `storage` fields | Inject credentials without putting them in TOML. |
+| `CHUNKIFY_S3_URL_STYLE`, `CHUNKIFY_S3_USE_SSL` | Corresponding `storage` fields | Provider addressing and TLS. |
 | `CHUNKIFY_MCP_COLLECTOR_URL`, `CHUNKIFY_MCP_SECRET_KEY` | `mcp.collector_url`, `mcp.secret_key` | Optional stdio adapter connection and secret. |
 
-The collector also loads `.env` from the working directory. Use `--env-file` to
+The analytics server also loads `.env` from the working directory. Use `--env-file` to
 select another file. Precedence is CLI flags, process environment, environment
 file, TOML, then defaults. Only the variables above configure the application.
-AWS credential providers also read standard AWS credential variables.
+AWS credential providers read `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
+`AWS_SESSION_TOKEN` from the process environment. Export or inject these variables
+directly; `.env` only loads the application overrides listed above. On ECS, omit
+access and secret keys to use the task role.
 
-The Docker image sets `COLLECTOR_DATA_DIR=/data` and
-`COLLECTOR_BIND=0.0.0.0:4174`. These override TOML; change them with container
+The former `COLLECTOR_*` overrides have been renamed to `CHUNKIFY_*` and are no
+longer recognized. Update existing environment files and deployment settings.
+
+The Docker image sets `CHUNKIFY_DATA_DIR=/data` and
+`CHUNKIFY_BIND=0.0.0.0:4174`. These override TOML; change them with container
 settings or CLI flags.
 
 ## Storage
@@ -62,11 +69,11 @@ See [storage](storage.md) for local and S3/R2 examples.
 | --- | --- | --- |
 | `data_dir` | `./data` | Directory for keys, locks and temporary files. Also holds the default local database and WAL. Environment paths are relative to the working directory. |
 | `server.bind` | `127.0.0.1:4174` | Listening IP address and port. Use `0.0.0.0:4174` behind an ingress when needed. |
-| `server.public_url` | Unset | External HTTP(S) collector base URL for export download links. Set it behind HTTPS ingress or a URL prefix. No credentials, query or fragment. |
+| `server.public_url` | Unset | External HTTP(S) analytics server base URL for export download links. Set it behind HTTPS ingress or a URL prefix. No credentials, query or fragment. |
 | `server.allowed_origins` | Empty | Shared website origins, without paths or trailing slashes. Each project can allow additional origins. Server requests without Origin still require the public key. |
 | `retention.seconds` | `2592000` | Default retention by server receipt time, in seconds. Default is 30 days. Projects may override it; `0` disables expiration for inheriting projects. Must be a non-negative whole number no larger than `9223372036854775`. |
 | `retention.interval_seconds` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. The timer stays active for live project changes; disabled policies delete nothing. |
-| `server.store_ip` | `true` | Store collector-derived request IP context. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
+| `server.store_ip` | `true` | Store request IP context supplied by the analytics server. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
 | `server.trusted_proxies` | Empty | Array of literal IPv4/IPv6 addresses or CIDRs allowed to supply `X-Forwarded-For`. Empty trusts no proxies. No hostnames, ports, or wildcards. Use IPv4 CIDRs for IPv4-mapped addresses. |
 
 ### Admission limits
@@ -93,7 +100,7 @@ See [storage](storage.md) for local and S3/R2 examples.
 | TOML field | Default | Meaning |
 | --- | --- | --- |
 | `batch.insert_mode` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same local batching and durability rules. S3 always uses an appender and Parquet output. |
-| `mcp.enabled` | `true` | Serve the authenticated `/mcp` endpoint in the collector process. |
+| `mcp.enabled` | `true` | Serve the authenticated `/mcp` endpoint in the analytics server process. |
 | `mcp.allowed_hosts` | `localhost,127.0.0.1,[::1]` | Allowed HTTP hostnames or host:port authorities for MCP. Add the ingress hostname for remote clients. |
 | `profile` | `false` | Emit one aggregate database timing report to stderr when the worker drains on graceful shutdown. Accepts only `true` or `false`. No event values or credentials are included. Intended for local performance diagnosis. |
 
@@ -112,7 +119,7 @@ for duplicate and failure behavior.
 ### Read and export limits
 
 Override these settings in the `[rate_limits]` section of `config.toml` and restart
-the collector. They apply to the server, including requests through the optional
+the analytics server. They apply to the server, including requests through the optional
 MCP companion. They have no environment-variable overrides.
 
 | TOML field | Default | Meaning |
@@ -132,7 +139,7 @@ one request every half-second, up to the configured read burst.
 
 Each project shares its budgets across HTTP, MCP, private keys and export links.
 Key creation, rotation and live project settings updates do not reset them.
-Budgets live in memory and reset when the collector restarts. Ingestion uses its
+Budgets live in memory and reset when the analytics server restarts. Ingestion uses its
 separate limits. Health checks, MCP discovery/documentation and export HEAD
 requests do not run database queries and do not consume the read/download budgets.
 

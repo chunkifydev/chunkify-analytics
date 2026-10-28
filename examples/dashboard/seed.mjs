@@ -1,7 +1,7 @@
 // Synthetic events for a separate demo project. Never use a production public key.
 import { buildDemoEvents } from './seed-events.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
-const endpoint = new URL('/v1/events', process.env.COLLECTOR_URL || 'http://127.0.0.1:4174');
+const endpoint = new URL('/v1/events', process.env.CHUNKIFY_URL || 'http://127.0.0.1:4174');
 const ingestKey = process.env.CHUNKIFY_DEMO_PUBLIC_KEY;
 if (!ingestKey) throw new Error('Set CHUNKIFY_DEMO_PUBLIC_KEY for an isolated demo project.');
 const events = buildDemoEvents();

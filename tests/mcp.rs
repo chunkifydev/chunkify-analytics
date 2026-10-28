@@ -27,9 +27,7 @@ type Mcp = RunningService<RoleClient, ClientConfig>;
 fn clean_command() -> Command {
     let mut command = Command::new(BINARY);
     command.current_dir(std::env::temp_dir());
-    for (key, _) in std::env::vars()
-        .filter(|(key, _)| key.starts_with("COLLECTOR_") || key.starts_with("CHUNKIFY_MCP_"))
-    {
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("CHUNKIFY_")) {
         command.env_remove(key);
     }
     command
@@ -42,8 +40,8 @@ async fn connect(url: &str, token: &str, modern: bool) -> Mcp {
         .env("CHUNKIFY_MCP_COLLECTOR_URL", url)
         .env("CHUNKIFY_MCP_SECRET_KEY", token)
         // This would make normal collector configuration fail. MCP must not load it.
-        .env("COLLECTOR_BIND", "invalid")
-        .env("COLLECTOR_DATA_DIR", "/unused-mcp-data");
+        .env("CHUNKIFY_BIND", "invalid")
+        .env("CHUNKIFY_DATA_DIR", "/unused-mcp-data");
     let transport = TokioChildProcess::new(tokio::process::Command::from(command)).unwrap();
     let mode = if modern {
         ClientLifecycleMode::Discover {
@@ -148,7 +146,7 @@ impl Collector {
         let command = |args: &[&str]| {
             let result = clean_command()
                 .args(args)
-                .env("COLLECTOR_DATA_DIR", &directory)
+                .env("CHUNKIFY_DATA_DIR", &directory)
                 .output()
                 .unwrap();
             assert!(
@@ -190,8 +188,8 @@ impl Collector {
             .arg("--config")
             .arg(config_file)
             .arg("serve")
-            .env("COLLECTOR_DATA_DIR", &directory)
-            .env("COLLECTOR_BIND", "127.0.0.1:0")
+            .env("CHUNKIFY_DATA_DIR", &directory)
+            .env("CHUNKIFY_BIND", "127.0.0.1:0")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
@@ -220,7 +218,7 @@ impl Collector {
     fn admin(&self, args: &[&str]) -> Value {
         let output = clean_command()
             .args(args)
-            .env("COLLECTOR_DATA_DIR", &self.directory)
+            .env("CHUNKIFY_DATA_DIR", &self.directory)
             .output()
             .unwrap();
         assert!(
@@ -1163,7 +1161,7 @@ async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
     std::fs::write(
         &file,
         format!(
-            "CHUNKIFY_MCP_COLLECTOR_URL={}\nCHUNKIFY_MCP_SECRET_KEY={}\nCOLLECTOR_BIND=invalid\n",
+            "CHUNKIFY_MCP_COLLECTOR_URL={}\nCHUNKIFY_MCP_SECRET_KEY={}\nCHUNKIFY_BIND=invalid\n",
             collector.url,
             collector.keys["secret_key"].as_str().unwrap()
         ),

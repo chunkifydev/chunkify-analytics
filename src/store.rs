@@ -221,8 +221,10 @@ impl Store {
     }
 
     pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
-        if query.sort_by.is_some() {
-            return Err(ApiError::bad("sort_by is only supported by videos"));
+        if query.sort_by.is_some() || query.group_by.is_some() {
+            return Err(ApiError::bad(
+                "sort_by and group_by are not supported by events",
+            ));
         }
         let order = query.order.unwrap_or_default();
         // Preserve existing ascending cursors; bind descending cursors to their order.

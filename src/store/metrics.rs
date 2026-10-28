@@ -1,6 +1,23 @@
 use super::*;
 use crate::query::{TimeseriesQuery, VideoSort};
 
+#[derive(Clone, Copy)]
+enum MetricSet {
+    Summary,
+    Quality,
+    Engagement,
+}
+
+impl MetricSet {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Summary => "summary",
+            Self::Quality => "quality",
+            Self::Engagement => "engagement",
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VideoPosition {
@@ -10,12 +27,106 @@ struct VideoPosition {
 }
 
 impl Store {
+    async fn breakdown(
+        &self,
+        project: String,
+        query: Query,
+        metrics: MetricSet,
+    ) -> Result<Value, ApiError> {
+        let group_by = query
+            .group_by
+            .ok_or_else(|| ApiError::bad("group_by is required"))?;
+        if query.event_name.is_some() || query.sort_by.is_some() || query.order.is_some() {
+            return Err(ApiError::bad("Unsupported breakdown query parameter"));
+        }
+        let filters = query.filters()?;
+        let limit = query.limit()?;
+        let kind = format!("breakdown_{}_{}", group_by.column(), metrics.name());
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(|value| Cursor::<Option<String>>::decode(value, &kind, &filters, &project))
+            .transpose()?;
+        self.read("breakdown", project.clone(), move |connection| {
+            let through = match &cursor {
+                Some(cursor) => cursor.through,
+                None => watermark(connection, &project)?,
+            };
+            let cohort = match metrics {
+                MetricSet::Summary => CohortMetrics::Basic,
+                MetricSet::Quality => CohortMetrics::Quality,
+                MetricSet::Engagement => CohortMetrics::Engagement,
+            };
+            let (sql, mut values) = view_cohort(project.clone(), through, &filters, cohort);
+            let column = group_by.column();
+            let continuation = match cursor {
+                None => "TRUE".to_owned(),
+                Some(cursor) => match cursor.after {
+                    None => format!("{column} IS NOT NULL"),
+                    Some(value) => {
+                        values.push(SqlValue::Text(value));
+                        format!("{column} > ?")
+                    }
+                },
+            };
+            values.push(SqlValue::BigInt((limit + 1) as i64));
+            let (samples, source) = match metrics {
+                MetricSet::Quality => (QUALITY_SAMPLES, "quality_samples"),
+                _ => ("", "view_metrics"),
+            };
+            // Each view belongs to its first retained start's context. Keep
+            // unknown context as NULL and group the full cohort in one snapshot.
+            let mut statement = connection.prepare(&format!(
+                "{sql}{samples} SELECT {column}, {} FROM {source}
+                GROUP BY {column} HAVING {continuation}
+                ORDER BY {column} ASC NULLS FIRST LIMIT ?",
+                metric_columns(metrics)
+            ))?;
+            let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    read_metrics(row, 1, metrics)?,
+                ))
+            })?;
+            let mut groups = Vec::new();
+            let mut last = None;
+            let mut next_cursor = None;
+            for row in rows {
+                let (value, data) = row?;
+                if groups.len() == limit {
+                    next_cursor = Some(
+                        Cursor {
+                            version: 1,
+                            project_id: project.clone(),
+                            kind: kind.clone(),
+                            after: last,
+                            through,
+                            filters: filters.clone(),
+                        }
+                        .encode()?,
+                    );
+                    break;
+                }
+                last = value.clone();
+                groups.push(json!({"value":value,"data":metric_json(data)?}));
+            }
+            Ok(json!({"group_by":group_by,"groups":groups,"next_cursor":next_cursor}))
+        })
+        .await
+    }
+
     pub async fn summary(
         &self,
         project: String,
         query: Query,
         per_video: bool,
     ) -> Result<Value, ApiError> {
+        if query.group_by.is_some() {
+            if per_video {
+                return Err(ApiError::bad("group_by is not supported by videos"));
+            }
+            return self.breakdown(project, query, MetricSet::Summary).await;
+        }
         if query.event_name.is_some()
             || (!per_video
                 && (query.cursor.is_some()
@@ -114,6 +225,9 @@ impl Store {
     }
 
     pub async fn engagement(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if query.group_by.is_some() {
+            return self.breakdown(project, query, MetricSet::Engagement).await;
+        }
         if query.event_name.is_some()
             || query.sort_by.is_some()
             || query.cursor.is_some()
@@ -126,36 +240,23 @@ impl Store {
         self.read("engagement", project.clone(), move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Engagement);
-            let (views, playing, reached_end) = connection.query_row(
+            let values = connection.query_row(
                 &format!(
-                    "{sql}
-                SELECT COUNT(*), COALESCE(SUM(playing_time_ms), 0),
-                    COUNT(*) FILTER (WHERE measurement.reached_end)
-                FROM view_metrics"
+                    "{sql} SELECT {} FROM view_metrics",
+                    metric_columns(MetricSet::Engagement)
                 ),
                 params_from_iter(values.iter()),
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, f64>(1)?,
-                        row.get::<_, i64>(2)?,
-                    ))
-                },
+                |row| read_metrics(row, 0, MetricSet::Engagement),
             )?;
-            if !playing.is_finite() {
-                return Err(ApiError::internal());
-            }
-            Ok(json!({
-                "views": views, "total_playing_time_ms": playing,
-                "average_playing_time_ms": (views > 0).then(|| playing / views as f64),
-                "reached_end_views": reached_end,
-                "reached_end_ratio": (views > 0).then(|| reached_end as f64 / views as f64),
-            }))
+            metric_json(values)
         })
         .await
     }
 
     pub async fn quality(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if query.group_by.is_some() {
+            return self.breakdown(project, query, MetricSet::Quality).await;
+        }
         if query.event_name.is_some()
             || query.sort_by.is_some()
             || query.cursor.is_some()
@@ -168,46 +269,17 @@ impl Store {
         self.read("quality", project.clone(), move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Quality);
-            let (views, startup_samples, median, p95, buffering_samples, playing, buffering, affected) =
-                connection.query_row(&format!("{sql}, quality_samples AS (
-                SELECT *, measurement.startup_time_ms AS startup_time_ms,
-                    measurement.rebuffer_duration_ms AS rebuffer_duration_ms,
-                    measurement.playing_time_ms IS NOT NULL
-                        AND measurement.rebuffer_duration_ms IS NOT NULL
-                        AND (measurement.playing_time_ms > 0 OR measurement.rebuffer_duration_ms > 0)
-                        AS has_buffering_sample
-                FROM view_metrics
-            )
-            SELECT COUNT(*), COUNT(startup_time_ms),
-                quantile_cont(startup_time_ms, 0.5), quantile_cont(startup_time_ms, 0.95),
-                COUNT(*) FILTER (WHERE has_buffering_sample),
-                COALESCE(SUM(playing_time_ms) FILTER (WHERE has_buffering_sample), 0),
-                COALESCE(SUM(rebuffer_duration_ms) FILTER (WHERE has_buffering_sample), 0),
-                COUNT(*) FILTER (WHERE has_fatal_error)
-            FROM quality_samples"), params_from_iter(values.iter()), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?,
-                    row.get::<_, Option<f64>>(2)?, row.get::<_, Option<f64>>(3)?,
-                    row.get::<_, i64>(4)?, row.get::<_, f64>(5)?, row.get::<_, f64>(6)?, row.get::<_, i64>(7)?))
-            })?;
-            // Reject an unrepresentable aggregate instead of serializing infinity
-            // as null or reporting a misleading zero ratio.
-            if !playing.is_finite() || !buffering.is_finite()
-                || median.is_some_and(|v| !v.is_finite()) || p95.is_some_and(|v| !v.is_finite()) {
-                return Err(ApiError::internal());
-            }
-            // Scaling avoids overflow when two valid finite durations have a
-            // sum outside DOUBLE's range.
-            let scale = playing.max(buffering);
-            let ratio = (scale > 0.0).then(|| (buffering / scale) / (playing / scale + buffering / scale));
-            Ok(json!({
-                "views": views,
-                "startup_time_ms": {"sample_views": startup_samples, "median": median, "p95": p95},
-                "buffering": {"sample_views": buffering_samples,
-                    "total_playing_time_ms": playing, "total_rebuffer_duration_ms": buffering, "ratio": ratio},
-                "fatal_errors": {"affected_views": affected,
-                    "ratio": (views > 0).then(|| affected as f64 / views as f64)},
-            }))
-        }).await
+            let values = connection.query_row(
+                &format!(
+                    "{sql}{QUALITY_SAMPLES} SELECT {} FROM quality_samples",
+                    metric_columns(MetricSet::Quality)
+                ),
+                params_from_iter(values.iter()),
+                |row| read_metrics(row, 0, MetricSet::Quality),
+            )?;
+            metric_json(values)
+        })
+        .await
     }
 
     pub async fn timeseries(
@@ -270,6 +342,135 @@ fn utc_timestamp(milliseconds: i64) -> String {
     chrono::DateTime::from_timestamp_millis(milliseconds)
         .expect("validated RFC3339 time")
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+const QUALITY_SAMPLES: &str = ", quality_samples AS (
+    SELECT *, measurement.startup_time_ms AS startup_time_ms,
+        measurement.rebuffer_duration_ms AS rebuffer_duration_ms,
+        measurement.playing_time_ms IS NOT NULL
+            AND measurement.rebuffer_duration_ms IS NOT NULL
+            AND (measurement.playing_time_ms > 0 OR measurement.rebuffer_duration_ms > 0)
+            AS has_buffering_sample
+    FROM view_metrics
+)";
+
+fn metric_columns(metrics: MetricSet) -> &'static str {
+    match metrics {
+        MetricSet::Summary => "COUNT(*), COUNT(DISTINCT viewer_id), COALESCE(SUM(playing_time_ms ORDER BY view_id), 0)",
+        MetricSet::Engagement => "COUNT(*), COALESCE(SUM(playing_time_ms ORDER BY view_id), 0), COUNT(*) FILTER (WHERE measurement.reached_end)",
+        MetricSet::Quality => "COUNT(*), COUNT(startup_time_ms),
+            quantile_cont(startup_time_ms, 0.5), quantile_cont(startup_time_ms, 0.95),
+            COUNT(*) FILTER (WHERE has_buffering_sample),
+            COALESCE(SUM(playing_time_ms ORDER BY view_id) FILTER (WHERE has_buffering_sample), 0),
+            COALESCE(SUM(rebuffer_duration_ms ORDER BY view_id) FILTER (WHERE has_buffering_sample), 0),
+            COUNT(*) FILTER (WHERE has_fatal_error)",
+    }
+}
+
+enum MetricValues {
+    Summary {
+        views: i64,
+        viewers: i64,
+        playing: f64,
+    },
+    Engagement {
+        views: i64,
+        playing: f64,
+        reached_end: i64,
+    },
+    Quality {
+        views: i64,
+        startup_samples: i64,
+        median: Option<f64>,
+        p95: Option<f64>,
+        buffering_samples: i64,
+        playing: f64,
+        buffering: f64,
+        affected: i64,
+    },
+}
+
+fn read_metrics(
+    row: &duckdb::Row<'_>,
+    offset: usize,
+    metrics: MetricSet,
+) -> duckdb::Result<MetricValues> {
+    Ok(match metrics {
+        MetricSet::Summary => MetricValues::Summary {
+            views: row.get(offset)?,
+            viewers: row.get(offset + 1)?,
+            playing: row.get(offset + 2)?,
+        },
+        MetricSet::Engagement => MetricValues::Engagement {
+            views: row.get(offset)?,
+            playing: row.get(offset + 1)?,
+            reached_end: row.get(offset + 2)?,
+        },
+        MetricSet::Quality => MetricValues::Quality {
+            views: row.get(offset)?,
+            startup_samples: row.get(offset + 1)?,
+            median: row.get(offset + 2)?,
+            p95: row.get(offset + 3)?,
+            buffering_samples: row.get(offset + 4)?,
+            playing: row.get(offset + 5)?,
+            buffering: row.get(offset + 6)?,
+            affected: row.get(offset + 7)?,
+        },
+    })
+}
+
+fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
+    match values {
+        MetricValues::Summary {
+            views,
+            viewers,
+            playing,
+        } => {
+            if !playing.is_finite() {
+                return Err(ApiError::internal());
+            }
+            Ok(json!({"views":views,"unique_viewers":viewers,"total_playing_time_ms":playing}))
+        }
+        MetricValues::Engagement {
+            views,
+            playing,
+            reached_end,
+        } => {
+            if !playing.is_finite() {
+                return Err(ApiError::internal());
+            }
+            Ok(json!({"views":views,"total_playing_time_ms":playing,
+                "average_playing_time_ms":(views > 0).then(|| playing / views as f64),
+                "reached_end_views":reached_end,"reached_end_ratio":(views > 0).then(|| reached_end as f64 / views as f64)}))
+        }
+        MetricValues::Quality {
+            views,
+            startup_samples,
+            median,
+            p95,
+            buffering_samples,
+            playing,
+            buffering,
+            affected,
+        } => {
+            if !playing.is_finite()
+                || !buffering.is_finite()
+                || median.is_some_and(|v| !v.is_finite())
+                || p95.is_some_and(|v| !v.is_finite())
+            {
+                return Err(ApiError::internal());
+            }
+            // Scale before summing durations so the ratio stays representable.
+            let scale = playing.max(buffering);
+            let ratio =
+                (scale > 0.0).then(|| (buffering / scale) / (playing / scale + buffering / scale));
+            Ok(json!({"views":views,
+                "startup_time_ms":{"sample_views":startup_samples,"median":median,"p95":p95},
+                "buffering":{"sample_views":buffering_samples,"total_playing_time_ms":playing,
+                    "total_rebuffer_duration_ms":buffering,"ratio":ratio},
+                "fatal_errors":{"affected_views":affected,"ratio":(views > 0).then(|| affected as f64 / views as f64)}}))
+        }
+    }
 }
 
 enum CohortMetrics {
@@ -343,7 +544,7 @@ fn view_cohort(
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT view_id, occurred_at_ms, video_id, viewer_id, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, context_browser_name, context_os_name, context_device_type, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

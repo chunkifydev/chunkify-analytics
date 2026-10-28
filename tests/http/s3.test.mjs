@@ -277,3 +277,42 @@ test("S3 video rankings preserve metric ties and cursors across task replacement
     assert.equal(rows.find(video => video.video_id === "c").total_playing_time_ms, 5000.25);
   }
 });
+
+test("S3 grouped metrics preserve context, project isolation and page watermarks across replacement", {
+  skip: !endpoint && "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, s3Settings());
+  await app.command(["init"]);
+  await app.start();
+  const other = JSON.parse(await app.command(["project", "create", "Other groups"]));
+  async function playback(browser, os, device, key, onlyStart = false) {
+    const records = events().map(event => ({ ...event,
+      ...(browser !== null && { browser_context: { schema_version: 1, browser_name: browser, os_name: os, device_type: device } }) }));
+    for (const event of onlyStart ? records.slice(0, 1) : records) await app.send(event, key);
+  }
+  await playback(null, null, null, undefined, true);
+  await playback("Chrome", "Linux", "desktop");
+  await playback("Firefox", "Windows", "mobile");
+  await playback("unknown", "unknown", "unknown");
+  await playback("Safari", "Other", "tablet", other.public_key);
+  const snapshots = [];
+  for (const route of ["summary", "quality", "engagement"]) for (const group_by of ["browser_name", "os_name", "device_type"]) {
+    const path = `/v1/${route}?group_by=${group_by}`;
+    snapshots.push({ path, first: await app.get(`${path}&limit=1`), full: await app.get(`${path}&limit=1000`) });
+  }
+  await app.replaceTask();
+  await playback("Zulu", "Later", "tablet");
+  for (const { path, first, full } of snapshots) {
+    let page = first;
+    const groups = [...page.groups];
+    while (page.next_cursor) {
+      page = await app.get(`${path}&limit=2&cursor=${encodeURIComponent(page.next_cursor)}`);
+      groups.push(...page.groups);
+    }
+    assert.deepEqual(groups, full.groups);
+    assert.equal(groups[0].value, null);
+    assert.equal(groups.reduce((sum, group) => sum + group.data.views, 0), 4);
+  }
+  const refreshed = await app.get("/v1/summary?group_by=browser_name");
+  assert.deepEqual(refreshed.groups.map(group => group.value), [null, "Chrome", "Firefox", "Zulu", "unknown"]);
+});

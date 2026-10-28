@@ -1,9 +1,38 @@
 # Releases
 
-The [Release workflow](../.github/workflows/release.yml) publishes a GitHub
-Release and a multi-platform image in GitHub Container Registry when a tag
-starting with `v` is pushed. It uses the repository's `GITHUB_TOKEN`; no registry
-password or personal access token is required.
+The [Release Please workflow](../.github/workflows/release-please.yml) opens and
+updates a release PR as changes merge into `main`. Merging that release PR
+starts the [Release workflow](../.github/workflows/release.yml), which publishes
+executable packages and a multi-platform image in GitHub Container Registry.
+Both workflows use the repository's `GITHUB_TOKEN`; no registry password or
+personal access token is required.
+
+## Automatic release PRs
+
+1. Merge changes into `main` using Conventional Commit titles. Release Please
+   collects unreleased changes into one release PR, updating it as more changes
+   merge. A `fix` bumps the patch version; `feat` bumps the minor version.
+   Breaking changes bump the minor version before 1.0.0 and the major version
+   afterward. Commits such as `docs` or `ci` alone do not normally require a new
+   release.
+2. Review the generated PR. Its Rust strategy updates `Cargo.toml`, `Cargo.lock`,
+   `.release-please-manifest.json`, and `docs/changelog.md`. The empty initial
+   manifest makes the first release `v0.1.0`, including the existing unreleased
+   history. CI runs on the release PR through an explicit workflow dispatch.
+3. Merge the release PR when ready. Release Please creates the version tag and
+   a draft GitHub Release. It calls the publishing workflow directly, building
+   and testing the tagged commit even if `main` advances. After all checks pass,
+   the workflow attaches the archives, checksums, and sample configuration,
+   publishes the container images, and publishes the draft release.
+
+GitHub does not trigger tag workflows for tags created with `GITHUB_TOKEN`, so
+the explicit workflow call is required. The manual tag path below remains
+available for releases managed without Release Please.
+
+Repository Settings > Actions > General must allow GitHub Actions to create
+pull requests. The Release Please job needs permission to write contents,
+issues, and pull requests. Its CI dispatch job also needs permission to write
+Actions. Organization policies must allow these permissions.
 
 ## Check the release workflow
 
@@ -18,7 +47,7 @@ temporary directory outside the checkout. Linux container tests use those same
 executables through the Dockerfile's named build context. No release is
 published until all checks, native packages, and container tests pass.
 
-## Publish a version
+## Publish a version manually
 
 1. Set the package version in `Cargo.toml` and update its entry in `Cargo.lock`.
    Use `MAJOR.MINOR.PATCH`, optionally followed by a SemVer prerelease such as
@@ -47,7 +76,7 @@ settings if users should pull images without signing in.
 
 ## Published files and images
 
-Each GitHub Release includes generated release notes, a separately downloadable
+Each GitHub Release includes release notes, a separately downloadable
 `config.toml.example`, `SHA256SUMS` covering the configuration and archives, and
 these archives, with `VERSION` replaced by the Cargo version:
 
@@ -81,9 +110,12 @@ Per-architecture images are first staged under `sha-COMMIT-amd64` and
 `sha-COMMIT-arm64`. The version and `latest` manifests are created only after
 both architectures pass their container tests.
 
-If a run fails, fix the cause and rerun the failed jobs for the same tag. Do not
-move a published version tag or replace a published release's assets. Manual
-runs never publish, including when run against a tag.
+If a run fails, fix the cause and rerun the failed jobs in the same Actions run.
+The draft remains unpublished until the publishing job succeeds. The job can
+replace assets in a draft while retrying, and refuses to replace assets in an
+already published release. Do not move a published version tag. Manual runs of
+the Release workflow never publish, including when run against a tag. Manually
+running Release Please on `main` performs its normal PR and release processing.
 
 ## Package locally
 

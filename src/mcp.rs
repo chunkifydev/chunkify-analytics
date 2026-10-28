@@ -20,8 +20,8 @@ const INSTRUCTIONS: &str = "Read-only access to one authenticated Chunkify proje
 
 pub async fn run(settings: &crate::settings::Settings) -> Result<(), Box<dyn std::error::Error>> {
     let url = settings
-        .var("mcp.collector_url")
-        .map_err(|_| "Set mcp.collector_url for the MCP companion")?;
+        .var("mcp.url")
+        .map_err(|_| "Set mcp.url for the MCP companion")?;
     let token = settings
         .var("mcp.secret_key")
         .map_err(|_| "Set mcp.secret_key to a private secret key")?;
@@ -68,7 +68,7 @@ struct Companion {
 
 impl Companion {
     fn new(url: &str, token: &str) -> Result<Self, &'static str> {
-        let mut url = Url::parse(url).map_err(|_| "Invalid mcp.collector_url")?;
+        let mut url = Url::parse(url).map_err(|_| "Invalid mcp.url")?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -76,7 +76,7 @@ impl Companion {
             || url.query().is_some()
             || url.fragment().is_some()
         {
-            return Err("Collector URL must be HTTP(S), without credentials, query or fragment");
+            return Err("mcp.url must be HTTP(S), without credentials, query or fragment");
         }
         if !url.path().ends_with('/') {
             url.set_path(&format!("{}/", url.path()));

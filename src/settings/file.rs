@@ -83,7 +83,7 @@ struct Experimental {
 struct Mcp {
     enabled: Option<bool>,
     allowed_hosts: Option<Vec<String>>,
-    collector_url: Option<String>,
+    url: Option<String>,
     secret_key: Option<String>,
 }
 
@@ -262,10 +262,8 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             .values
             .insert("mcp.allowed_hosts".into(), value.join(",").into());
     }
-    if let Some(value) = config.mcp.collector_url {
-        settings
-            .values
-            .insert("mcp.collector_url".into(), value.into());
+    if let Some(value) = config.mcp.url {
+        settings.values.insert("mcp.url".into(), value.into());
     }
     if let Some(value) = config.mcp.secret_key {
         settings

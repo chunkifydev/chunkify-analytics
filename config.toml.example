@@ -70,5 +70,6 @@ enabled = true
 allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
 # Used only by the local stdio companion. Keep real tokens in a private file
 # or CHUNKIFY_MCP_SECRET_KEY in the environment.
-collector_url = "http://127.0.0.1:4174"
+# The URL is the analytics HTTP API base URL.
+url = "http://127.0.0.1:4174"
 # secret_key = "..."

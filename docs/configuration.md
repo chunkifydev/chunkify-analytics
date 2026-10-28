@@ -22,6 +22,7 @@ TOML holds application settings. These deployment variables can override it:
 | `COLLECTOR_ADMIN_KEY` | Environment only | Enables project creation through the API. Unset or empty disables it. |
 | `COLLECTOR_DATA_DIR` | `data_dir` | Container state directory. |
 | `COLLECTOR_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
+| `COLLECTOR_STORAGE_BACKEND` | `storage.backend` | Select `local` or `s3` storage. |
 | `COLLECTOR_S3_URL`, `COLLECTOR_S3_ENDPOINT`, `COLLECTOR_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
 | `COLLECTOR_S3_ACCESS_KEY_ID`, `COLLECTOR_S3_SECRET_ACCESS_KEY`, `COLLECTOR_S3_SESSION_TOKEN` | Corresponding `storage` fields | Inject credentials without putting them in TOML. |
 | `COLLECTOR_S3_URL_STYLE`, `COLLECTOR_S3_USE_SSL` | Corresponding `storage` fields | Provider addressing and TLS. |

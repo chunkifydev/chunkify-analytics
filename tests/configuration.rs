@@ -196,7 +196,6 @@ fn application_settings_are_toml_only_except_deployment_overrides() {
     )
     .unwrap();
     let removed = [
-        "COLLECTOR_STORAGE_BACKEND",
         "COLLECTOR_LOCAL_PATH",
         "COLLECTOR_PROFILE",
         "COLLECTOR_ALLOWED_ORIGINS",
@@ -299,14 +298,41 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
 }
 
 #[test]
+fn storage_backend_dotenv_works_without_toml_and_process_environment_has_priority() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.0.join(".env"), "COLLECTOR_STORAGE_BACKEND=s3\n").unwrap();
+    let output = fixture.run(&["config", "check"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("S3 storage requires storage.url"));
+
+    let output = fixture
+        .command()
+        .args(["config", "check"])
+        .env("COLLECTOR_S3_URL", "s3://analytics/production/")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(!fixture.0.join("data").exists());
+
+    let output = fixture
+        .command()
+        .args(["config", "check"])
+        .env("COLLECTOR_STORAGE_BACKEND", "local")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn s3_environment_overrides_toml_and_validates_addressing() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.0.join("config.toml"),
-        "[storage]\nbackend = 's3'\nurl_style = 'invalid'\n",
+        "[storage]\nbackend = 'local'\nurl_style = 'invalid'\n",
     )
     .unwrap();
     let overrides = [
+        ("COLLECTOR_STORAGE_BACKEND", "s3"),
         ("COLLECTOR_S3_URL", "s3://analytics/production/"),
         ("COLLECTOR_S3_ENDPOINT", "account.r2.cloudflarestorage.com"),
         ("COLLECTOR_S3_REGION", "auto"),
@@ -324,6 +350,8 @@ fn s3_environment_overrides_toml_and_validates_addressing() {
         .unwrap();
     assert!(output.status.success(), "{output:?}");
     for (key, value) in [
+        ("COLLECTOR_STORAGE_BACKEND", "invalid"),
+        ("COLLECTOR_STORAGE_BACKEND", ""),
         ("COLLECTOR_S3_URL_STYLE", "invalid"),
         ("COLLECTOR_S3_USE_SSL", "invalid"),
         ("COLLECTOR_S3_URL", "https://invalid"),

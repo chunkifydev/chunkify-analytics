@@ -8,6 +8,7 @@ const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
     ("COLLECTOR_ADMIN_KEY", "admin_key"),
     ("COLLECTOR_DATA_DIR", "data_dir"),
     ("COLLECTOR_BIND", "server.bind"),
+    ("COLLECTOR_STORAGE_BACKEND", "storage.backend"),
     ("COLLECTOR_S3_URL", "storage.url"),
     ("COLLECTOR_S3_ENDPOINT", "storage.endpoint"),
     ("COLLECTOR_S3_REGION", "storage.region"),

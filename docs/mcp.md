@@ -87,7 +87,7 @@ For a client using `mcpServers` JSON:
       "command": "/absolute/path/to/chunkify-analytics",
       "args": ["mcp"],
       "env": {
-        "CHUNKIFY_MCP_COLLECTOR_URL": "http://127.0.0.1:4174",
+        "CHUNKIFY_MCP_URL": "http://127.0.0.1:4174",
         "CHUNKIFY_MCP_SECRET_KEY": "YOUR_PRIVATE_SECRET_KEY"
       }
     }
@@ -95,7 +95,9 @@ For a client using `mcpServers` JSON:
 }
 ```
 
-The adapter also accepts `[mcp].collector_url` and `[mcp].secret_key` in TOML.
+The adapter also accepts `[mcp].url` and `[mcp].secret_key` in TOML.
+Set the URL to the analytics HTTP API base URL, such as `http://127.0.0.1:4174`.
+The adapter appends the API paths it calls.
 Use `--config /path/to/config.toml mcp` for an explicit file. Environment values
 can come from `.env` or `--env-file`. Keep files containing tokens private.
 The client starts and stops the adapter; use matching analytics server and adapter versions.
@@ -120,7 +122,7 @@ In your private Codex configuration:
 [mcp_servers.chunkify-analytics]
 command = "/absolute/path/to/chunkify-analytics"
 args = ["mcp"]
-env_vars = ["CHUNKIFY_MCP_COLLECTOR_URL", "CHUNKIFY_MCP_SECRET_KEY"]
+env_vars = ["CHUNKIFY_MCP_URL", "CHUNKIFY_MCP_SECRET_KEY"]
 required = true
 ```
 

@@ -27,7 +27,7 @@ for deployment overrides, or set these variables directly in your container:
 | `CHUNKIFY_S3_URL`, `CHUNKIFY_S3_ENDPOINT`, `CHUNKIFY_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
 | `CHUNKIFY_S3_ACCESS_KEY_ID`, `CHUNKIFY_S3_SECRET_ACCESS_KEY`, `CHUNKIFY_S3_SESSION_TOKEN` | Corresponding `storage` fields | Inject credentials without putting them in TOML. |
 | `CHUNKIFY_S3_URL_STYLE`, `CHUNKIFY_S3_USE_SSL` | Corresponding `storage` fields | Provider addressing and TLS. |
-| `CHUNKIFY_MCP_COLLECTOR_URL`, `CHUNKIFY_MCP_SECRET_KEY` | `mcp.collector_url`, `mcp.secret_key` | Optional stdio adapter connection and secret. |
+| `CHUNKIFY_MCP_URL`, `CHUNKIFY_MCP_SECRET_KEY` | `mcp.url`, `mcp.secret_key` | Optional stdio adapter connection and secret. |
 
 The analytics server also loads `.env` from the working directory. Use `--env-file` to
 select another file. Precedence is CLI flags, process environment, environment

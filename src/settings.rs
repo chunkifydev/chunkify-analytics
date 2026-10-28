@@ -17,7 +17,7 @@ const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
     ("CHUNKIFY_S3_SESSION_TOKEN", "storage.session_token"),
     ("CHUNKIFY_S3_URL_STYLE", "storage.url_style"),
     ("CHUNKIFY_S3_USE_SSL", "storage.use_ssl"),
-    ("CHUNKIFY_MCP_COLLECTOR_URL", "mcp.collector_url"),
+    ("CHUNKIFY_MCP_URL", "mcp.url"),
     ("CHUNKIFY_MCP_SECRET_KEY", "mcp.secret_key"),
 ];
 

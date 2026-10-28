@@ -37,7 +37,7 @@ async fn connect(url: &str, token: &str, modern: bool) -> Mcp {
     let mut command = clean_command();
     command
         .arg("mcp")
-        .env("CHUNKIFY_MCP_COLLECTOR_URL", url)
+        .env("CHUNKIFY_MCP_URL", url)
         .env("CHUNKIFY_MCP_SECRET_KEY", token)
         // This would make normal collector configuration fail. MCP must not load it.
         .env("CHUNKIFY_BIND", "invalid")
@@ -1126,7 +1126,7 @@ fn startup_does_not_echo_secrets_and_protocol_frames_are_bounded() {
     ] {
         let output = clean_command()
             .arg("mcp")
-            .env("CHUNKIFY_MCP_COLLECTOR_URL", url)
+            .env("CHUNKIFY_MCP_URL", url)
             .env("CHUNKIFY_MCP_SECRET_KEY", "private-token-value")
             .output()
             .unwrap();
@@ -1137,7 +1137,7 @@ fn startup_does_not_echo_secrets_and_protocol_frames_are_bounded() {
     }
     let mut child = clean_command()
         .arg("mcp")
-        .env("CHUNKIFY_MCP_COLLECTOR_URL", "http://127.0.0.1:1")
+        .env("CHUNKIFY_MCP_URL", "http://127.0.0.1:1")
         .env("CHUNKIFY_MCP_SECRET_KEY", "private-token-value")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1161,7 +1161,7 @@ async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
     std::fs::write(
         &file,
         format!(
-            "CHUNKIFY_MCP_COLLECTOR_URL={}\nCHUNKIFY_MCP_SECRET_KEY={}\nCHUNKIFY_BIND=invalid\n",
+            "CHUNKIFY_MCP_URL={}\nCHUNKIFY_MCP_SECRET_KEY={}\nCHUNKIFY_BIND=invalid\n",
             collector.url,
             collector.keys["secret_key"].as_str().unwrap()
         ),
@@ -1185,7 +1185,7 @@ async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
     std::fs::write(
         &file,
         format!(
-            "[server]\nbind = 'invalid'\n[mcp]\ncollector_url = '{}'\nsecret_key = '{}'\n",
+            "[server]\nbind = 'invalid'\n[mcp]\nurl = '{}'\nsecret_key = '{}'\n",
             collector.url,
             collector.keys["secret_key"].as_str().unwrap()
         ),

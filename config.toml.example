@@ -1,4 +1,4 @@
-# Copy to collector.toml. Omitted settings keep their built-in defaults.
+# Copy to config.toml. Omitted settings keep their built-in defaults.
 # Precedence: CLI flags > process environment > .env > TOML > defaults.
 # Relative TOML data paths are resolved beside this file.
 data_dir = "./data"
@@ -30,6 +30,19 @@ trusted_proxies = []
 store_ip = true
 max_body_bytes = 65536
 ingest_per_second = 100
+
+[rate_limits]
+# Per-project request rates, shared across HTTP, MCP and all project keys.
+# Rates refill continuously. Reads allow the configured burst; export burst
+# capacities equal their per-minute rates. All values must be positive.
+read_per_minute = 120
+read_burst = 20
+read_concurrent_per_project = 2
+read_concurrent = 8
+export_links_per_minute = 10
+export_downloads_per_minute = 2
+export_concurrent_per_project = 1
+export_concurrent = 4
 
 [retention]
 seconds = 2592000

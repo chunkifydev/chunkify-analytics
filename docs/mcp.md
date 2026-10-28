@@ -96,7 +96,7 @@ For a client using `mcpServers` JSON:
 ```
 
 The adapter also accepts `[mcp].collector_url` and `[mcp].secret_key` in TOML.
-Use `--config /path/to/collector.toml mcp` for an explicit file. Environment values
+Use `--config /path/to/config.toml mcp` for an explicit file. Environment values
 can come from `.env` or `--env-file`. Keep files containing tokens private.
 The client starts and stops the adapter; use matching collector and adapter versions.
 
@@ -199,6 +199,13 @@ page. `limit` and `cursor` require `group_by` for summary, quality and engagemen
 Error groups always paginate. Session pages, session event histories and dimension
 values also default to 10 rows and accept at most 100.
 Each adapter and the embedded endpoint allow up to four concurrent queries.
+The collector also applies project budgets shared with HTTP and other keys:
+120 analytics reads/minute with a burst of 20, at most 2 queued/running reads per
+project and 8 across the server. Rate or concurrency rejections return
+`error.code: "rate_limited"`, HTTP status 429 and `error.retry_after_seconds`.
+Use the delay before retrying. `describe_api` and protocol discovery do not consume
+read budgets. All server budgets are configurable in
+[`config.toml`](configuration.md#read-and-export-limits).
 Normal time-series queries return at most 1000 UTC buckets and have no pagination.
 Export links are small metadata responses. The CSV download runs outside the
 normal MCP row, response-size and query-deadline limits.
@@ -265,3 +272,6 @@ Custom attributes and nested arrays remain available through `list_events`.
 `timeseries` also accepts `kind`; `dimensions` requires `query.dimension`.
 Date filters are optional except for time series. There is no fixed 30-day
 export cap. See [CSV exports](api.md#csv-exports) for format and deployment details.
+Creating links and downloading CSV use separate project budgets, defaulting to
+10 links/minute, 2 download starts/minute, one active generation per project and
+four across the server. New links or keys do not bypass the download budget.

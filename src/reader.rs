@@ -176,7 +176,8 @@ mod tests {
         }
         let overflow = reader.call("test_overflow", |_| Ok(())).await;
         assert!(
-            overflow.is_err_and(|error| error.0 == axum::http::StatusCode::SERVICE_UNAVAILABLE)
+            overflow
+                .is_err_and(|error| error.status == axum::http::StatusCode::SERVICE_UNAVAILABLE)
         );
         drop(waiting);
         release.send(()).unwrap();

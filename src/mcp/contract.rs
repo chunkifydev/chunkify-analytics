@@ -227,7 +227,7 @@ impl Contract {
             let query: crate::query::TimeseriesQuery =
                 serde_json::from_value(Value::Object(arguments.clone()))
                     .map_err(|_| "Invalid query arguments")?;
-            query.validate().map_err(|error| error.1)?;
+            query.validate().map_err(|error| error.message)?;
         } else {
             let mut args = arguments.clone();
             if path == "/v1/views/{view_id}" {
@@ -247,7 +247,7 @@ impl Contract {
             {
                 return Err("Pagination requires group_by for this tool".into());
             }
-            query.filters().map_err(|error| error.1)?;
+            query.filters().map_err(|error| error.message)?;
         }
         if parameters.contains_key("limit")
             && (matches!(

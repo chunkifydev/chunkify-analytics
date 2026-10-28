@@ -31,6 +31,7 @@ pub struct Store {
     writer: Writer,
     reader: Option<Reader>,
     remote: Option<RemoteReads>,
+    limits: Option<Arc<crate::limits::Reads>>,
 }
 
 #[derive(Clone)]
@@ -45,14 +46,19 @@ impl Store {
         projects: Arc<crate::projects::Registry>,
     ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
         let crate::backend::Backend::S3(settings) = &config.backend else {
-            return Self::open(
+            let (mut store, worker) = Self::open(
                 &config.database_path(),
                 config.batch.clone(),
                 config.profile,
                 config.checkpoint_threshold_mib,
                 config.separate_reads,
                 config.duckdb_threads,
-            );
+            )?;
+            store.limits = Some(Arc::new(crate::limits::Reads::new(
+                &config.rate_limits,
+                projects,
+            )));
+            return Ok((store, worker));
         };
         let settings_db =
             database_settings(config.checkpoint_threshold_mib, config.duckdb_threads)?;
@@ -78,6 +84,10 @@ impl Store {
             Self {
                 writer: writer.clone(),
                 reader: None,
+                limits: Some(Arc::new(crate::limits::Reads::new(
+                    &config.rate_limits,
+                    projects.clone(),
+                ))),
                 remote: Some(RemoteReads {
                     store: remote,
                     projects,
@@ -119,6 +129,7 @@ impl Store {
                 writer: writer.clone(),
                 reader,
                 remote: None,
+                limits: None,
             },
             DatabaseWorker {
                 database: worker,
@@ -158,6 +169,16 @@ impl Store {
         project: String,
         operation: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
+        let admission = self
+            .limits
+            .as_ref()
+            .map(|limits| limits.admit(&project))
+            .transpose()?;
+        // The queued database operation owns its permits even if HTTP/MCP cancels.
+        let operation = move |connection: &Connection| {
+            let _admission = admission;
+            operation(connection)
+        };
         if let Some(reader) = &self.reader {
             return reader.call(name, operation).await;
         }
@@ -207,6 +228,7 @@ impl Store {
             writer: self.writer.clone(),
             reader: Some(reader),
             remote: self.remote.clone(),
+            limits: None,
         })
     }
 
@@ -433,6 +455,9 @@ mod summary_tests;
 
 #[cfg(test)]
 mod page_lookup_tests;
+
+#[cfg(test)]
+mod limits_tests;
 
 mod exploration;
 mod metrics;

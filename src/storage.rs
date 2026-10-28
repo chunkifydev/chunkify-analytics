@@ -454,7 +454,7 @@ fn migrate_v4(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
                 .map(|s| serde_json::from_str::<Value>(&s))
                 .transpose()?;
             let values = encode(&event, context.as_ref(), received, "default", None)
-                .map_err(|error| error.1)?;
+                .map_err(|error| error.message)?;
             appender.append_row(appender_params_from_iter(
                 std::iter::once(SqlValue::BigInt(id)).chain(values),
             ))?;
@@ -597,7 +597,7 @@ mod tests {
         let mut rows = statement.query(params![0_i64, i64::MAX, 1000_i64]).unwrap();
         let mut result = Vec::new();
         while let Some(row) = rows.next().unwrap() {
-            result.push(decode(row).map_err(|e| e.1).unwrap());
+            result.push(decode(row).map_err(|e| e.message).unwrap());
         }
         result
     }
@@ -651,7 +651,7 @@ mod tests {
                     ),
                 };
                 let values = encode(&e, context.as_ref(), 123456789, "default", None)
-                    .map_err(|e| e.1)
+                    .map_err(|e| e.message)
                     .unwrap();
                 connection
                     .execute(&INSERT_SQL, params_from_iter(&values))
@@ -703,7 +703,7 @@ mod tests {
             let e = event(1);
             let context = event_context_v1(&e, Some(&json!({"client_ip": "192.0.2.1"}))).unwrap();
             connection.execute(&format!("INSERT INTO events VALUES(3, 'event-1', 'view', 'video', NULL, 'chunkify.video.view_started', 1, ?, 123, 123456789, ?{})", if version == 3 {", ?"} else {""}),
-                params_from_iter([SqlValue::BigInt(event::timestamp(e["occurred_at"].as_str().unwrap()).map_err(|e| e.1).unwrap()), SqlValue::Text(e.to_string())].into_iter()
+                params_from_iter([SqlValue::BigInt(event::timestamp(e["occurred_at"].as_str().unwrap()).map_err(|e| e.message).unwrap()), SqlValue::Text(e.to_string())].into_iter()
                     .chain((version == 3).then(|| SqlValue::Text(context.to_string()))))).unwrap();
             connection
                 .execute(
@@ -734,7 +734,7 @@ mod tests {
                     &INSERT_SQL,
                     params_from_iter(
                         encode(&next, None, 123456790, "default", None)
-                            .map_err(|e| e.1)
+                            .map_err(|e| e.message)
                             .unwrap(),
                     ),
                 )
@@ -758,7 +758,7 @@ mod tests {
             };
             connection.execute("INSERT INTO events(event_id, view_id, video_id, viewer_id, event_name, sequence, occurred_at_ms, playing_time_ms, received_at_ms, payload, event_context) VALUES (?, 'view', 'video', NULL, 'chunkify.video.view_started', ?, ?, 123, 123456789, ?, ?)",
                 params![event["event_id"].as_str().unwrap(), index as i64,
-                    event::timestamp(event["occurred_at"].as_str().unwrap()).map_err(|e| e.1).unwrap(),
+                    event::timestamp(event["occurred_at"].as_str().unwrap()).map_err(|e| e.message).unwrap(),
                     event.to_string(), context.as_ref().map(Value::to_string)]).unwrap();
             expected.push((event, context));
         }

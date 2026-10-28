@@ -1,11 +1,11 @@
 # Configuration
 
-Copy [collector.toml.example](../collector.toml.example) to `collector.toml`.
+Copy [config.toml.example](../config.toml.example) to `config.toml`.
 The collector loads it from the working directory, or use `--config`:
 
 ```sh
-chunkify-analytics --config /etc/chunkify/collector.toml config check
-chunkify-analytics --config /etc/chunkify/collector.toml serve
+chunkify-analytics --config /etc/chunkify/config.toml config check
+chunkify-analytics --config /etc/chunkify/config.toml serve
 ```
 
 Relative TOML paths resolve beside the file. CLI and environment paths resolve
@@ -102,11 +102,45 @@ Concurrent writes share batches up to the event, byte or delay limit. Reads can
 flush a pending batch early. A request larger than either batch limit returns
 413. Increase both limits when accepting larger events.
 
-Rate limits return 429 with `Retry-After: 1`. Full request or write-buffer budgets
+Ingestion rate limits return 429 with `Retry-After: 1`. Full request or write-buffer budgets
 return 503. The byte budget covers prepared writes, not total process memory.
 Batch delay excludes time waiting for storage, so it is not a response-time limit.
 Graceful shutdown finishes admitted writes. See [storage guarantees](storage.md)
 for duplicate and failure behavior.
+
+### Read and export limits
+
+Override these settings in the `[rate_limits]` section of `config.toml` and restart
+the collector. They apply to the server, including requests through the optional
+MCP companion. They have no environment-variable overrides.
+
+| TOML field | Default | Meaning |
+| --- | --- | --- |
+| `rate_limits.read_per_minute` | `120` | Average analytics reads per minute per project. Range 1..1000000. |
+| `rate_limits.read_burst` | `20` | Maximum burst of analytics reads per project. Range 1..1000000. |
+| `rate_limits.read_concurrent_per_project` | `2` | Maximum queued or running analytics reads per project. Range 1..256. |
+| `rate_limits.read_concurrent` | `8` | Maximum queued or running analytics reads across the server. Range 1..256. |
+| `rate_limits.export_links_per_minute` | `10` | Average export links created per minute per project, with the same burst capacity. Range 1..1000000. |
+| `rate_limits.export_downloads_per_minute` | `2` | Average CSV download starts per minute per project, with the same burst capacity. Range 1..1000000. |
+| `rate_limits.export_concurrent_per_project` | `1` | Maximum active CSV generations per project. Range 1..64. |
+| `rate_limits.export_concurrent` | `4` | Maximum active CSV generations across the server. Range 1..64. |
+
+Per-project concurrency cannot exceed the corresponding server setting. Rates
+refill continuously using governor; for example, 120 reads/minute replenishes
+one request every half-second, up to the configured read burst.
+
+Each project shares its budgets across HTTP, MCP, private keys and export links.
+Key creation, rotation and live project settings updates do not reset them.
+Budgets live in memory and reset when the collector restarts. Ingestion uses its
+separate limits. Health checks, MCP discovery/documentation and export HEAD
+requests do not run database queries and do not consume the read/download budgets.
+
+Excess requests return 429 immediately, without waiting for a slot or starting a
+query. `Retry-After` gives the rounded-up time until the next rate allowance;
+concurrency rejections use one second because the finish time is unknown.
+MCP exposes the delay as `error.retry_after_seconds`. A cancelled query holds its
+concurrency permits until its queued or running database job finishes. Accepted
+exports still include all matching rows, without an export row cap.
 
 Larger local checkpoint thresholds allow a larger WAL and more crash recovery
 work. Measure with your traffic before changing performance settings.

@@ -36,22 +36,40 @@ struct App {
 }
 
 #[derive(Debug)]
-pub struct ApiError(pub StatusCode, pub String);
+pub struct ApiError {
+    pub status: StatusCode,
+    pub message: String,
+    pub retry_after: Option<u64>,
+}
 impl ApiError {
+    pub fn new(status: StatusCode, message: String) -> Self {
+        Self {
+            status,
+            message,
+            retry_after: None,
+        }
+    }
     pub fn bad(message: impl Into<String>) -> Self {
-        Self(StatusCode::BAD_REQUEST, message.into())
+        Self::new(StatusCode::BAD_REQUEST, message.into())
     }
     pub fn unavailable() -> Self {
-        Self(
+        Self::new(
             StatusCode::SERVICE_UNAVAILABLE,
             "Collector is busy or unavailable".into(),
         )
     }
     pub fn internal() -> Self {
-        Self(
+        Self::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Storage operation failed".into(),
         )
+    }
+    pub fn limited(message: &str, delay: std::time::Duration) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+            retry_after: Some((delay.as_secs() + u64::from(delay.subsec_nanos() > 0)).max(1)),
+        }
     }
 }
 impl From<duckdb::Error> for ApiError {
@@ -61,19 +79,21 @@ impl From<duckdb::Error> for ApiError {
 }
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let mut response = (self.0, Json(json!({"error": self.1}))).into_response();
+        let mut response = (self.status, Json(json!({"error": self.message}))).into_response();
         response
             .headers_mut()
             .insert("cache-control", HeaderValue::from_static("no-store"));
-        if self.0 == StatusCode::UNAUTHORIZED {
+        if self.status == StatusCode::UNAUTHORIZED {
             response
                 .headers_mut()
                 .insert("www-authenticate", HeaderValue::from_static("Bearer"));
         }
-        if self.0 == StatusCode::TOO_MANY_REQUESTS {
-            response
-                .headers_mut()
-                .insert("retry-after", HeaderValue::from_static("1"));
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response.headers_mut().insert(
+                "retry-after",
+                HeaderValue::from_str(&self.retry_after.unwrap_or(1).to_string())
+                    .expect("numeric retry delay"),
+            );
         }
         response
     }
@@ -86,7 +106,7 @@ pub fn router(
     admin: Arc<crate::admin::Controller>,
 ) -> Router {
     let app = App {
-        exports: crate::exports::Exports::new(store.clone(), projects.clone()),
+        exports: crate::exports::Exports::new(store.clone(), projects.clone(), &config.rate_limits),
         store,
         projects,
         admin,
@@ -208,7 +228,7 @@ async fn access(
                 Some(origin.clone())
             }
             Some(_) => {
-                return Err(ApiError(
+                return Err(ApiError::new(
                     StatusCode::FORBIDDEN,
                     "Origin is not allowed".into(),
                 ));
@@ -237,7 +257,7 @@ async fn access(
                 })
             });
         if origin.is_none() || method != Some("POST") || !headers_ok {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "Unsupported preflight request".into(),
             ));
@@ -332,7 +352,7 @@ async fn read_json(request: Request, limit: usize) -> Result<Value, ApiError> {
                 .eq_ignore_ascii_case("application/json")
         })
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "Expected application/json".into(),
         ));
@@ -342,13 +362,13 @@ async fn read_json(request: Request, limit: usize) -> Result<Value, ApiError> {
         .get("content-encoding")
         .is_some_and(|value| value != "identity")
     {
-        return Err(ApiError(
+        return Err(ApiError::new(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "Unsupported Content-Encoding".into(),
         ));
     }
     let bytes = to_bytes(request.into_body(), limit).await.map_err(|_| {
-        ApiError(
+        ApiError::new(
             StatusCode::PAYLOAD_TOO_LARGE,
             "Request body exceeds limit or could not be read".into(),
         )
@@ -619,7 +639,7 @@ async fn download_export(
         chunks
             .recv()
             .await
-            .map(|chunk| (chunk.map_err(|e| std::io::Error::other(e.1)), chunks))
+            .map(|chunk| (chunk.map_err(|e| std::io::Error::other(e.message)), chunks))
     });
     csv_response(axum::body::Body::from_stream(stream), &report.filename)
 }

@@ -4,7 +4,7 @@
   "info": {
     "title": "Chunkify analytics collector API",
     "version": "1.1.0",
-    "description": "Collect playback events, query analytics, and manage your project.",
+    "description": "Collect playback events, query analytics, and manage your project. Analytics reads share configurable per-project budgets across HTTP and MCP: defaults are 120 reads/minute with burst 20, at most 2 queued/running reads per project and 8 server-wide. Export link creation and downloads have separate project budgets. Rate/concurrency rejections return 429 with Retry-After. Limits use continuous refill and reset on collector restart, not key rotation. Configure [rate_limits] in config.toml.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -225,6 +225,31 @@
                   "const": "no-store"
                 },
                 "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
               }
             },
             "content": {
@@ -807,6 +832,31 @@
               }
             }
           },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed.",
             "headers": {
@@ -960,6 +1010,31 @@
                   "const": "no-store"
                 },
                 "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
               }
             },
             "content": {
@@ -1148,6 +1223,31 @@
               }
             }
           },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed.",
             "headers": {
@@ -1326,6 +1426,31 @@
               }
             }
           },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
             "headers": {
@@ -1483,6 +1608,31 @@
                   "const": "no-store"
                 },
                 "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
               }
             },
             "content": {
@@ -2330,6 +2480,31 @@
               }
             }
           },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed.",
             "headers": {
@@ -2490,6 +2665,31 @@
               }
             }
           },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed.",
             "headers": {
@@ -2630,6 +2830,31 @@
                   "const": "no-store"
                 },
                 "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
               }
             },
             "content": {
@@ -2782,6 +3007,31 @@
                   "const": "no-store"
                 },
                 "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
               }
             },
             "content": {
@@ -2950,6 +3200,31 @@
               }
             }
           },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed.",
             "headers": {
@@ -2994,7 +3269,7 @@
       "get": {
         "operationId": "downloadExport",
         "summary": "Stream a scoped CSV download",
-        "description": "The token authorizes only its saved project and query. Requires no Authorization header and accepts no query parameters. Generate CSV on demand from one read snapshot on a dedicated connection; stream with bounded application buffers and backpressure. Dataset is selected when the link is opened. Rows are not capped by query pagination. Nested metric columns use slash-separated paths. Events have documented scalar columns and flat context.* columns. Custom attributes, nested arrays and historical OTLP payloads are excluded. CSV cells never contain JSON objects or arrays. Nulls are empty cells; spreadsheet-formula strings are prefixed with an apostrophe. Interrupted or failed downloads terminate the stream; retry the full download. No files are retained. Four downloads execute concurrently; additional downloads wait. Link expiry is checked before starting, not during an active download. S3 retention/deletion can remove source objects during a download.",
+        "description": "The token authorizes only its saved project and query. Requires no Authorization header and accepts no query parameters. Generate CSV on demand from one read snapshot on a dedicated connection; stream with bounded application buffers and backpressure. Dataset is selected when the link is opened. Rows are not capped by query pagination. Nested metric columns use slash-separated paths. Events have documented scalar columns and flat context.* columns. Custom attributes, nested arrays and historical OTLP payloads are excluded. CSV cells never contain JSON objects or arrays. Nulls are empty cells; spreadsheet-formula strings are prefixed with an apostrophe. Interrupted or failed downloads terminate the stream; retry the full download. No files are retained. Defaults: 2 download starts/minute per project with burst capacity 2, one active CSV generation per project and four server-wide. Limits are shared across keys and links. Excess requests receive 429 with Retry-After instead of queueing. Override limits in config.toml [rate_limits]. Link expiry is checked before starting, not during an active download. S3 retention/deletion can remove source objects during a download.",
         "security": [],
         "parameters": [
           {
@@ -3068,6 +3343,31 @@
               "text/plain": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }

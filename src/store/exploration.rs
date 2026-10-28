@@ -115,7 +115,7 @@ impl Store {
                 .next()
                 .transpose()?
                 .ok_or_else(|| {
-                    ApiError(
+                    ApiError::new(
                         axum::http::StatusCode::NOT_FOUND,
                         "View has no retained start".into(),
                     )

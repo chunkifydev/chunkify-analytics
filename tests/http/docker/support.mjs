@@ -73,7 +73,7 @@ export async function containerCollector({ settings = {}, resources = [], enviro
   try {
     if (seed) await copyVolume(seed, volume);
     await docker(["run", "--rm", "--user=0:0", "--network=none", "--mount", `type=volume,src=${volume},dst=/data`,
-      "--entrypoint", "sh", image, "-c", 'umask 077; printf %s "$1" > /data/collector.toml; chown 10001:10001 /data/collector.toml',
+      "--entrypoint", "sh", image, "-c", 'umask 077; printf %s "$1" > /data/config.toml; chown 10001:10001 /data/config.toml',
       "sh", configSource(settings)]);
     if (!seed) await docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data`, image, "init"]);
     // Local administrator access to the documented key file, never printed.

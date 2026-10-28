@@ -165,6 +165,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
   }
   if (await hostFreeBytes() < (safety.min_free_disk_mib + safety.max_data_mib) * mib) throw new Error("Benchmark requires its data budget plus the free-disk floor before starting");
   const settings = { "server.ingest_per_second": String(config.rate_limit), "server.max_body_bytes": "1048576",
+    "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     "retention.seconds": "2592000", "retention.interval_seconds": "5",
     "profile": String(config.profile), ...config.write_settings };
   const server = await containerCollector({ resources, settings, seed: fixture?.volume });

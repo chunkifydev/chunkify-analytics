@@ -117,7 +117,7 @@ impl Companion {
                     failure("invalid_arguments", "Expected resource and optional query object", None)
                 })?;
             request.validate().map_err(|error| {
-                failure("invalid_arguments", &error.1, None)
+                failure("invalid_arguments", &error.message, None)
             })?;
             if serde_json::to_vec(&request.query).expect("query").len() > 4096 {
                 return Err(failure("invalid_arguments", "Export filters must fit in 4 KiB", None));
@@ -127,7 +127,7 @@ impl Companion {
                     let owner = owner.ok_or_else(|| status_failure(401))?;
                     let base = base.ok_or_else(|| status_failure(400))?;
                     exports.create(&owner, request, &base)
-                        .map_err(|error| status_failure(error.0.as_u16()))?
+                        .map_err(api_failure)?
                 }
                 Backend::Remote { url, client } => {
                     let mut response = client
@@ -137,7 +137,7 @@ impl Companion {
                         .await
                         .map_err(http_failure)?;
                     if response.status().as_u16() != 201 {
-                        return Err(status_failure(response.status().as_u16()));
+                        return Err(response_failure(&response));
                     }
                     let mut bytes = Vec::new();
                     while let Some(chunk) = response.chunk().await.map_err(http_failure)? {
@@ -252,10 +252,7 @@ impl Companion {
                 if path == "/v1/views" {
                     let query = serde_json::from_value(Value::Object(args))
                         .map_err(|_| status_failure(400))?;
-                    return store
-                        .views(project, query)
-                        .await
-                        .map_err(|e| status_failure(e.0.as_u16()));
+                    return store.views(project, query).await.map_err(api_failure);
                 }
                 let value = Value::Object(args);
                 let result = if path == "/v1/timeseries" {
@@ -290,7 +287,7 @@ impl Companion {
                         _ => return Err(status_failure(404)),
                     }
                 };
-                result.map_err(|error| status_failure(error.0.as_u16()))
+                result.map_err(api_failure)
             }
             Backend::Remote { url, client } => {
                 let mut url = url
@@ -323,7 +320,7 @@ impl Companion {
                 }
                 let mut response = client.get(url).send().await.map_err(http_failure)?;
                 if response.status().as_u16() != 200 {
-                    return Err(status_failure(response.status().as_u16()));
+                    return Err(response_failure(&response));
                 }
                 let mut bytes = Vec::new();
                 while let Some(chunk) = response.chunk().await.map_err(http_failure)? {
@@ -501,7 +498,11 @@ fn status_failure(status: u16) -> CallToolResult {
             "unauthorized",
             "The configured credential cannot read this project. Configure a valid private secret key.",
         ),
-        429 | 503 => (
+        429 => (
+            "rate_limited",
+            "The project or server request limit was reached. Wait for retry_after_seconds before retrying.",
+        ),
+        503 => (
             "unavailable",
             "The collector is busy or unavailable. Retry later.",
         ),
@@ -515,4 +516,27 @@ fn status_failure(status: u16) -> CallToolResult {
         ),
     };
     failure(code, message, Some(status))
+}
+
+fn with_retry(mut result: CallToolResult, retry_after: Option<u64>) -> CallToolResult {
+    if let Some(seconds) = retry_after
+        && let Some(content) = result.structured_content.as_mut()
+    {
+        content["error"]["retry_after_seconds"] = json!(seconds);
+        return CallToolResult::structured_error(content.clone());
+    }
+    result
+}
+
+fn api_failure(error: crate::api::ApiError) -> CallToolResult {
+    with_retry(status_failure(error.status.as_u16()), error.retry_after)
+}
+
+fn response_failure(response: &reqwest::Response) -> CallToolResult {
+    let delay = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    with_retry(status_failure(response.status().as_u16()), delay)
 }

@@ -10,7 +10,7 @@ pub struct Cli {
     /// Load environment values from this file instead of ./.env
     #[arg(long, global = true)]
     pub env_file: Option<PathBuf>,
-    /// Load TOML configuration from this file instead of ./collector.toml
+    /// Load TOML configuration from this file instead of ./config.toml
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
     #[command(subcommand)]

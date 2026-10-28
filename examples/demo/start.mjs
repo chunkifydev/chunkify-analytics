@@ -116,7 +116,7 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
     });
     const state = await prepareData(dir, binary, env, signal);
     const origins = [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'];
-    await writeFile(path.join(dir, 'collector.toml'), `server.allowed_origins = ${JSON.stringify(origins)}\nserver.ingest_per_second = 10000\nduckdb.threads = 1\nretention.seconds = 0\n`, { mode: 0o600 });
+    await writeFile(path.join(dir, 'config.toml'), `server.allowed_origins = ${JSON.stringify(origins)}\nserver.ingest_per_second = 10000\nduckdb.threads = 1\nretention.seconds = 0\n`, { mode: 0o600 });
     signal.throwIfAborted();
     collectorLog = createWriteStream(path.join(dir, 'collector.log'), { flags: 'a', mode: 0o600 });
     child = spawn(binary, ['serve'], { env, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });

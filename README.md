@@ -40,10 +40,10 @@ On a small build machine, add
 ### 2. Configure your website
 
 ```sh
-cp collector.toml.example collector.toml
+cp config.toml.example config.toml
 ```
 
-Edit `collector.toml` and set the website origin that will send events:
+Edit `config.toml` and set the website origin that will send events:
 
 ```toml
 [server]
@@ -68,7 +68,7 @@ docker volume create chunkify-analytics-data
 
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  --mount type=bind,src="$(pwd)/collector.toml",dst=/data/collector.toml,readonly \
+  --mount type=bind,src="$(pwd)/config.toml",dst=/data/config.toml,readonly \
   chunkify-analytics:local init
 ```
 
@@ -80,7 +80,7 @@ and refuses to overwrite existing credentials.
 ```sh
 docker run -d --name chunkify-analytics --restart unless-stopped \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  --mount type=bind,src="$(pwd)/collector.toml",dst=/data/collector.toml,readonly \
+  --mount type=bind,src="$(pwd)/config.toml",dst=/data/config.toml,readonly \
   -p 127.0.0.1:4174:4174 \
   chunkify-analytics:local
 ```
@@ -100,7 +100,7 @@ Docker network instead.
 Keep the named volume when replacing containers. It holds the database and
 credentials. Run one collector process per data volume.
 
-The container loads `/data/collector.toml` automatically. Edit the host file and
+The container loads `/data/config.toml` automatically. Edit the host file and
 recreate the container with the same mounts to apply changes. The image uses
 `/data` for storage and listens on `0.0.0.0:4174` inside the container; these two
 image settings override `data_dir` and `[server].bind` in TOML. The port mapping
@@ -151,14 +151,14 @@ its checksum. The executable finds the library in the adjacent `lib` directory.
 From the repository directory:
 
 ```sh
-cp collector.toml.example collector.toml
-# Edit collector.toml before continuing.
+cp config.toml.example config.toml
+# Edit config.toml before continuing.
 chunkify-analytics config check
 chunkify-analytics init
 ```
 
 Edit the website origins and data path before initialization. The example stores
-its data in `./data`, beside `collector.toml`. Read the initial credentials with:
+its data in `./data`, beside `config.toml`. Read the initial credentials with:
 
 ```sh
 cat data/keys.json
@@ -186,7 +186,7 @@ you do not run `init` again.
 When starting from another directory, select the configuration file explicitly:
 
 ```sh
-chunkify-analytics --config /path/to/collector.toml serve
+chunkify-analytics --config /path/to/config.toml serve
 ```
 
 For a service manager, use an explicit `--config` path and make the data directory
@@ -296,13 +296,18 @@ streams CSV when it is opened. The link needs no project key and expires after
 
 ## Configure the service
 
-Keep application settings in `collector.toml`. Use `--config` when running from
+Keep application settings in `config.toml`. Use `--config` when running from
 another directory:
 
 ```sh
-chunkify-analytics --config /etc/chunkify/collector.toml config check
-chunkify-analytics --config /etc/chunkify/collector.toml serve
+chunkify-analytics --config /etc/chunkify/config.toml config check
+chunkify-analytics --config /etc/chunkify/config.toml serve
 ```
+
+The `[rate_limits]` section controls analytics reads and CSV exports. HTTP and
+MCP share each project's budgets across all its keys. See
+[read and export limits](docs/configuration.md#read-and-export-limits) for defaults
+and overrides.
 
 Relative TOML paths resolve beside that file. Restart after changing installation
 settings. The [configuration reference](docs/configuration.md) lists all fields

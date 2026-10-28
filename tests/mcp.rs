@@ -164,17 +164,27 @@ impl Collector {
         let live =
             serde_json::from_slice(&command(&["project", "create", "Live website"])).unwrap();
         let mut config = "retention.seconds = 0\n".to_owned();
+        let defaults = [
+            ("rate_limits.read_per_minute", "1000000"),
+            ("rate_limits.read_burst", "1000000"),
+        ];
+        for (field, value) in defaults {
+            if !settings.iter().any(|(name, _)| *name == field) {
+                config.push_str(&format!("{field} = {value}\n"));
+            }
+        }
         for (field, value) in settings {
             let value = match *field {
                 "server.allowed_origins" | "mcp.allowed_hosts" => {
                     serde_json::to_string(&value.split(',').collect::<Vec<_>>()).unwrap()
                 }
                 "mcp.enabled" => value.to_string(),
+                field if field.starts_with("rate_limits.") => value.to_string(),
                 _ => panic!("Unknown test setting"),
             };
             config.push_str(&format!("{field} = {value}\n"));
         }
-        let config_file = directory.join("collector.toml");
+        let config_file = directory.join("config.toml");
         std::fs::write(&config_file, config).unwrap();
         let mut child = clean_command()
             .arg("--config")
@@ -1678,4 +1688,72 @@ async fn exploration_tools_and_export_links_match_http_on_both_transports() {
     }
     collector.admin(&["key", "rotate", "default", key["key_id"].as_str().unwrap()]);
     assert_eq!(http.get(last_url).send().await.unwrap().status(), 404);
+}
+
+#[tokio::test]
+async fn read_and_export_rates_are_shared_across_http_and_both_mcp_transports() {
+    for embedded in [false, true] {
+        let collector = Collector::with_settings(&[
+            ("rate_limits.read_per_minute", "1"),
+            ("rate_limits.read_burst", "1"),
+            ("rate_limits.export_links_per_minute", "1"),
+        ]);
+        let token = collector.keys["secret_key"].as_str().unwrap();
+        let client = connect_mode(&collector.url, token, true, embedded).await;
+        let http = reqwest::Client::new();
+        if embedded {
+            call_metrics(&client, "summary", json!({}), false).await;
+        } else {
+            collector.get("/v1/summary", token).await;
+        }
+        let response = http
+            .get(format!("{}/v1/events", collector.url))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 429);
+        assert!(
+            response.headers()["retry-after"]
+                .to_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
+        let limited = call_metrics(&client, "quality", json!({}), true).await;
+        assert_eq!(limited["error"]["code"], "rate_limited");
+        assert_eq!(limited["error"]["http_status"], 429);
+        assert!(limited["error"]["retry_after_seconds"].as_u64().unwrap() > 0);
+        call(&client, "describe_api", json!({"topic":"metrics"}), false).await;
+        let response = http
+            .post(format!("{}/v1/exports", collector.url))
+            .bearer_auth(token)
+            .json(&json!({"resource":"summary"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201);
+        let link: Value = response.json().await.unwrap();
+        let denied = call(&client, "export_data", json!({"resource":"summary"}), true).await;
+        assert_eq!(denied["error"]["code"], "rate_limited");
+        assert!(denied["error"]["retry_after_seconds"].as_u64().unwrap() > 0);
+        let download = http
+            .get(link["download_url"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(download.status(), 200);
+        download.text().await.unwrap();
+        let other = connect_mode(
+            &collector.url,
+            collector.live["secret_key"].as_str().unwrap(),
+            true,
+            embedded,
+        )
+        .await;
+        call_metrics(&other, "summary", json!({}), false).await;
+        other.cancel().await.unwrap();
+        client.cancel().await.unwrap();
+    }
 }

@@ -425,9 +425,17 @@ CSV generation starts when the link is opened. It uses one read snapshot on a
 separate connection and streams rows with backpressure. CSV contents are never
 stored as an export file or sent inside MCP responses. All matching rows are
 included, without normal query page or byte limits; `limit` and `cursor` are
-rejected. Four downloads can execute concurrently; additional downloads wait.
+rejected. By default one CSV generation can run per project and four across the
+server. Excess downloads return 429 immediately with `Retry-After`; they do not
+wait. Download rates are shared across the project's keys and links, including
+repeated downloads of the same link.
 Date filters are optional except for `timeseries`; no fixed 30-day cap applies.
 The server retains at most 1024 active grant records and returns 503 when full.
+Default rates are 10 links and 2 download starts per minute per project, with
+continuous refill and burst capacities equal to those rates. Analytics reads
+have a separate budget of 120/minute with a burst of 20, at most 2 queued/running
+per project and 8 server-wide. HTTP and MCP share these limits. See
+[configuration](configuration.md#read-and-export-limits) to override them.
 
 Supported resources are `summary`, `quality`, `engagement`, `timeseries`,
 `videos`, `events`, `views`, `errors` and `dimensions`. `query` uses the resource's

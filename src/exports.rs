@@ -130,12 +130,12 @@ pub struct ReportStream {
 }
 
 impl Exports {
-    pub fn new(store: Store, projects: Arc<Registry>) -> Self {
+    pub fn new(store: Store, projects: Arc<Registry>, limits: &crate::limits::Config) -> Self {
         Self {
             store,
             projects,
             grants: Default::default(),
-            downloads: Arc::new(Semaphore::new(4)),
+            downloads: Arc::new(Semaphore::new(limits.export_concurrent as usize)),
         }
     }
 
@@ -163,6 +163,11 @@ impl Exports {
         if grants.len() >= MAX_GRANTS {
             return Err(ApiError::unavailable());
         }
+        owner
+            .project
+            .limits
+            .links
+            .take("Project export link rate limit exceeded")?;
         let filename = format!("chunkify-{}.csv", request.resource);
         grants.insert(
             key,
@@ -181,7 +186,7 @@ impl Exports {
         )
     }
 
-    fn grant(&self, token: &str) -> Result<(Grant, String), ApiError> {
+    fn grant(&self, token: &str) -> Result<(Grant, Resolved), ApiError> {
         if token.len() != 43 || URL_SAFE_NO_PAD.decode(token).is_err() {
             return Err(not_found());
         }
@@ -197,7 +202,7 @@ impl Exports {
             .projects
             .export_owner(&grant.fingerprint)
             .ok_or_else(not_found)?;
-        Ok((grant, owner.project.id.clone()))
+        Ok((grant, owner))
     }
     pub fn filename(&self, token: &str) -> Result<String, ApiError> {
         Ok(format!(
@@ -207,15 +212,13 @@ impl Exports {
     }
 
     pub async fn download(&self, token: &str) -> Result<ReportStream, ApiError> {
-        let (grant, project) = self.grant(token)?;
-        let permit = self
+        let (grant, owner) = self.grant(token)?;
+        let project = owner.project.id.clone();
+        let permit = owner
+            .project
+            .limits
             .downloads
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| ApiError::unavailable())?;
-        // Recheck after waiting, so expiry or key revocation cannot extend a grant.
-        self.grant(token)?;
+            .admit(&self.downloads, "export download")?;
         let store = self.store.export_reader(project.clone()).await?;
         let (sender, chunks) = mpsc::channel(2);
         let filename = format!("chunkify-{}.csv", grant.request.resource);
@@ -248,7 +251,7 @@ fn token_hash(token: &str) -> Vec<u8> {
         .to_vec()
 }
 fn not_found() -> ApiError {
-    ApiError(
+    ApiError::new(
         axum::http::StatusCode::NOT_FOUND,
         "Export not found or expired".into(),
     )
@@ -569,7 +572,7 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("chunkify-export-grants-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
-        let config_file = directory.join("collector.toml");
+        let config_file = directory.join("config.toml");
         let env_file = directory.join("empty.env");
         std::fs::write(&env_file, "").unwrap();
         std::fs::write(&config_file, "retention.seconds=0\n").unwrap();
@@ -594,7 +597,7 @@ mod tests {
             Some(1),
         )
         .unwrap();
-        let service = Exports::new(store, registry.clone());
+        let service = Exports::new(store, registry.clone(), &config.rate_limits);
         let base = reqwest::Url::parse("https://analytics.example.com/base/").unwrap();
         let create = || {
             service
@@ -629,7 +632,7 @@ mod tests {
             .unwrap()
             .expires = Instant::now() - Duration::from_secs(1);
         assert_eq!(
-            service.filename(&token(&a)).unwrap_err().0,
+            service.filename(&token(&a)).unwrap_err().status,
             axum::http::StatusCode::NOT_FOUND
         );
         registry.replace_keys(
@@ -640,7 +643,7 @@ mod tests {
             &config,
         );
         assert_eq!(
-            service.filename(&token(&b)).unwrap_err().0,
+            service.filename(&token(&b)).unwrap_err().status,
             axum::http::StatusCode::NOT_FOUND
         );
         drop(service);

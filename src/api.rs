@@ -130,6 +130,11 @@ pub fn router(
         .merge(mcp)
         .route("/healthz", get(health))
         .route("/v1/projects", post(create_project))
+        .route("/v1/projects/{project_id}/keys", get(admin_project_keys))
+        .route(
+            "/v1/projects/{project_id}/keys/{key_id}/rotate",
+            post(admin_rotate_project_key),
+        )
         .route("/v1/project", patch(update_project).delete(delete_project))
         .route("/v1/project/keys", get(project_keys))
         .route("/v1/project/keys/{key_id}/rotate", post(rotate_project_key))
@@ -169,7 +174,9 @@ async fn access(
         && request.uri().path().starts_with("/v1/exports/");
     let resolved = if download {
         None
-    } else if request.uri().path() == "/v1/projects" {
+    } else if request.uri().path() == "/v1/projects"
+        || request.uri().path().starts_with("/v1/projects/")
+    {
         app.admin.authorize_admin(&bearer(request.headers()))?;
         None
     } else if ingest && request.method() != Method::OPTIONS {
@@ -448,7 +455,12 @@ async fn delete_project(State(app): State<App>, request: Request) -> Result<Json
 }
 
 async fn project_keys(State(app): State<App>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
-    project_action(app, bearer(&headers), crate::admin::ProjectAction::Keys).await
+    project_action(
+        app,
+        bearer(&headers),
+        crate::admin::ProjectAction::Keys(crate::admin::KeyAction::List),
+    )
+    .await
 }
 
 async fn rotate_project_key(
@@ -459,7 +471,47 @@ async fn rotate_project_key(
     project_action(
         app,
         bearer(&headers),
-        crate::admin::ProjectAction::RotateKey(key_id),
+        crate::admin::ProjectAction::Keys(crate::admin::KeyAction::Rotate(key_id)),
+    )
+    .await
+}
+
+async fn admin_key_action(
+    app: App,
+    token: String,
+    project_id: String,
+    action: crate::admin::KeyAction,
+) -> Result<Json<Value>, ApiError> {
+    tokio::task::spawn_blocking(move || app.admin.admin_keys(&token, &project_id, action))
+        .await
+        .map_err(|_| ApiError::unavailable())?
+        .map(Json)
+}
+
+async fn admin_project_keys(
+    State(app): State<App>,
+    Path(project_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_key_action(
+        app,
+        bearer(&headers),
+        project_id,
+        crate::admin::KeyAction::List,
+    )
+    .await
+}
+
+async fn admin_rotate_project_key(
+    State(app): State<App>,
+    Path((project_id, key_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    admin_key_action(
+        app,
+        bearer(&headers),
+        project_id,
+        crate::admin::KeyAction::Rotate(key_id),
     )
     .await
 }

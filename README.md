@@ -377,7 +377,9 @@ In Docker, run these commands through
 management and retention changes work while serving on Linux and macOS. Stop the analytics server
 to rename projects or replace project settings. For automatic customer onboarding,
 use [project creation through the API](docs/administration.md#create-projects-through-the-api)
-with `CHUNKIFY_ADMIN_KEY`.
+with `CHUNKIFY_ADMIN_KEY`. Your trusted backend can also use that admin key to
+[recover a lost project key](docs/administration.md#recover-a-lost-project-key)
+by rotating it again.
 
 ## Storage and backups
 

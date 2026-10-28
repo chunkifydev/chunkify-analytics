@@ -32,6 +32,8 @@ test("the contract separates public ingestion from private read authorization", 
   assert.equal(contract.components.securitySchemes.publicKey.name, "X-Chunkify-Ingest-Key");
   assert.equal(contract.components.securitySchemes.secretKey.scheme, "bearer");
   assert.deepEqual(contract.paths["/v1/projects"].post.security, [{ adminKey: [] }]);
+  assert.deepEqual(contract.paths["/v1/projects/{project_id}/keys"].get.security, [{ adminKey: [] }]);
+  assert.deepEqual(contract.paths["/v1/projects/{project_id}/keys/{key_id}/rotate"].post.security, [{ adminKey: [] }]);
   assert.equal(contract.components.securitySchemes.adminKey.scheme, "bearer");
   assert.deepEqual(contract.paths["/healthz"].get.security, []);
   for (const path of ["/v1/events"]) {

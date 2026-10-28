@@ -12,7 +12,7 @@ import test from "node:test";
 import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
-import { component } from "./openapi-support.mjs";
+import { component, assertResponse } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
@@ -1504,6 +1504,135 @@ async function createProject(server, body, key) {
     headers: { "content-type": "application/json", ...(key && { authorization: `Bearer ${key}` }) },
     body: JSON.stringify(body) });
 }
+
+async function adminProjectApi(server, projectId, path, { method = "GET", token } = {}) {
+  return fetch(`${server.url}/v1/projects/${projectId}${path}`, { method,
+    headers: token ? { authorization: `Bearer ${token}`, origin: "https://player.example" } : {} });
+}
+
+test("admin rotation recovers a lost project secret without rotating its public key", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "retention.seconds": "0" });
+  const project = await projectCommand(server, ["project", "create", "Lost secret"]);
+  const readonly = await projectCommand(server, ["key", "create", project.project_id, "secret", "Dashboard", "--read-only"]);
+  const listPath = "/v1/projects/{project_id}/keys";
+  const rotatePath = "/v1/projects/{project_id}/keys/{key_id}/rotate";
+  const list = await (await projectApi(server, "/keys", { token: project.secret_key })).json();
+  const secretId = list.keys.find(key => key.permission === "secret" && !key.read_only).id;
+  const publicId = list.keys.find(key => key.permission === "public").id;
+  const event = sdkEvents("recovered-project")[0];
+  assert.equal((await projectPost(server, project.public_key, event)).status, 201);
+
+  // Discard the response to reproduce a user losing their only management key.
+  const lost = await projectApi(server, `/keys/${secretId}/rotate`, { method: "POST", token: project.secret_key });
+  assert.equal(lost.status, 200);
+  await lost.arrayBuffer();
+  assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 401);
+  const listed = await adminProjectApi(server, project.project_id, "/keys", { token: adminKey });
+  assert.equal(listed.headers.get("access-control-allow-origin"), null);
+  assert.deepEqual(await assertResponse(listPath, "get", listed, 200), list);
+
+  const recover = () => adminProjectApi(server, project.project_id, `/keys/${secretId}/rotate`, { method: "POST", token: adminKey });
+  // Losing an admin rotation response is recoverable through the same route.
+  await assertResponse(rotatePath, "post", await recover(), 200);
+  const recovered = await assertResponse(rotatePath, "post", await recover(), 200);
+  assert.equal(recovered.project_id, project.project_id);
+  assert.equal(recovered.key_id, secretId);
+  assert.equal(recovered.permission, "secret");
+  assert.equal(recovered.read_only, false);
+  assert.equal((await projectApi(server, "/keys", { token: recovered.key })).status, 200);
+  assert.equal((await server.get("/v1/summary", recovered.key)).views, 1);
+  assert.equal((await server.get("/v1/summary", readonly.key)).views, 1);
+  assert.equal((await server.get("/v1/summary")).views, 0);
+  assert.equal((await projectPost(server, project.public_key, event)).status, 200);
+
+  const readResponse = await adminProjectApi(server, project.project_id, `/keys/${readonly.key_id}/rotate`, { method: "POST", token: adminKey });
+  const rotatedRead = await assertResponse(rotatePath, "post", readResponse, 200);
+  assert.equal(rotatedRead.read_only, true);
+  assert.equal((await projectApi(server, "/keys", { token: rotatedRead.key })).status, 403);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${readonly.key}` } })).status, 401);
+
+  const publicResponse = await adminProjectApi(server, project.project_id, `/keys/${publicId}/rotate`, { method: "POST", token: adminKey });
+  const rotatedPublic = await assertResponse(rotatePath, "post", publicResponse, 200);
+  assert.equal(rotatedPublic.permission, "public");
+  assert.equal(rotatedPublic.read_only, false);
+  assert.equal((await projectPost(server, project.public_key, event)).status, 401);
+  assert.equal((await projectPost(server, rotatedPublic.key, event)).status, 200);
+  assert.equal((await server.get("/v1/summary", recovered.key)).views, 1);
+  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  for (const key of [adminKey, recovered.key, rotatedRead.key, rotatedPublic.key]) {
+    assert.ok(!stored.includes(key));
+    assert.ok(!server.logs().includes(key));
+  }
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.equal((await server.get("/v1/summary", recovered.key)).views, 1);
+  assert.equal((await server.get("/v1/summary", rotatedRead.key)).views, 1);
+  assert.equal((await projectPost(server, rotatedPublic.key, event)).status, 200);
+  assert.deepEqual(await assertResponse(listPath, "get",
+    await adminProjectApi(server, project.project_id, "/keys", { token: adminKey }), 200), list);
+});
+
+test("admin key recovery rejects project credentials and unknown, revoked or deleted keys", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey });
+  const project = await projectCommand(server, ["project", "create", "Customer"]);
+  const readonly = await projectCommand(server, ["key", "create", project.project_id, "secret", "Dashboard", "--read-only"]);
+  const revoked = await projectCommand(server, ["key", "create", project.project_id, "secret", "Revoked"]);
+  await projectCommand(server, ["key", "revoke", project.project_id, revoked.key_id]);
+  const list = await (await projectApi(server, "/keys", { token: project.secret_key })).json();
+  const secretId = list.keys.find(key => key.permission === "secret" && !key.read_only).id;
+  const listPath = "/v1/projects/{project_id}/keys";
+  const rotatePath = "/v1/projects/{project_id}/keys/{key_id}/rotate";
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  for (const token of [undefined, "wrong", project.public_key, project.secret_key, readonly.key, server.keys.secret_key]) {
+    for (const [path, method, contractPath] of [["/keys", "get", listPath], [`/keys/${secretId}/rotate`, "post", rotatePath]]) {
+      const response = await adminProjectApi(server, project.project_id, path, { method: method.toUpperCase(), token });
+      assert.equal(response.headers.get("www-authenticate"), "Bearer");
+      await assertResponse(contractPath, method, response, 401);
+    }
+  }
+  await assertResponse(listPath, "get", await adminProjectApi(server, "unknown", "/keys", { token: adminKey }), 404);
+  for (const [id, key] of [["unknown", secretId], [project.project_id, "unknown"],
+    [project.project_id, revoked.key_id], [project.project_id, "primary-secret"], ["default", secretId]]) {
+    await assertResponse(rotatePath, "post",
+      await adminProjectApi(server, id, `/keys/${key}/rotate`, { method: "POST", token: adminKey }), 404);
+  }
+  assert.equal(await readFile(file, "utf8"), before);
+  assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
+  assert.equal((await projectApi(server, "", { method: "DELETE", token: project.secret_key })).status, 200);
+  await assertResponse(listPath, "get", await adminProjectApi(server, project.project_id, "/keys", { token: adminKey }), 404);
+  await assertResponse(rotatePath, "post",
+    await adminProjectApi(server, project.project_id, `/keys/${secretId}/rotate`, { method: "POST", token: adminKey }), 404);
+});
+
+test("admin rotation is disabled without an admin key and preserves credentials when saving fails", async t => {
+  const server = await collector(t);
+  const listPath = "/v1/projects/{project_id}/keys";
+  const rotatePath = "/v1/projects/{project_id}/keys/{key_id}/rotate";
+  const rotate = token => adminProjectApi(server, "default", "/keys/primary-secret/rotate", { method: "POST", token });
+  await assertResponse(listPath, "get", await adminProjectApi(server, "default", "/keys"), 404);
+  await assertResponse(rotatePath, "post", await rotate(server.keys.secret_key), 404);
+  await server.stop();
+  const adminKey = `admin-${randomUUID()}`;
+  await server.start(binary, { CHUNKIFY_ADMIN_KEY: adminKey });
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  await chmod(server.directory, 0o500);
+  try { await assertResponse(rotatePath, "post", await rotate(adminKey), 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal(await readFile(file, "utf8"), before);
+  assert.equal((await projectApi(server, "/keys")).status, 200);
+  const recovered = await assertResponse(rotatePath, "post", await rotate(adminKey), 200);
+  assert.equal((await projectApi(server, "/keys", { token: recovered.key })).status, 200);
+  await server.reloadKeys();
+  assert.equal(server.keys.secret_key, recovered.key, "default primary credential stays consistent");
+  await server.stop();
+  await server.start(binary, { CHUNKIFY_ADMIN_KEY: "" });
+  await assertResponse(listPath, "get", await adminProjectApi(server, "default", "/keys", { token: adminKey }), 404);
+  await assertResponse(rotatePath, "post", await rotate(adminKey), 404);
+});
 
 test("admin project creation activates isolated projects immediately and persists across restart", async t => {
   const adminKey = `admin-${randomUUID()}`;

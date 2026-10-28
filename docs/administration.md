@@ -124,7 +124,9 @@ project ID alongside your customer record. The project is ready immediately.
 `name` is required, with 1 to 128 characters. Names can repeat. `allowed_origins`
 is optional and adds to the shared TOML origins. Supplying an ID is rejected.
 Project secret keys cannot create projects. The admin key does not grant access
-to project analytics or MCP. The installation supports up to 1024 active projects.
+to project analytics or MCP directly. It can list and rotate keys for any active
+project through the recovery routes below. The installation supports up to 1024
+active projects.
 
 ## Live project API
 
@@ -154,7 +156,44 @@ rejected. Changes are saved together before they take effect.
 
 Rotation invalidates the old key immediately. Save the returned `key` value;
 key listings never reveal it. Rotating the secret key used by the request means
-subsequent calls must use its replacement.
+subsequent calls must use its replacement. Only the selected key is rotated;
+rotating a public key leaves secret keys unchanged, and vice versa. If the
+replacement is lost, use the independent admin recovery route below.
+
+## Recover a lost project key
+
+Your trusted backend can recover project access using `CHUNKIFY_ADMIN_KEY`.
+No current project secret is required. The backend must authenticate the user
+and verify their ownership of the requested project before making these calls.
+Keep the admin key on the server; it can rotate keys for every project.
+
+| Endpoint | Use |
+| --- | --- |
+| `GET /v1/projects/{project_id}/keys` | List key IDs, names, types and `read_only`, without secrets. |
+| `POST /v1/projects/{project_id}/keys/{key_id}/rotate` | Rotate one existing key and return its replacement. |
+
+Find the key ID, then rotate that key:
+
+```sh
+curl "http://127.0.0.1:4174/v1/projects/$PROJECT_ID/keys" \
+  -H "Authorization: Bearer $CHUNKIFY_ADMIN_KEY"
+
+curl --request POST \
+  "http://127.0.0.1:4174/v1/projects/$PROJECT_ID/keys/$KEY_ID/rotate" \
+  -H "Authorization: Bearer $CHUNKIFY_ADMIN_KEY"
+```
+
+Save the returned `key` value. The old value stops working immediately. The key
+ID, public/secret type and `read_only` setting stay the same; other keys and
+stored events are unchanged. A lost rotation response can be recovered by
+rotating the same key again with the admin key. Changes take effect immediately
+and persist across analytics server restarts.
+
+Unset or empty `CHUNKIFY_ADMIN_KEY` disables these routes with 404. When enabled,
+missing or invalid admin credentials, including project keys, receive 401.
+Unknown or deleted projects and unknown or revoked keys receive 404. Recovery
+does not restore revoked keys or deleted projects. Without an admin key, a
+server operator can still use the CLI to rotate a lost key.
 
 ## Delete a project
 

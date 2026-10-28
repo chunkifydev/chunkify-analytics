@@ -7,6 +7,8 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | `GET /healthz` | None | `{"status":"ok"}` after a database check, or 503 if unavailable. |
 | `POST /v1/events` | `X-Chunkify-Ingest-Key` | 201 with `{"accepted":true,"duplicate":false}` after storage completes; local storage returns 200 with `{"accepted":false,"duplicate":true}` for an existing event. |
 | `POST /v1/projects` | `Authorization: Bearer CHUNKIFY_ADMIN_KEY` | Generated project ID and initial public/secret keys. |
+| `GET /v1/projects/{project_id}/keys` | `Authorization: Bearer CHUNKIFY_ADMIN_KEY` | Key IDs, names and permissions for recovery, without key values. |
+| `POST /v1/projects/{project_id}/keys/{key_id}/rotate` | `Authorization: Bearer CHUNKIFY_ADMIN_KEY` | Replacement for one existing key, without requiring a project secret. Other keys are unchanged. |
 | `DELETE /v1/project` | Full-access `Authorization: Bearer SECRET_KEY` | Delete the project and revoke all its keys. Events expire under the existing retention policy. |
 | `PATCH /v1/project` | Full-access `Authorization: Bearer SECRET_KEY` | Update the project name or additional origins immediately. |
 | `GET /v1/project/keys` | Full-access `Authorization: Bearer SECRET_KEY` | Key IDs, names, permissions and `read_only`, without key values. |
@@ -36,8 +38,15 @@ on project and key management routes, including key listings. Key metadata
 includes `read_only`, which remains unchanged when rotating a key. Existing
 private keys retain full access.
 
-Project creation requires the separate `CHUNKIFY_ADMIN_KEY` environment secret.
-See [project creation](administration.md#create-projects-through-the-api) and [live project management](administration.md#live-project-api) for requests.
+Project creation and key recovery require the separate `CHUNKIFY_ADMIN_KEY`
+environment secret. Keep it in your trusted backend, which must authenticate the
+user and verify project ownership before requesting recovery. These admin routes
+return 404 when the admin key is unset or empty; project credentials receive 401
+when they are enabled. Unknown or deleted projects and unknown or revoked keys
+also receive 404. Recovery preserves the key ID, type and `read_only` setting.
+See [project creation](administration.md#create-projects-through-the-api),
+[key recovery](administration.md#recover-a-lost-project-key) and
+[live project management](administration.md#live-project-api) for requests.
 
 ### Ingestion and storage
 

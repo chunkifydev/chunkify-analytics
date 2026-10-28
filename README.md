@@ -286,8 +286,8 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/summary` | Views, distinct supplied viewer IDs, and total playing time. |
 | `GET /v1/videos` | A paginated list of videos and their totals, sortable by views or watch time. |
 | `GET /v1/timeseries` | Hourly or daily metrics for a requested date range. |
-| `GET /v1/engagement` | Average watch time and observed reached-end rates. |
-| `GET /v1/quality` | Startup timing, buffering, and fatal-error metrics. |
+| `GET /v1/engagement` | Watch time, observed ends, progress milestones, and watch-time distribution. |
+| `GET /v1/quality` | Startup outcomes and timing, buffering, and fatal-error metrics. |
 | `GET /v1/events` | Stored events, context, and pagination cursors. |
 | `GET /v1/views` | Playback attempts, with an optional fatal-error filter. |
 | `GET /v1/views/{view_id}` | One attempt's metrics and retained event history. |

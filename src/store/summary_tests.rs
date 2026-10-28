@@ -127,7 +127,12 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             json!({
                 "views":3, "startup_time_ms":{"sample_views":0,"median":null,"p95":null},
                 "buffering":{"sample_views":0,"total_playing_time_ms":0.0,"total_rebuffer_duration_ms":0.0,"ratio":null},
-                "fatal_errors":{"affected_views":0,"ratio":0.0}
+                "fatal_errors":{"affected_views":0,"ratio":0.0},
+                "startup_outcomes":{"sample_views":1,
+                    "started":{"views":1,"ratio":1.0/3.0},
+                    "failed_before_start":{"views":0,"ratio":0.0},
+                    "ended_before_start":{"views":0,"ratio":0.0},
+                    "unknown":{"views":2,"ratio":2.0/3.0}}
             })
         );
         // A winning historical NULL measurement still contributes a zero
@@ -139,7 +144,13 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 .unwrap_or_else(|error| panic!("{}", error.message)),
             json!({
                 "views":3,"total_playing_time_ms":2500.0,"average_playing_time_ms":2500.0/3.0,
-                "reached_end_views":0,"reached_end_ratio":0.0
+                "reached_end_views":0,"reached_end_ratio":0.0,
+                "progress_reached":{"sample_views":0,
+                    "at_25_percent":{"views":0,"ratio":null},"at_50_percent":{"views":0,"ratio":null},
+                    "at_75_percent":{"views":0,"ratio":null},"at_100_percent":{"views":0,"ratio":null}},
+                "watch_time_ms":{"sample_views":1,"median":2500.0,"p95":2500.0,
+                    "distribution":{"under_10_seconds":1,"from_10_to_30_seconds":0,
+                        "from_30_to_60_seconds":0,"from_1_to_5_minutes":0,"at_least_5_minutes":0}}
             })
         );
         let first = store

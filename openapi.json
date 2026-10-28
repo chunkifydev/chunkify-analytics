@@ -1291,7 +1291,7 @@
       "get": {
         "operationId": "getQuality",
         "summary": "Read playback quality for a view cohort",
-        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
+        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes mutually exclusive startup outcomes; unknown outcomes remain explicit.",
         "tags": [
           "Queries"
         ],
@@ -1362,6 +1362,25 @@
                   "fatal_errors": {
                     "affected_views": 1,
                     "ratio": 0.25
+                  },
+                  "startup_outcomes": {
+                    "sample_views": 2,
+                    "started": {
+                      "views": 2,
+                      "ratio": 0.5
+                    },
+                    "failed_before_start": {
+                      "views": 0,
+                      "ratio": 0.0
+                    },
+                    "ended_before_start": {
+                      "views": 0,
+                      "ratio": 0.0
+                    },
+                    "unknown": {
+                      "views": 2,
+                      "ratio": 0.5
+                    }
                   }
                 }
               }
@@ -1494,7 +1513,7 @@
       "get": {
         "operationId": "getEngagement",
         "summary": "Read average watch time and reached-end rate",
-        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
+        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes furthest-progress milestones and measured watch-time distribution. Progress can include seeking and is not retention.",
         "tags": [
           "Queries"
         ],
@@ -1554,7 +1573,38 @@
                   "total_playing_time_ms": 120000,
                   "average_playing_time_ms": 30000,
                   "reached_end_views": 1,
-                  "reached_end_ratio": 0.25
+                  "reached_end_ratio": 0.25,
+                  "progress_reached": {
+                    "sample_views": 3,
+                    "at_25_percent": {
+                      "views": 3,
+                      "ratio": 1.0
+                    },
+                    "at_50_percent": {
+                      "views": 2,
+                      "ratio": 0.6666666666666666
+                    },
+                    "at_75_percent": {
+                      "views": 1,
+                      "ratio": 0.3333333333333333
+                    },
+                    "at_100_percent": {
+                      "views": 1,
+                      "ratio": 0.3333333333333333
+                    }
+                  },
+                  "watch_time_ms": {
+                    "sample_views": 3,
+                    "median": 20000,
+                    "p95": 74000,
+                    "distribution": {
+                      "under_10_seconds": 0,
+                      "from_10_to_30_seconds": 2,
+                      "from_30_to_60_seconds": 0,
+                      "from_1_to_5_minutes": 1,
+                      "at_least_5_minutes": 0
+                    }
+                  }
                 }
               }
             }
@@ -6087,7 +6137,8 @@
           "views",
           "startup_time_ms",
           "buffering",
-          "fatal_errors"
+          "fatal_errors",
+          "startup_outcomes"
         ],
         "properties": {
           "views": {
@@ -6189,6 +6240,9 @@
               }
             },
             "description": "Observed fatal errors. Lost events can undercount this metric; absence of an error is not proof of successful playback."
+          },
+          "startup_outcomes": {
+            "$ref": "#/components/schemas/StartupOutcomes"
           }
         },
         "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
@@ -6201,7 +6255,9 @@
           "total_playing_time_ms",
           "average_playing_time_ms",
           "reached_end_views",
-          "reached_end_ratio"
+          "reached_end_ratio",
+          "progress_reached",
+          "watch_time_ms"
         ],
         "properties": {
           "views": {
@@ -6235,6 +6291,12 @@
             "minimum": 0,
             "maximum": 1,
             "description": "Reached-end views divided by all selected attempts. Null without views. Multiply by 100 for percent. Does not imply the whole video was watched."
+          },
+          "progress_reached": {
+            "$ref": "#/components/schemas/ProgressReached"
+          },
+          "watch_time_ms": {
+            "$ref": "#/components/schemas/WatchTimeDistribution"
           }
         },
         "description": "Observed watch time and end-of-media for the same start cohort as summary. Missing delivery can undercount both."
@@ -6660,7 +6722,8 @@
           "startup_time_ms",
           "buffering",
           "fatal_errors",
-          "bucket_start"
+          "bucket_start",
+          "startup_outcomes"
         ],
         "properties": {
           "views": {
@@ -6766,6 +6829,9 @@
           "bucket_start": {
             "type": "string",
             "format": "date-time"
+          },
+          "startup_outcomes": {
+            "$ref": "#/components/schemas/StartupOutcomes"
           }
         },
         "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
@@ -6826,7 +6892,9 @@
           "average_playing_time_ms",
           "reached_end_views",
           "reached_end_ratio",
-          "bucket_start"
+          "bucket_start",
+          "progress_reached",
+          "watch_time_ms"
         ],
         "properties": {
           "views": {
@@ -6864,6 +6932,12 @@
           "bucket_start": {
             "type": "string",
             "format": "date-time"
+          },
+          "progress_reached": {
+            "$ref": "#/components/schemas/ProgressReached"
+          },
+          "watch_time_ms": {
+            "$ref": "#/components/schemas/WatchTimeDistribution"
           }
         },
         "description": "Observed watch time and end-of-media for the same start cohort as summary. Missing delivery can undercount both."
@@ -7323,6 +7397,154 @@
             "format": "date-time"
           }
         }
+      },
+      "MetricCountRatio": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "views",
+          "ratio"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "description": "View count and fraction of its documented denominator. The ratio is null when that denominator is zero."
+      },
+      "ProgressReached": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sample_views",
+          "at_25_percent",
+          "at_50_percent",
+          "at_75_percent",
+          "at_100_percent"
+        ],
+        "properties": {
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "at_25_percent": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          },
+          "at_50_percent": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          },
+          "at_75_percent": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          },
+          "at_100_percent": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          }
+        },
+        "description": "Furthest progress on the selected final event or latest snapshot. Only views with a positive known media duration and a progress ratio in [0,1] are samples. Each milestone ratio uses sample_views. Seeking can count; this is not watched coverage or audience retention."
+      },
+      "WatchTimeDistribution": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sample_views",
+          "median",
+          "p95",
+          "distribution"
+        ],
+        "properties": {
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "median": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "p95": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "distribution": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "under_10_seconds",
+              "from_10_to_30_seconds",
+              "from_30_to_60_seconds",
+              "from_1_to_5_minutes",
+              "at_least_5_minutes"
+            ],
+            "properties": {
+              "under_10_seconds": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "from_10_to_30_seconds": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "from_30_to_60_seconds": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "from_1_to_5_minutes": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "at_least_5_minutes": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "description": "Mutually exclusive playing-time buckets: [0,10s), [10s,30s), [30s,60s), [1m,5m), [5m,infinity). Counts sum to sample_views."
+          }
+        },
+        "description": "Playing time in milliseconds from one selected final event or latest snapshot per view. Measured zero is included; missing measurements are excluded. Percentiles use linear interpolation and are null without samples. This sample denominator differs from average_playing_time_ms, which uses all attempts."
+      },
+      "StartupOutcomes": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "sample_views",
+          "started",
+          "failed_before_start",
+          "ended_before_start",
+          "unknown"
+        ],
+        "properties": {
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "started": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          },
+          "failed_before_start": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          },
+          "ended_before_start": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          },
+          "unknown": {
+            "$ref": "#/components/schemas/MetricCountRatio"
+          }
+        },
+        "description": "Mutually exclusive outcomes. An explicit startup_outcome on the selected final event takes precedence. Otherwise an available startup time, including zero, or positive playing time on the selected measurement proves started. All other views are unknown. sample_views excludes unknown; every ratio uses all selected attempts, including unknown. Missing final delivery does not prove an exit or failure."
       }
     }
   },

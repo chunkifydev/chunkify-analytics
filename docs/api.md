@@ -273,7 +273,38 @@ curl --get 'http://127.0.0.1:4174/v1/engagement' \
   "total_playing_time_ms": 120000,
   "average_playing_time_ms": 30000,
   "reached_end_views": 1,
-  "reached_end_ratio": 0.25
+  "reached_end_ratio": 0.25,
+  "progress_reached": {
+    "sample_views": 3,
+    "at_25_percent": {
+      "views": 3,
+      "ratio": 1.0
+    },
+    "at_50_percent": {
+      "views": 2,
+      "ratio": 0.6666666666666666
+    },
+    "at_75_percent": {
+      "views": 1,
+      "ratio": 0.3333333333333333
+    },
+    "at_100_percent": {
+      "views": 1,
+      "ratio": 0.3333333333333333
+    }
+  },
+  "watch_time_ms": {
+    "sample_views": 3,
+    "median": 20000,
+    "p95": 74000,
+    "distribution": {
+      "under_10_seconds": 0,
+      "from_10_to_30_seconds": 2,
+      "from_30_to_60_seconds": 0,
+      "from_1_to_5_minutes": 1,
+      "at_least_5_minutes": 0
+    }
+  }
 }
 ```
 
@@ -294,6 +325,45 @@ after the date window. Retention and missing browser delivery affect
 these metrics. Replays with a new view ID count as new attempts. Live videos and
 ongoing attempts can lower the reached-end rate. Seeking to the end can count,
 so this does not measure whether the whole video was watched.
+
+### Progress reached and watch-time distribution
+
+Engagement adds `progress_reached` and `watch_time_ms` without changing the
+existing totals or their denominators. These fields are also present in grouped
+engagement, engagement timeseries and CSV exports.
+
+`progress_reached` counts attempts whose selected final event, or latest snapshot
+when no final exists, reports a furthest progress of at least 25%, 50%, 75% or
+100%. Each milestone has `views` and `ratio`. Ratios divide by `sample_views`,
+which includes only attempts with a positive known media duration and a
+`furthest_progress_ratio` between zero and one. A measured zero is a sample.
+Missing, out-of-range progress and unknown or zero duration are excluded.
+No samples means zero counts and null ratios.
+
+Label these values **Furthest progress reached**. Seeking can reach a milestone
+without playing earlier sections. These metrics do not measure watched coverage,
+audience retention or where a viewer stopped. Reaching 100% also does not require
+an observed end event, so it can differ from `reached_end_views`.
+
+`watch_time_ms` reports `sample_views`, median, p95 and five exclusive distribution
+counts. It uses only available `playing_time_ms` from the selected final/latest
+measurement. Measured zero is included; start-only and historical null
+measurements are excluded. The distribution counts sum to `sample_views`:
+
+| Distribution field | Playing time |
+| --- | --- |
+| `under_10_seconds` | Less than 10 seconds, including zero. |
+| `from_10_to_30_seconds` | At least 10 and less than 30 seconds. |
+| `from_30_to_60_seconds` | At least 30 and less than 60 seconds. |
+| `from_1_to_5_minutes` | At least one and less than five minutes. |
+| `at_least_5_minutes` | Five minutes or longer. |
+
+Percentiles use linear interpolation and are null without samples. Their sample
+population differs from `average_playing_time_ms`, which still divides by all
+selected attempts and treats missing playing time as zero. Repeated snapshots
+and duplicate deliveries do not add extra samples. Winning final nulls remain
+unknown; an earlier snapshot does not fill them. Ongoing attempts and missing
+final delivery can leave the observed measurements incomplete.
 
 ### Playback quality
 
@@ -326,6 +396,13 @@ curl --get 'http://127.0.0.1:4174/v1/quality' \
   "fatal_errors": {
     "affected_views": 1,
     "ratio": 0.25
+  },
+  "startup_outcomes": {
+    "sample_views": 3,
+    "started": {"views": 2, "ratio": 0.5},
+    "failed_before_start": {"views": 1, "ratio": 0.25},
+    "ended_before_start": {"views": 0, "ratio": 0},
+    "unknown": {"views": 1, "ratio": 0.25}
   }
 }
 ```
@@ -353,6 +430,48 @@ matching later measurements/errors contribute even after `to`. Start-only views
 have no startup/buffering sample. Views without a retained start are excluded.
 The MCP server provides the same result through `get_metrics` with
 `{"kind":"quality"}`.
+
+### Startup outcomes
+
+Quality adds `startup_outcomes`, also available in quality breakdowns, timeseries
+and CSV. It has `sample_views` and four mutually exclusive outcomes. Each outcome
+contains `views` and `ratio`:
+
+| Outcome | Meaning |
+| --- | --- |
+| `started` | Playback started. |
+| `failed_before_start` | The selected final event explicitly reports failure before playback. |
+| `ended_before_start` | The selected final event explicitly reports the attempt ended before playback. Label this **Exited before playback**. |
+| `unknown` | The retained measurements do not establish a startup outcome. |
+
+An explicit `startup_outcome` on the selected final event takes precedence.
+Without it, an available startup time, including zero, or positive playing time
+on the selected final/latest measurement establishes `started`. Other attempts,
+including start-only attempts, remain unknown. Outcome values on snapshots or
+unrelated error/state events do not establish an explicit final outcome.
+
+All four counts sum to `views`. All outcome ratios divide by **all selected
+attempts**, including unknown outcomes, and are null with no attempts.
+`sample_views` counts known outcomes, excluding unknown. Missing final events do
+not prove an exit or failure. These counts describe startup, so an attempt that
+started successfully can still have a fatal error later.
+
+### Per-video reports for a dashboard
+
+Use the same `video_id` and date filters on these existing routes:
+
+| Route | Information to show |
+| --- | --- |
+| `/v1/summary?video_id=VIDEO_ID` | Views, supplied viewer IDs and watch time. |
+| `/v1/engagement?video_id=VIDEO_ID` | Average watch time, observed ends, progress reached and watch-time distribution. |
+| `/v1/quality?video_id=VIDEO_ID` | Startup outcomes, startup timing, buffering and observed fatal errors. |
+| `/v1/quality?video_id=VIDEO_ID&group_by=browser_name` | Playback health by browser; OS and device breakdowns are also supported. |
+
+These reports select the same start cohort and count attempts once. Keep the
+private key on the dashboard backend and respect the project's read concurrency
+budget. Show sample counts beside measurements and keep unknown values distinct
+from zero. No additional route or player SDK update is required. Historical
+stored events contribute where their measurements are available.
 
 ### Playback attempts and event history
 

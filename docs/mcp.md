@@ -152,8 +152,8 @@ Use `get_metrics` with one of these arguments:
 | Arguments | Returns |
 | --- | --- |
 | `{"kind":"summary"}` | Views, unique viewer IDs and total playing time. |
-| `{"kind":"quality"}` | Startup, buffering and fatal-error metrics with sample counts. |
-| `{"kind":"engagement"}` | Average watch time and observed reached-end rate. |
+| `{"kind":"quality"}` | Startup, buffering, fatal errors and startup outcomes with sample counts. |
+| `{"kind":"engagement"}` | Average watch time, observed reached-end rate, furthest-progress milestones and measured watch-time distribution. |
 | `{"kind":"errors"}` | Error codes and fatal status, with distinct event and affected-view counts. |
 
 Add filters alongside `kind`, for example
@@ -277,3 +277,19 @@ export cap. See [CSV exports](api.md#csv-exports) for format and deployment deta
 Creating links and downloading CSV use separate project budgets, defaulting to
 10 links/minute, 2 download starts/minute, one active generation per project and
 four across the server. New links or keys do not bypass the download budget.
+
+### Per-video reporting
+
+Use `get_metrics` with `kind=engagement` and `video_id` to read
+`progress_reached` and `watch_time_ms` alongside existing engagement fields.
+Progress can include seeking; describe it as furthest progress reached, not
+audience retention or watched coverage. Progress ratios use measured progress
+samples; watch-time distributions exclude attempts without measurements.
+
+Use `kind=quality` with the same filters for `startup_outcomes`. Its four outcome
+ratios use all attempts, including unknown outcomes. For browser comparisons,
+add `group_by=browser_name`; OS and device comparisons work the same way.
+`get_timeseries` and `export_data` include the same added fields. No new tool
+names or player collection changes are needed. See the
+[metric definitions](api.md#progress-reached-and-watch-time-distribution) for
+sampling, bucket boundaries and startup classification.

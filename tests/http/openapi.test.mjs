@@ -73,6 +73,11 @@ async function collector(t, settings = {}) {
   };
 }
 
+// Preserve assertions for the original fields alongside the full report tests below.
+function assertOriginalMetrics(actual, expected) {
+  assert.deepEqual(Object.fromEntries(Object.keys(expected).map(key => [key, actual[key]])), expected);
+}
+
 function sdkPlayback(t, videoId = "contract-a") {
   let now = 0;
   t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse("2026-10-19T12:00:00Z") });
@@ -380,16 +385,16 @@ for (const separateReads of [false, true]) {
       buffering: { sample_views: 3, total_playing_time_ms: 2000, total_rebuffer_duration_ms: 200, ratio: 200 / 2200 },
       fatal_errors: { affected_views: 2, ratio: 2 / 6 },
     };
-    assert.deepEqual(await quality(), expected);
+    assertOriginalMetrics(await quality(), expected);
     assert.equal((await server.get(`/v1/summary?${new URLSearchParams(filters)}`)).views, expected.views);
     const empty = { views: 0, startup_time_ms: { sample_views: 0, median: null, p95: null },
       buffering: { sample_views: 0, total_playing_time_ms: 0, total_rebuffer_duration_ms: 0, ratio: null },
       fatal_errors: { affected_views: 0, ratio: null } };
     for (const extra of [{ video_id: "wrong-video" }, { viewer_id: "wrong-viewer" }, { browser_name: "Safari" },
       { os_name: "macOS" }, { device_type: "mobile" }, { from: "2026-10-22T00:00:00Z", to: "2026-10-23T00:00:00Z" }]) {
-      assert.deepEqual(await quality(extra), empty);
+      assertOriginalMetrics(await quality(extra), empty);
     }
-    assert.deepEqual(await quality({ video_id: "b", viewer_id: "viewer", browser_name: "Firefox", os_name: "Linux", device_type: "desktop" }), {
+    assertOriginalMetrics(await quality({ video_id: "b", viewer_id: "viewer", browser_name: "Firefox", os_name: "Linux", device_type: "desktop" }), {
       views: 1, startup_time_ms: { sample_views: 1, median: 300, p95: 300 },
       buffering: { sample_views: 1, total_playing_time_ms: 100, total_rebuffer_duration_ms: 100, ratio: 0.5 },
       fatal_errors: { affected_views: 0, ratio: 0 },
@@ -399,7 +404,7 @@ for (const separateReads of [false, true]) {
     assert.deepEqual((await quality({ video_id: "no-snapshot" })).startup_time_ms, empty.startup_time_ms);
     assert.deepEqual((await quality({ video_id: "zero-startup" })).startup_time_ms, { sample_views: 1, median: 0, p95: 0 });
     assert.deepEqual((await quality({ video_id: "failed" })).fatal_errors, { affected_views: 1, ratio: 1 });
-    assert.deepEqual(await quality({ from: "2026-10-19T02:00:00+02:00", to: "2026-10-20T02:00:00+02:00" }), expected);
+    assertOriginalMetrics(await quality({ from: "2026-10-19T02:00:00+02:00", to: "2026-10-20T02:00:00+02:00" }), expected);
     for (const invalid of [{ limit: "1" }, { cursor: "x" }, { event_name: "chunkify.video.view_started" },
       { project_id: "other" }, { interval: "day" }, { from: "invalid" }, { from: filters.to },
       { to: filters.from }, { browser_name: "" }, { os_name: "x".repeat(65) }, { device_type: "TV" }]) {
@@ -483,26 +488,26 @@ for (const separateReads of [false, true]) {
       average_playing_time_ms: views ? playing / views : null, reached_end_views: reached,
       reached_end_ratio: views ? reached / views : null });
     const expected = metrics(8, 21000, 2);
-    assert.deepEqual(await engagement(), expected);
+    assertOriginalMetrics(await engagement(), expected);
     const summary = await server.get(`/v1/summary?${new URLSearchParams(filters)}`);
     assert.equal(expected.views, summary.views);
     assert.equal(expected.total_playing_time_ms, summary.total_playing_time_ms);
-    assert.deepEqual(await engagement({ video_id: "ended", viewer_id: "viewer", browser_name: "Chrome", os_name: "Linux", device_type: "desktop" }), metrics(1, 8000, 1));
-    assert.deepEqual(await engagement({ browser_name: "Firefox" }), metrics(1, 4000, 0));
-    assert.deepEqual(await engagement({ viewer_id: "viewer" }), metrics(7, 20000, 1));
+    assertOriginalMetrics(await engagement({ video_id: "ended", viewer_id: "viewer", browser_name: "Chrome", os_name: "Linux", device_type: "desktop" }), metrics(1, 8000, 1));
+    assertOriginalMetrics(await engagement({ browser_name: "Firefox" }), metrics(1, 4000, 0));
+    assertOriginalMetrics(await engagement({ viewer_id: "viewer" }), metrics(7, 20000, 1));
     for (const video_id of ["start-only", "failed", "unknown-end"]) {
-      assert.deepEqual(await engagement({ video_id }), metrics(1, 0, 0));
+      assertOriginalMetrics(await engagement({ video_id }), metrics(1, 0, 0));
     }
-    assert.deepEqual(await engagement({ video_id: "conflicting-ends" }), metrics(1, 6000, 0));
-    assert.deepEqual(await engagement({ video_id: "end-order" }), metrics(1, 1000, 1));
+    assertOriginalMetrics(await engagement({ video_id: "conflicting-ends" }), metrics(1, 6000, 0));
+    assertOriginalMetrics(await engagement({ video_id: "end-order" }), metrics(1, 1000, 1));
     for (const extra of [{ video_id: "wrong-video" }, { viewer_id: "wrong-viewer" }, { browser_name: "Safari" },
       { os_name: "macOS" }, { device_type: "mobile" }, { video_id: "orphan" },
       { from: "2026-10-22T00:00:00Z", to: "2026-10-23T00:00:00Z" }]) {
-      assert.deepEqual(await engagement(extra), metrics(0, 0, 0));
+      assertOriginalMetrics(await engagement(extra), metrics(0, 0, 0));
     }
-    assert.deepEqual(await engagement({ from: "2026-10-19T02:00:00+02:00", to: "2026-10-20T02:00:00+02:00" }), expected);
-    assert.deepEqual(await engagement({ from: "2026-10-19T12:00:00Z", to: "2026-10-19T12:00:00.001Z" }), expected);
-    assert.deepEqual(await engagement({ to: "2026-10-19T12:00:00Z" }), metrics(0, 0, 0));
+    assertOriginalMetrics(await engagement({ from: "2026-10-19T02:00:00+02:00", to: "2026-10-20T02:00:00+02:00" }), expected);
+    assertOriginalMetrics(await engagement({ from: "2026-10-19T12:00:00Z", to: "2026-10-19T12:00:00.001Z" }), expected);
+    assertOriginalMetrics(await engagement({ to: "2026-10-19T12:00:00Z" }), metrics(0, 0, 0));
     for (const invalid of [{ limit: "1" }, { cursor: "x" }, { event_name: "chunkify.video.view_started" },
       { project_id: "other" }, { interval: "day" }, { from: "invalid" }, { from: filters.to },
       { to: filters.from }, { browser_name: "" }, { os_name: "x".repeat(65) }, { device_type: "TV" }]) {
@@ -1209,4 +1214,100 @@ test("CSV download budgets cannot be bypassed with another link or rotated key",
   assert.equal(download.status, 200);
   await download.text();
   await server.get("/v1/summary");
+});
+
+for (const separateReads of [false, true]) test(`video reports preserve progress, measured watch time and startup outcomes (${separateReads})`, async t => {
+  const server = await collector(t, { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" });
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const samples = [
+    [0, 0, "failed_before_start"], [0, 0, "ended_before_start"], [9999, 0.25, "started"],
+    [10000, 0.5, null], [30000, 0.75, null], [60000, 1, "started"],
+    [300000, null, null], null, [0, 1.2, null], [0, 1, null], [0, null, null], [5000, 0.5, null],
+  ];
+  const starts = [];
+  for (const [index, sample] of samples.entries()) {
+    const start = { ...example, event_id: randomUUID(), view_id: randomUUID(), video_id: "report",
+      viewer_id: "viewer", sequence: 1, occurred_at: "2026-10-19T12:00:00Z",
+      browser_context: { schema_version: 1, browser_name: index === 6 ? "Firefox" : "Chrome", os_name: "Linux", device_type: "desktop" } };
+    starts.push(start);
+    await server.post("/v1/events", JSON.stringify(start), 201);
+    if (!sample) continue;
+    const [playing, progress, outcome] = sample;
+    const measurement = { ...start, event_id: randomUUID(), sequence: 3,
+      event_name: `chunkify.video.${index === 11 ? "view_snapshot" : "view_ended"}`,
+      occurred_at: "2026-10-21T12:00:00Z", playing_time_ms: playing, furthest_progress_ratio: progress,
+      media_duration_seconds: index === 6 ? null : index === 9 ? 0 : 600,
+      startup_outcome: index === 11 ? "failed_before_start" : outcome,
+      startup_time_ms: index === 3 ? 0 : null,
+      reason: index === 11 ? null : index === 2 ? "ended" : "destroyed" };
+    await server.post("/v1/events", JSON.stringify(measurement), 201);
+    await server.post("/v1/events", JSON.stringify(measurement), 200);
+    if (index === 2 || index === 10) {
+      await server.post("/v1/events", JSON.stringify({ ...measurement, event_id: randomUUID(), sequence: 99,
+        event_name: "chunkify.video.view_snapshot", reason: null, playing_time_ms: 999999,
+        furthest_progress_ratio: 1, startup_outcome: null }), 201);
+    }
+  }
+  // Conflicting identities and an end without a retained start cannot change the cohort.
+  for (const extra of [{ viewer_id: "other" }, { video_id: "other" }, { view_id: randomUUID() }]) {
+    await server.post("/v1/events", JSON.stringify({ ...starts[0], ...extra, event_id: randomUUID(), sequence: 100,
+      event_name: "chunkify.video.view_ended", reason: "ended", startup_outcome: "started",
+      playing_time_ms: 999999, media_duration_seconds: 600, furthest_progress_ratio: 1 }), 201);
+  }
+  const range = "video_id=report&viewer_id=viewer&from=2026-10-19T00:00:00Z&to=2026-10-20T00:00:00Z";
+  const engagement = await server.get(`/v1/engagement?${range}`);
+  assert.equal(engagement.views, 12);
+  assert.equal(engagement.total_playing_time_ms, 414999);
+  assert.equal(engagement.reached_end_views, 1);
+  const milestone = count => ({ views: count, ratio: count / 7 });
+  assert.deepEqual(engagement.progress_reached, { sample_views: 7, at_25_percent: milestone(5),
+    at_50_percent: milestone(4), at_75_percent: milestone(2), at_100_percent: milestone(1) });
+  assert.deepEqual(engagement.watch_time_ms, { sample_views: 11, median: 5000, p95: 180000,
+    distribution: { under_10_seconds: 7, from_10_to_30_seconds: 1, from_30_to_60_seconds: 1,
+      from_1_to_5_minutes: 1, at_least_5_minutes: 1 } });
+  const quality = await server.get(`/v1/quality?${range}`);
+  const outcome = count => ({ views: count, ratio: count / 12 });
+  assert.deepEqual(quality.startup_outcomes, { sample_views: 8, started: outcome(6),
+    failed_before_start: outcome(1), ended_before_start: outcome(1), unknown: outcome(4) });
+  const byBrowser = await server.get(`/v1/engagement?${range}&group_by=browser_name`);
+  const firefox = byBrowser.groups.find(group => group.value === "Firefox").data;
+  assert.equal(firefox.progress_reached.sample_views, 0);
+  assert.equal(firefox.watch_time_ms.distribution.at_least_5_minutes, 1);
+  assert.deepEqual(firefox, await server.get(`/v1/engagement?${range}&browser_name=Firefox&device_type=desktop`));
+  for (const kind of ["engagement", "quality"]) {
+    const series = await server.get(`/v1/timeseries?kind=${kind}&${range}&interval=day`);
+    const { bucket_start, ...metrics } = series.buckets[0];
+    assert.equal(bucket_start, "2026-10-19T00:00:00.000Z");
+    assert.deepEqual(metrics, kind === "engagement" ? engagement : quality);
+    const empty = await server.get(`/v1/${kind}?video_id=missing`);
+    const emptySeries = await server.get(`/v1/timeseries?kind=${kind}&video_id=missing&from=2026-10-19T00:00:00Z&to=2026-10-20T00:00:00Z&interval=day`);
+    const { bucket_start: unused, ...emptyMetrics } = emptySeries.buckets[0];
+    assert.deepEqual(emptyMetrics, empty);
+    if (kind === "engagement") {
+      assert.equal(empty.watch_time_ms.median, null);
+      assert.equal(empty.progress_reached.at_25_percent.ratio, null);
+    } else assert.equal(empty.startup_outcomes.unknown.ratio, null);
+  }
+  const exportRows = async (resource, query) => {
+    const response = await fetch(`${server.url}/v1/exports`, { method: "POST",
+      headers: { Authorization: `Bearer ${server.keys.secret_key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ resource, query }) });
+    const link = await assertResponse("/v1/exports", "post", response, 201);
+    const download = await fetch(link.download_url);
+    assert.equal(download.status, 200);
+    const [header, ...rows] = (await download.text()).trimEnd().split("\r\n").map(row => row.split(","));
+    return rows.map(row => Object.fromEntries(header.map((name, index) => [name, row[index]])));
+  };
+  const csv = (await exportRows("engagement", { video_id: "report" }))[0];
+  assert.equal(csv["progress_reached/at_100_percent/views"], "1");
+  assert.equal(csv["watch_time_ms/median"], "5000.0");
+  assert.equal(csv["watch_time_ms/distribution/at_least_5_minutes"], "1");
+  const groupedCsv = await exportRows("engagement", { video_id: "report", group_by: "browser_name" });
+  assert.equal(groupedCsv.find(row => row.value === "Firefox")["data/watch_time_ms/sample_views"], "1");
+  const qualityCsv = (await exportRows("quality", { video_id: "report" }))[0];
+  assert.equal(qualityCsv["startup_outcomes/unknown/views"], "4");
+  const seriesCsv = await exportRows("timeseries", { kind: "quality", video_id: "report",
+    from: "2026-10-19T00:00:00Z", to: "2026-10-21T00:00:00Z", interval: "day" });
+  assert.equal(seriesCsv[0]["startup_outcomes/started/views"], "6");
+  assert.equal(seriesCsv[1]["startup_outcomes/started/ratio"], "");
 });

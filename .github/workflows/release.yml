@@ -1,0 +1,260 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual runs build and test the release packages without publishing.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      tag: ${{ steps.metadata.outputs.tag }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
+      image: ${{ steps.metadata.outputs.image }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate tag and Cargo version
+        id: metadata
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import tomllib
+
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["package"]["version"]
+          # Build metadata is omitted because '+' is not valid in Docker tags.
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?", version):
+              raise SystemExit("Use MAJOR.MINOR.PATCH with an optional SemVer prerelease in Cargo.toml")
+          if "-" in version:
+              for identifier in version.split("-", 1)[1].split("."):
+                  if identifier.isdigit() and len(identifier) > 1 and identifier.startswith("0"):
+                      raise SystemExit("Numeric prerelease identifiers must not have leading zeroes")
+          tag = f"v{version}"
+          if os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REF_NAME"] != tag:
+              raise SystemExit(f"Tag must match Cargo.toml version: {tag}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"version={version}\ntag={tag}\n")
+              output.write(f"prerelease={'true' if '-' in version else 'false'}\n")
+              output.write(f"image=ghcr.io/{os.environ['GITHUB_REPOSITORY'].lower()}\n")
+          PY
+
+  checks:
+    name: Run CI
+    needs: prepare
+    uses: ./.github/workflows/ci.yml
+
+  binaries:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUSTUP_TOOLCHAIN: "1.99.0"
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.99.0 --profile minimal --target "$TARGET"
+      - name: Restore Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: release-${{ matrix.target }}-v1
+          cache-on-failure: true
+      - name: Install prebuilt DuckDB
+        run: sh scripts/install-duckdb.sh
+      - name: Build release executable
+        run: cargo build --locked --release --target "$TARGET"
+      - name: Test release CLI
+        run: cargo test --locked --release --target "$TARGET" --test cli
+      - name: Package executable and DuckDB
+        run: sh scripts/package-release.sh "$RELEASE_VERSION" "$TARGET"
+      - name: Test extracted package away from the build directory
+        run: |
+          temporary=$(mktemp -d)
+          trap 'rm -rf "$temporary"' EXIT
+          tar -xzf "target/release-dist/chunkify-analytics-$RELEASE_VERSION-$TARGET.tar.gz" -C "$temporary"
+          cd "$temporary/chunkify-analytics-$RELEASE_VERSION-$TARGET"
+          unset DUCKDB_LIB_DIR LD_LIBRARY_PATH DYLD_LIBRARY_PATH
+          test "$(bin/chunkify-analytics --version)" = "chunkify-analytics $RELEASE_VERSION"
+          cp config.toml.example config.toml
+          bin/chunkify-analytics config check
+          bin/chunkify-analytics init > /dev/null
+          bin/chunkify-analytics project list > /dev/null
+      - name: Upload release archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/release-dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+
+  containers:
+    name: Test and stage Linux ${{ matrix.arch }} image
+    needs: [prepare, checks, binaries]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            arch: amd64
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      STAGING_IMAGE: ${{ needs.prepare.outputs.image }}:sha-${{ github.sha }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Download tested release archive
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: target/release-dist
+      - name: Prepare release executable for Docker
+        run: |
+          mkdir -p target/package target/container/usr/local/bin target/container/opt/duckdb
+          tar -xzf "target/release-dist/chunkify-analytics-$RELEASE_VERSION-$TARGET.tar.gz" -C target/package --strip-components=1
+          cp target/package/bin/chunkify-analytics target/container/usr/local/bin/
+          cp target/package/lib/libduckdb.so target/container/opt/duckdb/
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Package release image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          build-contexts: build=./target/container
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: chunkify-analytics:test
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=collector-runtime-${{ matrix.arch }}
+          cache-to: type=gha,scope=collector-runtime-${{ matrix.arch }},mode=max
+      - name: Test release container lifecycle and benchmark runner
+        run: node --test tests/http/docker/*.test.mjs
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage tested image
+        if: github.event_name == 'push'
+        run: |
+          docker tag chunkify-analytics:test "$STAGING_IMAGE"
+          docker push "$STAGING_IMAGE"
+
+  release:
+    name: Assemble and publish release
+    needs: [prepare, checks, binaries, containers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: write
+    env:
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download release archives
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: target/release-dist
+      - name: Include sample configuration
+        run: cp config.toml.example target/release-dist/
+      - name: Generate checksums
+        working-directory: target/release-dist
+        run: sha256sum *.tar.gz config.toml.example > SHA256SUMS
+      - name: Upload complete release assets
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: release-assets
+          path: target/release-dist/*
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+      - name: Set up Docker Buildx
+        if: github.event_name == 'push'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Log in to GitHub Container Registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish multi-platform image
+        if: github.event_name == 'push'
+        run: |
+          tags=(--tag "$IMAGE:$RELEASE_VERSION")
+          if [ "$PRERELEASE" = false ]; then
+            tags+=(--tag "$IMAGE:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" \
+            "$IMAGE:sha-$GITHUB_SHA-amd64" \
+            "$IMAGE:sha-$GITHUB_SHA-arm64"
+      - name: Publish GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          flags=(--latest)
+          if [ "$PRERELEASE" = true ]; then
+            flags=(--prerelease --latest=false)
+          fi
+          gh release create "$RELEASE_TAG" target/release-dist/* \
+            --verify-tag --title "$RELEASE_TAG" --generate-notes \
+            --notes "Docker image: \`$IMAGE:$RELEASE_VERSION\`" "${flags[@]}"

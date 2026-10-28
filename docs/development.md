@@ -74,6 +74,25 @@ remain enabled.
 
 ## Docker checks
 
+### Build the Docker image
+
+To build an image from source, you need Git and Docker with BuildKit support:
+
+```sh
+git clone https://github.com/chunkifydev/chunkify-analytics.git
+cd chunkify-analytics
+docker build -t chunkify-analytics:local .
+```
+
+The build downloads the pinned DuckDB library and compiles the analytics server.
+On a small build machine, add `--build-arg BUILD_JOBS=1` to reduce simultaneous
+compilation work. Follow the [Docker installation guide](../README.md#install-with-docker)
+with `chunkify-analytics:local` in place of
+`ghcr.io/chunkifydev/chunkify-analytics:latest`, and copy `config.toml.example`
+from the checkout instead of downloading it.
+
+### Test the image
+
 ```sh
 npm run test:collector:docker
 ```
@@ -150,3 +169,8 @@ The root README is the installation and usage guide. Detailed user references
 live in `docs/`; example-specific instructions live beside the examples. Update
 commands and configuration examples when changing the CLI or runtime settings.
 Follow the commit conventions in [AGENTS.md](../AGENTS.md).
+
+## Releases
+
+See [the release guide](releasing.md) for version tags, release packages, Docker
+images, and a manual build that checks the release without publishing.

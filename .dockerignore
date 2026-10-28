@@ -3,6 +3,10 @@
 !Cargo.lock
 !build.rs
 !openapi.json
+!LICENSE
+!docs/
+!docs/licenses/
+!docs/licenses/duckdb.txt
 !src/
 !src/**
 !.cargo/

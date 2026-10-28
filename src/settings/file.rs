@@ -17,6 +17,7 @@ struct FileConfig {
     storage: Storage,
     experimental: Experimental,
     mcp: Mcp,
+    rate_limits: crate::limits::Config,
 }
 
 #[derive(Default, Deserialize)]
@@ -87,7 +88,7 @@ struct Mcp {
 }
 
 pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
-    let file = config_file.unwrap_or_else(|| Path::new("collector.toml"));
+    let file = config_file.unwrap_or_else(|| Path::new("config.toml"));
     let source = match fs::read_to_string(file) {
         Ok(source) => source,
         Err(error) if config_file.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
@@ -111,7 +112,10 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             file.display()
         )
     })?;
-    let mut settings = Settings::default();
+    let mut settings = Settings {
+        rate_limits: config.rate_limits,
+        ..Settings::default()
+    };
     let mut storage = config.storage;
     if let Some(path) = storage.path.take() {
         let path = if path.is_absolute() {

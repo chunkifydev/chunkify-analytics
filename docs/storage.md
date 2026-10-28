@@ -1,6 +1,6 @@
 # Storage
 
-Choose `local` or `s3` in the `[storage]` section of `collector.toml`.
+Choose `local` or `s3` in the `[storage]` section of `config.toml`.
 
 ## Local
 

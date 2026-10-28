@@ -3,7 +3,7 @@
 Run commands with the collector's configuration and data directory:
 
 ```sh
-chunkify-analytics --config /path/to/collector.toml project list
+chunkify-analytics --config /path/to/config.toml project list
 ```
 
 In Docker, run them inside the active container:

@@ -32,7 +32,7 @@ async function installation(t, storage, retention = 0, environment = {}) {
     ...environment };
   let config;
   async function configure() {
-    config = join(directory, "collector.toml");
+    config = join(directory, "config.toml");
     const fields = Object.entries(storage).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
     await writeFile(config, `data_dir = "state"\n[server]\nbind = "127.0.0.1:0"\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = 86400\n`, { mode: 0o600 });
   }

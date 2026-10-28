@@ -104,7 +104,7 @@ fn dotenv_does_not_search_parent_directories() {
 fn toml_dotenv_environment_and_cli_are_merged_in_priority_order() {
     let fixture = Fixture::new();
     std::fs::write(
-        fixture.0.join("collector.toml"),
+        fixture.0.join("config.toml"),
         "data_dir = 'toml-data'\n[retention]\nseconds = 0\n",
     )
     .unwrap();
@@ -135,7 +135,7 @@ fn toml_dotenv_environment_and_cli_are_merged_in_priority_order() {
 #[test]
 fn explicit_toml_replaces_default_and_resolves_data_relative_to_its_location() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.0.join("collector.toml"), "unknown = true").unwrap();
+    std::fs::write(fixture.0.join("config.toml"), "unknown = true").unwrap();
     std::fs::create_dir(fixture.0.join("settings")).unwrap();
     std::fs::write(
         fixture.0.join("settings/production.toml"),
@@ -164,7 +164,7 @@ fn unknown_fields_types_and_missing_files_fail_without_echoing_configuration() {
         "[retention]\nseconds = 'private-test-secret'",
         "[mcp]\nsecret_key = 'private-test-secret",
     ] {
-        std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+        std::fs::write(fixture.0.join("config.toml"), source).unwrap();
         let output = fixture.run(&["config", "check"]);
         assert!(!output.status.success());
         let message = String::from_utf8_lossy(&output.stderr);
@@ -178,8 +178,8 @@ fn unknown_fields_types_and_missing_files_fail_without_echoing_configuration() {
 fn toml_sample_is_complete_and_does_not_create_state_when_checked() {
     let fixture = Fixture::new();
     std::fs::write(
-        fixture.0.join("collector.toml"),
-        include_str!("../collector.toml.example"),
+        fixture.0.join("config.toml"),
+        include_str!("../config.toml.example"),
     )
     .unwrap();
     let output = fixture.run(&["config", "check"]);
@@ -191,8 +191,8 @@ fn toml_sample_is_complete_and_does_not_create_state_when_checked() {
 fn application_settings_are_toml_only_except_deployment_overrides() {
     let fixture = Fixture::new();
     std::fs::write(
-        fixture.0.join("collector.toml"),
-        include_str!("../collector.toml.example"),
+        fixture.0.join("config.toml"),
+        include_str!("../config.toml.example"),
     )
     .unwrap();
     let removed = [
@@ -246,11 +246,11 @@ fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
         "[mcp]\nallowed_hosts = ['*']",
         "[mcp]\nallowed_hosts = ['https://example.com/path']",
     ] {
-        std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+        std::fs::write(fixture.0.join("config.toml"), source).unwrap();
         assert!(!fixture.run(&["config", "check"]).status.success());
     }
     std::fs::write(
-        fixture.0.join("collector.toml"),
+        fixture.0.join("config.toml"),
         "[mcp]\nenabled = false\nallowed_hosts = ['analytics.example.com:443']",
     )
     .unwrap();
@@ -261,7 +261,7 @@ fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
 fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets() {
     let fixture = Fixture::new();
     let source = "[storage]\nbackend = 's3'\nurl = 's3://analytics/production/'\nendpoint = 'account.r2.cloudflarestorage.com'\nregion = 'auto'\naccess_key_id = 'test-access'\nsecret_access_key = 'private-test-secret'\nurl_style = 'path'\nuse_ssl = true\n";
-    std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+    std::fs::write(fixture.0.join("config.toml"), source).unwrap();
     let output = fixture.run(&["config", "check"]);
     assert!(output.status.success(), "{output:?}");
     assert!(!fixture.0.join("data").exists());
@@ -280,12 +280,12 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
         format!("{source}\n[experimental]\ndurable_queue = true"),
         format!("{source}\n[experimental]\nread_worker = true"),
     ] {
-        std::fs::write(fixture.0.join("collector.toml"), invalid).unwrap();
+        std::fs::write(fixture.0.join("config.toml"), invalid).unwrap();
         let output = fixture.run(&["config", "check"]);
         assert!(!output.status.success(), "{output:?}");
         assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test-secret"));
     }
-    std::fs::write(fixture.0.join("collector.toml"), source).unwrap();
+    std::fs::write(fixture.0.join("config.toml"), source).unwrap();
     assert!(
         fixture
             .command()
@@ -302,7 +302,7 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
 fn s3_environment_overrides_toml_and_validates_addressing() {
     let fixture = Fixture::new();
     std::fs::write(
-        fixture.0.join("collector.toml"),
+        fixture.0.join("config.toml"),
         "[storage]\nbackend = 's3'\nurl_style = 'invalid'\n",
     )
     .unwrap();
@@ -351,7 +351,7 @@ fn public_download_base_rejects_credentials_queries_and_unsupported_schemes() {
         "http://localhost:4174",
     ] {
         std::fs::write(
-            fixture.0.join("collector.toml"),
+            fixture.0.join("config.toml"),
             format!(
                 "server.public_url = {}\n",
                 serde_json::to_string(url).unwrap()
@@ -368,7 +368,7 @@ fn public_download_base_rejects_credentials_queries_and_unsupported_schemes() {
         "https://example.com/#private-test",
     ] {
         std::fs::write(
-            fixture.0.join("collector.toml"),
+            fixture.0.join("config.toml"),
             format!(
                 "server.public_url = {}\n",
                 serde_json::to_string(url).unwrap()
@@ -379,4 +379,49 @@ fn public_download_base_rejects_credentials_queries_and_unsupported_schemes() {
         assert!(!output.status.success());
         assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test"));
     }
+}
+
+#[test]
+fn rate_limit_overrides_validate_without_starting_storage() {
+    let fixture = Fixture::new();
+    for source in [
+        "[rate_limits]\nread_per_minute=1\nread_burst=1\n",
+        "[rate_limits]\nread_concurrent_per_project=3\nread_concurrent=4\nexport_concurrent_per_project=2\nexport_concurrent=3\nexport_links_per_minute=60\nexport_downloads_per_minute=30\n",
+    ] {
+        std::fs::write(fixture.0.join("config.toml"), source).unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for (field, value) in [
+        ("read_per_minute", "0"),
+        ("read_burst", "0"),
+        ("read_concurrent_per_project", "0"),
+        ("read_concurrent", "0"),
+        ("export_links_per_minute", "0"),
+        ("export_downloads_per_minute", "0"),
+        ("export_concurrent_per_project", "0"),
+        ("export_concurrent", "0"),
+        ("read_per_minute", "1000001"),
+        ("read_burst", "1000001"),
+        ("read_concurrent", "257"),
+        ("export_concurrent", "65"),
+        ("read_concurrent_per_project", "9"),
+        ("export_concurrent_per_project", "5"),
+        ("read_per_minute", "-1"),
+        ("read_burst", "1.5"),
+        ("unknown", "1"),
+    ] {
+        std::fs::write(
+            fixture.0.join("config.toml"),
+            format!("[rate_limits]\n{field}={value}\n"),
+        )
+        .unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert!(!output.status.success(), "accepted {field}={value}");
+    }
+    assert!(!fixture.0.join("data").exists());
 }

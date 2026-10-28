@@ -17,7 +17,9 @@ const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-an
 async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-openapi-test-"));
   const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("COLLECTOR_")));
-  const configuration = { ...inherited, "data_dir": directory, "server.bind": "127.0.0.1:0",
+  const configuration = { ...inherited, "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
+    "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
+    "rate_limits.export_downloads_per_minute": "1000", "data_dir": directory, "server.bind": "127.0.0.1:0",
     "server.allowed_origins": "https://player.example", "retention.seconds": "0", ...settings };
   await writeConfig(directory, configuration);
   const env = collectorEnvironment(inherited);
@@ -1067,4 +1069,144 @@ test("export links use the configured public base including an ingress prefix", 
   );
   const token = new URL(link.download_url).pathname.split("/").at(-1);
   assert.equal((await fetch(`${server.url}/v1/exports/${token}`)).status, 200);
+});
+
+for (const separateReads of [false, true])
+  test(`read rate budgets span routes and keys without blocking ingestion (separate reads: ${separateReads})`, async (t) => {
+    const server = await collector(t, {
+      "experimental.read_worker": String(separateReads),
+      "rate_limits.read_per_minute": "1",
+      "rate_limits.read_burst": "1",
+    });
+    const key = await server.admin([
+      "key",
+      "create",
+      "default",
+      "secret",
+      "Read budget",
+      "--read-only",
+    ]);
+    await server.get("/v1/summary?from=invalid", 400);
+    await server.get("/v1/summary");
+    const response = await fetch(`${server.url}/v1/events`, {
+      headers: { Authorization: `Bearer ${key.key}` },
+    });
+    await assertResponse("/v1/events", "get", response, 429);
+    assert.ok(Number(response.headers.get("retry-after")) >= 1);
+    assert.ok(Number(response.headers.get("retry-after")) <= 60);
+    const rotated = await server.admin([
+      "key",
+      "rotate",
+      "default",
+      key.key_id,
+    ]);
+    await server.get("/v1/quality", 429, {
+      Authorization: `Bearer ${rotated.key}`,
+    });
+    const other = await server.admin([
+      "project",
+      "create",
+      "Independent budget",
+    ]);
+    await server.get("/v1/summary", 200, {
+      Authorization: `Bearer ${other.secret_key}`,
+    });
+    await server.get("/v1/engagement", 429);
+    const example =
+      contract.paths["/v1/events"].post.requestBody.content["application/json"]
+        .example;
+    await server.post("/v1/events", JSON.stringify(example), 201);
+    assert.equal((await fetch(`${server.url}/healthz`)).status, 200);
+  });
+
+test("export link creation has a separate shared project rate budget", async (t) => {
+  const server = await collector(t, {
+    "rate_limits.export_links_per_minute": "1",
+  });
+  const key = await server.admin([
+    "key",
+    "create",
+    "default",
+    "secret",
+    "Export budget",
+    "--read-only",
+  ]);
+  const create = async (token, status) => {
+    const response = await fetch(`${server.url}/v1/exports`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ resource: "summary" }),
+    });
+    const body = await assertResponse("/v1/exports", "post", response, status);
+    if (status === 429)
+      assert.ok(Number(response.headers.get("retry-after")) >= 1);
+    return body;
+  };
+  const link = await create(server.keys.secret_key, 201);
+  await create(key.key, 429);
+  await server.get("/v1/summary");
+  assert.equal((await fetch(link.download_url)).status, 200);
+  const other = await server.admin([
+    "project",
+    "create",
+    "Other export budget",
+  ]);
+  await create(other.secret_key, 201);
+});
+
+test("CSV download budgets cannot be bypassed with another link or rotated key", async (t) => {
+  const server = await collector(t, {
+    "rate_limits.export_downloads_per_minute": "1",
+  });
+  const key = await server.admin([
+    "key",
+    "create",
+    "default",
+    "secret",
+    "Download budget",
+    "--read-only",
+  ]);
+  const create = async (token) => {
+    const response = await fetch(`${server.url}/v1/exports`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ resource: "events" }),
+    });
+    return assertResponse("/v1/exports", "post", response, 201);
+  };
+  const a = await create(server.keys.secret_key),
+    b = await create(key.key);
+  for (let i = 0; i < 3; i++)
+    assert.equal((await fetch(a.download_url, { method: "HEAD" })).status, 200);
+  assert.equal(
+    (await fetch(`${server.url}/v1/exports/${"A".repeat(43)}`)).status,
+    404,
+  );
+  const first = await fetch(a.download_url);
+  assert.equal(first.status, 200);
+  await first.text();
+  for (const link of [a, b]) {
+    const response = await fetch(link.download_url);
+    await assertResponse("/v1/exports/{token}", "get", response, 429);
+    assert.ok(Number(response.headers.get("retry-after")) >= 1);
+  }
+  const rotated = await server.admin(["key", "rotate", "default", key.key_id]);
+  const c = await create(rotated.key);
+  assert.equal((await fetch(c.download_url)).status, 429);
+  const other = await server.admin([
+    "project",
+    "create",
+    "Other download budget",
+  ]);
+  const independent = await create(other.secret_key);
+  const download = await fetch(independent.download_url);
+  assert.equal(download.status, 200);
+  await download.text();
+  await server.get("/v1/summary");
 });

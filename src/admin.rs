@@ -122,13 +122,13 @@ impl Controller {
     pub fn authorize_admin(&self, secret: &str) -> std::result::Result<(), crate::api::ApiError> {
         use crate::api::ApiError;
         let expected = self.config.admin_key_hash.as_ref().ok_or_else(|| {
-            ApiError(
+            ApiError::new(
                 axum::http::StatusCode::NOT_FOUND,
                 "Project creation is disabled".into(),
             )
         })?;
         if *expected != projects::hash(secret) {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 axum::http::StatusCode::UNAUTHORIZED,
                 "Missing or invalid admin key".into(),
             ));
@@ -151,7 +151,7 @@ impl Controller {
             .count()
             >= projects::MAX_PROJECTS
         {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 axum::http::StatusCode::CONFLICT,
                 "Project limit reached".into(),
             ));
@@ -216,7 +216,7 @@ impl Controller {
             },
             ProjectAction::RotateKey(key) => {
                 if !project.keys.iter().any(|credential| credential.id == key) {
-                    return Err(ApiError(
+                    return Err(ApiError::new(
                         axum::http::StatusCode::NOT_FOUND,
                         "Unknown project key".into(),
                     ));
@@ -643,7 +643,7 @@ mod tests {
             ProjectAction::Delete,
         ] {
             let error = controller.project(token, action).err().unwrap();
-            assert_eq!(error.0, axum::http::StatusCode::FORBIDDEN);
+            assert_eq!(error.status, axum::http::StatusCode::FORBIDDEN);
         }
         assert_eq!(
             fs::read(fixture.directory.join("keys.json")).unwrap(),

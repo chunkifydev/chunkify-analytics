@@ -46,7 +46,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 ('a-end','other','a','video-a','other-viewer','view_ended',2,2000,'Chrome',900)
                 ) AS fixture(id,project,view_value,video,viewer,kind,seq,time_value,browser,playing)").map_err(|error| ApiError::bad(error.to_string()))?;
             Ok(())
-        }).await.unwrap_or_else(|error| panic!("{}", error.1));
+        }).await.unwrap_or_else(|error| panic!("{}", error.message));
         let totals = |views, viewers, time| json!({"views":views,"unique_viewers":viewers,"total_playing_time_ms":time});
         for (query, expected) in [
             (Query::default(), totals(3, 2, 2500.0)),
@@ -106,7 +106,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 store
                     .summary("default".into(), query, false)
                     .await
-                    .unwrap_or_else(|error| panic!("{}", error.1)),
+                    .unwrap_or_else(|error| panic!("{}", error.message)),
                 expected
             );
         }
@@ -114,7 +114,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             store
                 .summary("other".into(), Query::default(), false)
                 .await
-                .unwrap_or_else(|error| panic!("{}", error.1)),
+                .unwrap_or_else(|error| panic!("{}", error.message)),
             totals(1, 1, 900.0)
         );
         // Historical records can lack durations. Available playing time alone
@@ -123,7 +123,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             store
                 .quality("default".into(), Query::default())
                 .await
-                .unwrap_or_else(|error| panic!("{}", error.1)),
+                .unwrap_or_else(|error| panic!("{}", error.message)),
             json!({
                 "views":3, "startup_time_ms":{"sample_views":0,"median":null,"p95":null},
                 "buffering":{"sample_views":0,"total_playing_time_ms":0.0,"total_rebuffer_duration_ms":0.0,"ratio":null},
@@ -136,7 +136,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             store
                 .engagement("default".into(), Query::default())
                 .await
-                .unwrap_or_else(|error| panic!("{}", error.1)),
+                .unwrap_or_else(|error| panic!("{}", error.message)),
             json!({
                 "views":3,"total_playing_time_ms":2500.0,"average_playing_time_ms":2500.0/3.0,
                 "reached_end_views":0,"reached_end_ratio":0.0
@@ -152,7 +152,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 true,
             )
             .await
-            .unwrap_or_else(|error| panic!("{}", error.1));
+            .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(
             first["videos"],
             json!([{"video_id":"video-a","views":1,"unique_viewers":0,"total_playing_time_ms":0.0}])
@@ -163,7 +163,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 (event_id,project_id,view_id,video_id,viewer_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format)
                 VALUES ('b-new-first','default','b','video-x','new-viewer','chunkify.video.view_started',0,500,10000,'{}',0)").map_err(|error| ApiError::bad(error.to_string()))?;
             Ok(())
-        }).await.unwrap_or_else(|error| panic!("{}", error.1));
+        }).await.unwrap_or_else(|error| panic!("{}", error.message));
         let second = store
             .summary(
                 "default".into(),
@@ -175,7 +175,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 true,
             )
             .await
-            .unwrap_or_else(|error| panic!("{}", error.1));
+            .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(
             second["videos"],
             json!([{"video_id":"video-b","views":1,"unique_viewers":1,"total_playing_time_ms":2500.0}])
@@ -191,7 +191,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
                 true,
             )
             .await
-            .unwrap_or_else(|error| panic!("{}", error.1));
+            .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(
             third["videos"],
             json!([{"video_id":"video-c","views":1,"unique_viewers":1,"total_playing_time_ms":0.0}])
@@ -201,7 +201,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             store
                 .summary("default".into(), Query::default(), false)
                 .await
-                .unwrap_or_else(|error| panic!("{}", error.1)),
+                .unwrap_or_else(|error| panic!("{}", error.message)),
             totals(3, 2, 0.0)
         );
         drop(store);

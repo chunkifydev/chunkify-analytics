@@ -294,7 +294,7 @@ impl RateLimit {
             .min(self.capacity);
         self.updated = now;
         if self.tokens < 1.0 {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
                 "Ingestion rate limit exceeded".into(),
             ));
@@ -306,6 +306,7 @@ impl RateLimit {
 
 pub struct Access {
     pub id: String,
+    pub limits: crate::limits::Project,
     origins: RwLock<Vec<String>>,
     pub rate: Mutex<RateLimit>,
     budget: Arc<Semaphore>,
@@ -327,6 +328,7 @@ impl Access {
             .min(config.batch.queue_bytes);
         Self {
             id: project.id.clone(),
+            limits: crate::limits::Project::new(&config.rate_limits),
             origins: RwLock::new(effective_origins(
                 &config.allowed_origins,
                 project.settings.allowed_origins.as_deref(),
@@ -353,7 +355,7 @@ impl Access {
 
     pub fn admit(&self, bytes: usize) -> Result<Admission, ApiError> {
         if bytes > self.queue_bytes {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 axum::http::StatusCode::PAYLOAD_TOO_LARGE,
                 "Request exceeds project queue limit".into(),
             ));
@@ -389,7 +391,7 @@ pub struct Resolved {
 impl Resolved {
     pub fn require_write(&self) -> Result<(), ApiError> {
         if self.read_only {
-            return Err(ApiError(
+            return Err(ApiError::new(
                 axum::http::StatusCode::FORBIDDEN,
                 "Read-only keys cannot manage projects or keys".into(),
             ));
@@ -399,6 +401,19 @@ impl Resolved {
 }
 
 impl Registry {
+    pub fn access(&self, id: &str) -> Result<Arc<Access>, ApiError> {
+        self.projects
+            .read()
+            .map_err(|_| ApiError::internal())?
+            .get(id)
+            .cloned()
+            .ok_or_else(|| {
+                ApiError::new(
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "Project is no longer available".into(),
+                )
+            })
+    }
     pub fn export_fingerprint(&self, owner: &Resolved) -> Option<String> {
         self.credentials
             .read()
@@ -490,7 +505,7 @@ impl Registry {
             .filter(|(p, _)| *p == permission)
             .map(|(_, project)| project.clone())
             .ok_or_else(|| {
-                ApiError(
+                ApiError::new(
                     axum::http::StatusCode::UNAUTHORIZED,
                     "Missing or invalid credentials".into(),
                 )

@@ -40,7 +40,10 @@ async function collector(t, settings = {}, initialBinary = binary) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
-  const env = { ...process.env, COLLECTOR_ADMIN_KEY: undefined, "data_dir": directory, "server.bind": "127.0.0.1:0",
+  const env = { ...process.env, COLLECTOR_ADMIN_KEY: undefined,
+    "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
+    "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
+    "data_dir": directory, "server.bind": "127.0.0.1:0",
     "server.allowed_origins": "https://player.example", "server.store_ip": "true",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);

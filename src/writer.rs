@@ -261,7 +261,7 @@ impl Writer {
         request_context: Option<RequestContext>,
     ) -> Result<usize, ApiError> {
         let too_large = || {
-            ApiError(
+            ApiError::new(
                 axum::http::StatusCode::PAYLOAD_TOO_LARGE,
                 "Request exceeds the collector write-batch limit".into(),
             )

@@ -32,6 +32,7 @@ fn environment_field(name: &str) -> Option<&'static str> {
 #[derive(Default)]
 pub struct Settings {
     values: HashMap<String, OsString>,
+    pub rate_limits: crate::limits::Config,
 }
 
 impl Settings {

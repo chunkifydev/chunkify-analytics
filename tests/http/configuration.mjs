@@ -5,9 +5,9 @@ const arrays = new Set(["server.allowed_origins", "server.trusted_proxies", "mcp
 const strings = new Set(["data_dir", "server.bind", "batch.insert_mode", "storage.backend", "storage.path",
   "storage.url", "storage.endpoint", "storage.region", "storage.access_key_id", "storage.secret_access_key",
   "storage.session_token", "storage.url_style", "mcp.collector_url", "mcp.secret_key"]);
-const field = name => name === "data_dir" || name === "profile" || /^(server|retention|batch|duckdb|experimental|storage|mcp)\./.test(name);
+const field = name => name === "data_dir" || name === "profile" || /^(server|retention|batch|duckdb|experimental|storage|mcp|rate_limits)\./.test(name);
 
-// Fixtures use the same dotted field names as collector.toml. Preserve invalid
+// Fixtures use the same dotted field names as config.toml. Preserve invalid
 // values so the executable, rather than this helper, validates configuration.
 export function configSource(settings) {
   return Object.entries(settings).filter(([name]) => field(name)).map(([name, original]) => {
@@ -30,7 +30,7 @@ export function collectorEnvironment(settings = process.env) {
 }
 
 export async function writeConfig(directory, settings) {
-  const path = join(directory, "collector.toml");
+  const path = join(directory, "config.toml");
   await writeFile(path, configSource(settings), { mode: 0o600 });
   return path;
 }

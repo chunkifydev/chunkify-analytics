@@ -6,7 +6,7 @@ fn row(project: &str, id: &str, marker: &str, otlp: bool) -> Row {
         event: json!({"event_id":id,"view_id":"view","video_id":"video","viewer_id":null,
             "event_name":"chunkify.video.view_started","sequence":1,"occurred_at":"2026-10-20T00:00:00Z","marker":marker}),
         otlp: otlp.then(||json!({"marker":marker})),
-    },project,Some("test-key"),None,123).unwrap_or_else(|e|panic!("{}",e.1))
+    },project,Some("test-key"),None,123).unwrap_or_else(|e|panic!("{}",e.message))
 }
 fn request(rows: Vec<Row>) -> WriteRequest {
     let (reply, _) = oneshot::channel();
@@ -39,7 +39,7 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
         ]),
     ];
     assert_eq!(
-        write_batch(&mut c, &batch, true, &mut profile).unwrap_or_else(|e| panic!("{}", e.1)),
+        write_batch(&mut c, &batch, true, &mut profile).unwrap_or_else(|e| panic!("{}", e.message)),
         vec![1, 2]
     );
     let replay = vec![
@@ -51,7 +51,8 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
         request(vec![row("a", "new", "new", true)]),
     ];
     assert_eq!(
-        write_batch(&mut c, &replay, true, &mut profile).unwrap_or_else(|e| panic!("{}", e.1)),
+        write_batch(&mut c, &replay, true, &mut profile)
+            .unwrap_or_else(|e| panic!("{}", e.message)),
         vec![0, 1]
     );
     let values = c
@@ -110,7 +111,7 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
     );
     assert_eq!(
         write_batch(&mut c, &[request(vec![])], true, &mut profile)
-            .unwrap_or_else(|e| panic!("{}", e.1)),
+            .unwrap_or_else(|e| panic!("{}", e.message)),
         vec![0]
     );
 }
@@ -147,7 +148,7 @@ fn bulk_lookup_rolls_back_failed_batches_and_reuses_the_stage() {
             true,
             &mut profile
         )
-        .unwrap_or_else(|e| panic!("{}", e.1)),
+        .unwrap_or_else(|e| panic!("{}", e.message)),
         vec![1]
     );
 }

@@ -20,6 +20,7 @@ pub struct Config {
     pub allowed_origins: Vec<String>,
     pub max_body_bytes: usize,
     pub ingest_per_second: u32,
+    pub rate_limits: crate::limits::Config,
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
     pub store_ip: bool,
@@ -71,6 +72,7 @@ impl Config {
         data_dir: Option<&Path>,
         bind: Option<SocketAddr>,
     ) -> Result<Self> {
+        settings.rate_limits.validate()?;
         let allowed_origins: Vec<String> = settings
             .var("server.allowed_origins")
             .unwrap_or_default()
@@ -182,6 +184,7 @@ impl Config {
             })
             .transpose()?;
         Ok(Self {
+            rate_limits: settings.rate_limits.clone(),
             public_url,
             admin_key_hash: settings
                 .var("admin_key")

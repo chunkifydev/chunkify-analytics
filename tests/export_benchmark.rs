@@ -75,7 +75,7 @@ async fn stream_large_exports_while_ingestion_continues() {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir(&directory).unwrap();
-    std::fs::write(directory.join("collector.toml"),"data_dir=\"state\"\nserver.bind=\"127.0.0.1:0\"\nserver.ingest_per_second=10000\nretention.seconds=0\nduckdb.threads=1\nbatch.delay_ms=1\nmcp.enabled=false\n").unwrap();
+    std::fs::write(directory.join("config.toml"),"data_dir=\"state\"\nserver.bind=\"127.0.0.1:0\"\nserver.ingest_per_second=10000\nretention.seconds=0\nduckdb.threads=1\nbatch.delay_ms=1\nmcp.enabled=false\nrate_limits.export_downloads_per_minute=1000\n").unwrap();
     let mut fixture = Fixture {
         directory,
         child: None,

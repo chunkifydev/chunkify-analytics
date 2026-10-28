@@ -81,5 +81,6 @@ sample fixtures.
 node --test examples/dashboard/*.test.*
 ```
 
-For MCP comparisons, use the same secret key and filters with `get_summary`,
-`get_quality`, `get_engagement` and `get_timeseries`. See [MCP setup](../../docs/mcp.md).
+For MCP comparisons, use the same secret key and filters with `get_metrics`
+(`kind=summary`, `quality` or `engagement`) and `get_timeseries`.
+See [MCP setup](../../docs/mcp.md).

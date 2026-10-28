@@ -1704,6 +1704,7 @@ test("read-only private keys read analytics live and cannot manage projects or k
   const from = events[0].occurred_at;
   const to = new Date(Date.parse(from) + 86400000).toISOString();
   const routes = ["/v1/events", "/v1/summary", "/v1/videos", "/v1/quality", "/v1/engagement",
+    "/v1/summary?group_by=browser_name", "/v1/quality?group_by=os_name", "/v1/engagement?group_by=device_type",
     `/v1/timeseries?${new URLSearchParams({ from, to, interval: "day" })}`];
   for (const route of routes) {
     assert.deepEqual(await server.get(route, created.key), await server.get(route, project.secret_key));

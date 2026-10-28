@@ -175,6 +175,49 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
 
+### Breakdowns by browser, OS and device
+
+Add `group_by=browser_name`, `group_by=os_name`, or `group_by=device_type` to
+`GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
+`get_metrics` accepts the same argument, with `kind` selecting `summary`,
+`quality` or `engagement`. Without `group_by`, each route returns its
+usual totals and rejects `limit` and `cursor`.
+
+Grouping returns one page of groups. Each group's `data` uses the same metric
+schema, calculations and sample counts as the route's totals response:
+
+```json
+{
+  "group_by": "browser_name",
+  "groups": [
+    {"value": "Chrome", "data": {"views": 2, "unique_viewers": 1, "total_playing_time_ms": 5000}}
+  ],
+  "next_cursor": null
+}
+```
+
+Group membership uses the first retained view start's context. A later snapshot,
+error or end with a different browser or device does not move the view. Missing,
+null and nonstring context forms a `null` group. The literal device type
+`unknown` is a separate group. Empty results contain an empty `groups` array.
+Filters apply to the start cohort before grouping. Unique viewers can appear
+in several groups; use ungrouped summary for the overall unique-viewer count.
+
+Groups sort by value ascending, with `null` first. HTTP accepts `limit=1..1000`,
+defaulting to 100. Follow `next_cursor` with the same route, `group_by` and
+filters; changing them returns 400. The first page's ingestion watermark
+excludes later arrivals from that pagination sequence. Expiration can still
+remove records between pages. `order`, `sort_by` and `event_name` are rejected
+for grouped queries. Events, videos and timeseries do not accept `group_by`.
+
+Examples:
+
+```text
+GET /v1/summary?group_by=device_type
+GET /v1/quality?group_by=browser_name&video_id=video-123
+GET /v1/engagement?group_by=os_name&browser_name=Chrome
+```
+
 ### Hourly and daily charts
 
 `GET /v1/timeseries` returns the same metrics grouped by the time each view
@@ -199,7 +242,8 @@ UTC hours, and daily buckets align to midnight UTC, regardless of input offsets.
 
 `GET /v1/engagement` accepts the same optional date, video, viewer, browser, OS
 and device filters as summary. The private secret key selects the project.
-There is no pagination. The MCP tool is `get_engagement`.
+Totals have no pagination; add `group_by` for paginated breakdowns. The MCP
+equivalent is `get_metrics` with `{"kind":"engagement"}`.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/engagement' \
@@ -293,4 +337,5 @@ snapshot if no final event exists. Cumulative snapshots are never added together
 A final null value stays unknown. All filters select the first retained start;
 matching later measurements/errors contribute even after `to`. Start-only views
 have no startup/buffering sample. Views without a retained start are excluded.
-The MCP server provides the same result through `get_quality`.
+The MCP server provides the same result through `get_metrics` with
+`{"kind":"quality"}`.

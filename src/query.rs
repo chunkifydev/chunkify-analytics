@@ -54,9 +54,28 @@ pub struct Query {
     pub cursor: Option<String>,
     pub order: Option<SortOrder>,
     pub sort_by: Option<VideoSort>,
+    pub group_by: Option<BreakdownBy>,
 }
 
 pub const MAX_TIME_BUCKETS: usize = 1000;
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakdownBy {
+    BrowserName,
+    OsName,
+    DeviceType,
+}
+
+impl BreakdownBy {
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::BrowserName => "context_browser_name",
+            Self::OsName => "context_os_name",
+            Self::DeviceType => "context_device_type",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]

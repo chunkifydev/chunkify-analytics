@@ -583,3 +583,91 @@ for (const separateReads of [false, true]) test(`video sorting ranks the full co
   assert.equal(frozenWatch.find(video => video.video_id === "g").total_playing_time_ms, 4000.5);
   assert.equal((await get(watch)).videos[0].video_id, "g", "a fresh sequence sees the later watch time");
 });
+
+for (const separateReads of [false, true]) test(`metric breakdowns preserve start context and page complete groups (separate reads: ${separateReads})`, async t => {
+  const server = await collector(t, { "experimental.read_worker": String(separateReads) });
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const context = (browser_name, os_name, device_type) => ({ schema_version: 1, browser_name, os_name, device_type });
+  function attempt(video, browser, viewer, playing, reason = "destroyed") {
+    const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
+      video_id: video, viewer_id: viewer, occurred_at: "2026-10-19T12:00:00Z",
+      ...(browser !== undefined && { browser_context: browser }) };
+    const end = { ...start, event_id: randomUUID(), event_name: "chunkify.video.view_ended", sequence: 4,
+      occurred_at: "2026-10-19T12:00:01Z", playing_time_ms: playing, reason,
+      startup_time_ms: video === "a" ? 200 : null, rebuffer_duration_ms: video === "a" ? 100 : 0 };
+    return [start, end];
+  }
+  const a = attempt("a", context("Chrome", "Linux", "desktop"), "shared", 1000, "ended");
+  const b = attempt("b", context("Chrome", "Windows", "mobile"), "shared", 3000);
+  const c = attempt("c", context("Firefox", "Windows", "desktop"), "other", 2000, "ended");
+  const d = attempt("d", undefined, null, 0);
+  const e = attempt("e", context(123, true, null), "shared", 500);
+  const f = attempt("f", context("unknown", "unknown", "unknown"), "shared", 500);
+  const error = { ...a[1], event_id: randomUUID(), sequence: 3, event_name: "chunkify.video.playback_error",
+    reason: null, error_fatal: true, error_category: "network", error_code: 2 };
+  const records = [{ ...a[0], event_id: randomUUID(), sequence: 2, browser_context: context("Firefox", "Changed", "tablet") },
+    a[0], error, { ...a[1], browser_context: context("Safari", "Changed", "tablet") },
+    ...b, ...c, d[0], ...e, ...f,
+    { ...a[1], event_id: randomUUID(), view_id: randomUUID(), playing_time_ms: 999999 }];
+  for (const event of records) await server.post("/v1/events", JSON.stringify(event), 201);
+  const grouped = (route, params) => server.get(`/v1/${route}?${new URLSearchParams(params)}`);
+  for (const route of ["summary", "quality", "engagement"]) {
+    for (const group_by of ["browser_name", "os_name", "device_type"]) {
+      const all = await grouped(route, { group_by });
+      assert.equal(all.group_by, group_by);
+      assert.equal(all.next_cursor, null);
+      assert.equal(all.groups[0].value, null);
+      assert.equal(all.groups.reduce((sum, row) => sum + row.data.views, 0), 6);
+      for (const group of all.groups.filter(group => group.value !== null)) {
+        assert.deepEqual(group.data, await grouped(route, { [group_by]: group.value }), `${route} ${group_by} ${group.value}`);
+      }
+      let page = await grouped(route, { group_by, limit: "1" });
+      const groups = [...page.groups];
+      while (page.next_cursor) {
+        page = await grouped(route, { group_by, cursor: page.next_cursor, limit: "2" });
+        groups.push(...page.groups);
+      }
+      assert.deepEqual(groups, all.groups);
+      assert.deepEqual((await grouped(route, { group_by, video_id: "missing" })).groups, []);
+      const filtered = await grouped(route, { group_by, browser_name: "Chrome", viewer_id: "shared",
+        from: "2026-10-19T12:00:00Z", to: "2026-10-20T00:00:00Z" });
+      assert.equal(filtered.groups.reduce((sum, row) => sum + row.data.views, 0), 2);
+    }
+  }
+  const byBrowser = await grouped("summary", { group_by: "browser_name" });
+  assert.deepEqual(byBrowser.groups[0].data, { views: 2, unique_viewers: 1, total_playing_time_ms: 500 });
+  assert.deepEqual(byBrowser.groups.map(row => row.value), [null, "Chrome", "Firefox", "unknown"]);
+  assert.equal(byBrowser.groups.find(row => row.value === "Chrome").data.unique_viewers, 1);
+  const quality = await grouped("quality", { group_by: "browser_name" });
+  assert.equal(quality.groups.find(row => row.value === "Chrome").data.fatal_errors.ratio, 0.5);
+  assert.equal(quality.groups[0].data.startup_time_ms.median, null);
+  const devices = await grouped("summary", { group_by: "device_type" });
+  assert.deepEqual(devices.groups.map(row => row.value), [null, "desktop", "mobile", "unknown"]);
+  const first = await grouped("summary", { group_by: "browser_name", limit: "1" });
+  for (const [route, params] of [["summary", { group_by: "os_name" }], ["summary", {}], ["quality", { group_by: "browser_name" }],
+    ["summary", { group_by: "browser_name", viewer_id: "shared" }]]) {
+    await server.get(`/v1/${route}?${new URLSearchParams({ ...params, cursor: first.next_cursor })}`, 400);
+  }
+  for (const route of ["summary", "quality", "engagement"]) {
+    for (const query of ["group_by=country", "group_by=", "group_by=browser_name&group_by=os_name", "group_by=browser_name&limit=0",
+      "group_by=browser_name&limit=1001", "group_by=browser_name&sort_by=views", "group_by=browser_name&order=desc",
+      "group_by=browser_name&event_name=chunkify.video.view_started", "limit=1", "cursor=bad"]) {
+      await server.get(`/v1/${route}?${query}`, 400);
+    }
+    for (const headers of [{}, { Authorization: `Bearer ${server.keys.public_key}` }]) {
+      await server.get(`/v1/${route}?group_by=browser_name`, 401, headers);
+    }
+  }
+  for (const route of ["events", "videos", "timeseries"]) await server.get(`/v1/${route}?group_by=browser_name`, 400);
+  for (const event of attempt("late", context("Zulu", "Other", "tablet"), "late", 9000)) {
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  let page = first;
+  const frozen = [...page.groups];
+  while (page.next_cursor) {
+    page = await grouped("summary", { group_by: "browser_name", limit: "1", cursor: page.next_cursor });
+    frozen.push(...page.groups);
+  }
+  assert.deepEqual(frozen, byBrowser.groups);
+  assert.ok((await grouped("summary", { group_by: "browser_name" })).groups.some(group => group.value === "Zulu"));
+});

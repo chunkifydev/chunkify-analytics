@@ -256,6 +256,10 @@ For the ten videos with the most views, query
 `/v1/videos?sort_by=views&order=desc&limit=10`. Use
 `sort_by=total_playing_time_ms` to rank by total watch time.
 
+Add `group_by=browser_name`, `group_by=os_name`, or `group_by=device_type` to
+`/v1/summary`, `/v1/quality` or `/v1/engagement` for grouped comparisons. For
+example, `/v1/quality?group_by=browser_name` compares playback quality by browser.
+
 Use the summary endpoints for totals instead of adding event snapshots together.
 Watch time is cumulative, and unique viewer IDs cannot be summed across videos
 or dates. The [metric definitions](docs/api.md#metric-definitions) explain
@@ -270,8 +274,16 @@ Connect directly to `http://127.0.0.1:4174/mcp` using Streamable HTTP and the
 `Authorization: Bearer YOUR_PRIVATE_SECRET_KEY` header. Use your deployed HTTPS
 address for remote access and add its hostname to `[mcp].allowed_hosts`.
 
-MCP tools read the authenticated project's analytics. See the
-[MCP guide](docs/mcp.md) for client setup and the optional stdio adapter.
+MCP tools read the authenticated project's analytics. Once connected, try asking
+your AI client:
+
+- "Show my top 10 videos by watch time over the past seven days."
+- "Compare startup time, buffering and fatal-error rates across browsers."
+- "Build a dashboard with daily views, watch time and engagement for the past
+  seven days."
+
+See the [MCP guide](docs/mcp.md) for client setup, available tools and the
+optional stdio adapter.
 
 ## Configure the service
 

@@ -663,7 +663,7 @@
       "get": {
         "operationId": "getSummary",
         "summary": "Read totals for a view cohort",
-        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts.",
+        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
         "tags": [
           "Queries"
         ],
@@ -688,6 +688,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/group_by"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
           }
         ],
         "responses": {
@@ -704,7 +713,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Metrics"
+                  "$ref": "#/components/schemas/MetricsResponse"
                 },
                 "example": {
                   "views": 2,
@@ -1093,7 +1102,7 @@
       "get": {
         "operationId": "getQuality",
         "summary": "Read playback quality for a view cohort",
-        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable.",
+        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
         "tags": [
           "Queries"
         ],
@@ -1118,6 +1127,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/group_by"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
           }
         ],
         "responses": {
@@ -1134,7 +1152,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Quality"
+                  "$ref": "#/components/schemas/QualityResponse"
                 },
                 "example": {
                   "views": 4,
@@ -1241,7 +1259,7 @@
       "get": {
         "operationId": "getEngagement",
         "summary": "Read average watch time and reached-end rate",
-        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched.",
+        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
         "tags": [
           "Queries"
         ],
@@ -1266,6 +1284,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/group_by"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
           }
         ],
         "responses": {
@@ -1282,7 +1309,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Engagement"
+                  "$ref": "#/components/schemas/EngagementResponse"
                 },
                 "example": {
                   "views": 4,
@@ -2155,7 +2182,7 @@
           "maximum": 1000,
           "default": 100
         },
-        "description": "Maximum rows on this page. Only events and videos support pagination."
+        "description": "Maximum rows on this page. Events and videos always support pagination; summary, quality and engagement support it only with group_by."
       },
       "cursor": {
         "name": "cursor",
@@ -2242,6 +2269,19 @@
           "default": "video_id"
         },
         "description": "Videos only. Rank all matching videos by this field before pagination. Watch time is total_playing_time_ms. Metric ties use video_id ascending. Keep the same sort_by with each cursor."
+      },
+      "group_by": {
+        "name": "group_by",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "browser_name",
+            "os_name",
+            "device_type"
+          ]
+        },
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by."
       }
     },
     "schemas": {
@@ -4796,6 +4836,180 @@
           "project_id",
           "deleted",
           "restart_required"
+        ]
+      },
+      "MetricsBreakdownPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "browser_name",
+              "os_name",
+              "device_type"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "data": {
+                  "$ref": "#/components/schemas/Metrics"
+                }
+              },
+              "required": [
+                "value",
+                "data"
+              ]
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "group_by",
+          "groups",
+          "next_cursor"
+        ]
+      },
+      "QualityBreakdownPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "browser_name",
+              "os_name",
+              "device_type"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "data": {
+                  "$ref": "#/components/schemas/Quality"
+                }
+              },
+              "required": [
+                "value",
+                "data"
+              ]
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "group_by",
+          "groups",
+          "next_cursor"
+        ]
+      },
+      "EngagementBreakdownPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "browser_name",
+              "os_name",
+              "device_type"
+            ]
+          },
+          "groups": {
+            "type": "array",
+            "maxItems": 1000,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "data": {
+                  "$ref": "#/components/schemas/Engagement"
+                }
+              },
+              "required": [
+                "value",
+                "data"
+              ]
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "group_by",
+          "groups",
+          "next_cursor"
+        ]
+      },
+      "MetricsResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Metrics"
+          },
+          {
+            "$ref": "#/components/schemas/MetricsBreakdownPage"
+          }
+        ]
+      },
+      "QualityResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Quality"
+          },
+          {
+            "$ref": "#/components/schemas/QualityBreakdownPage"
+          }
+        ]
+      },
+      "EngagementResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Engagement"
+          },
+          {
+            "$ref": "#/components/schemas/EngagementBreakdownPage"
+          }
         ]
       }
     }

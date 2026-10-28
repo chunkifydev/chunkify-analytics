@@ -114,6 +114,20 @@ async fn call(client: &Mcp, name: &str, args: Value, is_error: bool) -> Value {
     result.structured_content.unwrap()
 }
 
+async fn call_metrics(client: &Mcp, kind: &str, mut args: Value, is_error: bool) -> Value {
+    args.as_object_mut()
+        .unwrap()
+        .insert("kind".into(), json!(kind));
+    call(client, "get_metrics", args, is_error).await
+}
+
+async fn call_query(client: &Mcp, tool: &str, args: Value, is_error: bool) -> Value {
+    match tool {
+        "summary" | "quality" | "engagement" => call_metrics(client, tool, args, is_error).await,
+        _ => call(client, tool, args, is_error).await,
+    }
+}
+
 struct Collector {
     child: Child,
     directory: PathBuf,
@@ -331,7 +345,51 @@ async fn exercise_project_queries(http: bool) {
     )
     .await;
     let tools = client.list_tools(None).await.unwrap().tools;
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 5);
+    let names = tools
+        .iter()
+        .map(|tool| tool.name.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "describe_api",
+            "get_metrics",
+            "get_timeseries",
+            "list_video_metrics",
+            "list_events"
+        ]
+    );
+    let metric_schema = &tools
+        .iter()
+        .find(|tool| tool.name == "get_metrics")
+        .unwrap()
+        .input_schema;
+    assert_eq!(metric_schema["required"], json!(["kind"]));
+    assert_eq!(
+        metric_schema["properties"]["kind"]["enum"],
+        json!(["summary", "quality", "engagement"])
+    );
+    for arguments in [
+        json!({}),
+        json!({"kind":null}),
+        json!({"kind":1}),
+        json!({"kind":""}),
+        json!({"kind":"views"}),
+        json!({"kind":"/v1/projects"}),
+    ] {
+        assert_eq!(
+            call(&client, "get_metrics", arguments, true).await["error"]["code"],
+            "invalid_arguments"
+        );
+    }
+    for old in ["get_summary", "get_quality", "get_engagement"] {
+        assert!(client.call_tool(params(old, json!({}))).await.is_err());
+    }
+    assert_eq!(
+        call(&client, "list_events", json!({"kind":"summary"}), true).await["error"]["code"],
+        "invalid_arguments"
+    );
     assert!(
         tools
             .iter()
@@ -365,32 +423,32 @@ async fn exercise_project_queries(http: bool) {
     );
 
     for (tool, path) in [
-        ("get_summary", "/v1/summary"),
-        ("get_quality", "/v1/quality"),
-        ("get_engagement", "/v1/engagement"),
+        ("summary", "/v1/summary"),
+        ("quality", "/v1/quality"),
+        ("engagement", "/v1/engagement"),
         ("list_video_metrics", "/v1/videos"),
         ("list_events", "/v1/events"),
     ] {
-        let result = call(&client, tool, json!({}), false).await;
+        let result = call_query(&client, tool, json!({}), false).await;
         assert_eq!(result["data"], collector.get(path, token).await);
-        let result = call(&client, tool, json!({"video_id":"a","viewer_id":"same-viewer","from":"2026-10-19T00:00:00Z","to":"2026-10-20T00:00:00Z"}), false).await;
+        let result = call_query(&client, tool, json!({"video_id":"a","viewer_id":"same-viewer","from":"2026-10-19T00:00:00Z","to":"2026-10-20T00:00:00Z"}), false).await;
         assert_eq!(result["data"], collector.get(&format!("{path}?video_id=a&viewer_id=same-viewer&from=2026-10-19T00:00:00Z&to=2026-10-20T00:00:00Z"), token).await);
-        let empty = call(&client, tool, json!({"video_id":"missing"}), false).await;
+        let empty = call_query(&client, tool, json!({"video_id":"missing"}), false).await;
         assert!(empty.get("error").is_none());
     }
     assert_eq!(
-        call(&client, "get_summary", json!({}), false).await["data"],
+        call_metrics(&client, "summary", json!({}), false).await["data"],
         json!({"views":2,"unique_viewers":1,"total_playing_time_ms":5000.0})
     );
     assert_eq!(
-        call(&live, "get_summary", json!({}), false).await["data"]["total_playing_time_ms"],
+        call_metrics(&live, "summary", json!({}), false).await["data"]["total_playing_time_ms"],
         json!(15000.0)
     );
     for (connection, credentials, playing) in [
         (&client, &collector.keys, 5000.0),
         (&live, &collector.live, 15000.0),
     ] {
-        let result = call(connection, "get_quality", json!({}), false).await;
+        let result = call_metrics(connection, "quality", json!({}), false).await;
         assert_eq!(
             result["data"],
             collector
@@ -415,7 +473,7 @@ async fn exercise_project_queries(http: bool) {
         json!({"from":"2026-10-21T00:00:00Z", "to":"2026-10-19T00:00:00Z"}),
     ] {
         assert_eq!(
-            call(&client, "get_quality", invalid, true).await["error"]["code"],
+            call_metrics(&client, "quality", invalid, true).await["error"]["code"],
             "invalid_arguments"
         );
     }
@@ -423,7 +481,7 @@ async fn exercise_project_queries(http: bool) {
         (&client, &collector.keys, 5000.0, 1),
         (&live, &collector.live, 15000.0, 2),
     ] {
-        let result = call(connection, "get_engagement", json!({}), false).await;
+        let result = call_metrics(connection, "engagement", json!({}), false).await;
         assert_eq!(
             result["data"],
             collector
@@ -450,7 +508,7 @@ async fn exercise_project_queries(http: bool) {
         json!({"from":"2026-10-21T00:00:00Z", "to":"2026-10-19T00:00:00Z"}),
     ] {
         assert_eq!(
-            call(&client, "get_engagement", invalid, true).await["error"]["code"],
+            call_metrics(&client, "engagement", invalid, true).await["error"]["code"],
             "invalid_arguments"
         );
     }
@@ -552,13 +610,13 @@ async fn exercise_project_queries(http: bool) {
         "invalid_arguments"
     );
     for (tool, key) in [("list_events", "events"), ("list_video_metrics", "videos")] {
-        let first = call(&client, tool, json!({"limit":1}), false).await;
+        let first = call_query(&client, tool, json!({"limit":1}), false).await;
         assert_eq!(first["coverage"]["has_more"], true);
         let cursor = first["data"]["next_cursor"].clone();
         let mut page = first;
         let mut count = page["data"][key].as_array().unwrap().len();
         while page["coverage"]["has_more"] == true {
-            page = call(
+            page = call_query(
                 &client,
                 tool,
                 json!({"limit":1,"cursor":page["data"]["next_cursor"]}),
@@ -573,12 +631,12 @@ async fn exercise_project_queries(http: bool) {
             json!({"cursor":"invalid"}),
         ] {
             assert_eq!(
-                call(&client, tool, args, true).await["error"]["code"],
+                call_query(&client, tool, args, true).await["error"]["code"],
                 "invalid_query"
             );
         }
         assert_eq!(
-            call(&live, tool, json!({"cursor":cursor}), true).await["error"]["code"],
+            call_query(&live, tool, json!({"cursor":cursor}), true).await["error"]["code"],
             "invalid_query"
         );
         let mut forged: Value =
@@ -587,7 +645,7 @@ async fn exercise_project_queries(http: bool) {
         forged["project_id"] = json!("live");
         let forged = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&forged).unwrap());
         assert_eq!(
-            call(&client, tool, json!({"cursor":forged}), true).await["error"]["code"],
+            call_query(&client, tool, json!({"cursor":forged}), true).await["error"]["code"],
             "invalid_query"
         );
     }
@@ -626,12 +684,12 @@ async fn exercise_project_queries(http: bool) {
         let unauthorized = connect(&collector.url, wrong, true).await;
         for tool in [
             "list_events",
-            "get_summary",
-            "get_quality",
-            "get_engagement",
+            "summary",
+            "quality",
+            "engagement",
             "list_video_metrics",
         ] {
-            let result = call(&unauthorized, tool, json!({}), true).await;
+            let result = call_query(&unauthorized, tool, json!({}), true).await;
             assert_eq!(result["error"]["code"], "unauthorized");
             assert!(!result.to_string().contains(wrong));
         }
@@ -728,7 +786,7 @@ async fn video_pages_accept_a_thousand_rows_while_events_keep_their_smaller_limi
             overview["limits"],
             json!({
                 "default_page_size": 10,
-                "max_page_size": {"list_events": 100, "list_video_metrics": 1000},
+                "max_page_size": {"get_metrics": 100, "list_events": 100, "list_video_metrics": 1000},
                 "max_response_bytes": 1048576,
                 "max_filter_json_bytes": 4096,
                 "timeout_seconds": 15,
@@ -736,7 +794,7 @@ async fn video_pages_accept_a_thousand_rows_while_events_keep_their_smaller_limi
             })
         );
         for (tool, key) in [("list_video_metrics", "videos"), ("list_events", "events")] {
-            let page = call(&client, tool, json!({}), false).await;
+            let page = call_query(&client, tool, json!({}), false).await;
             assert_eq!(page["data"][key].as_array().unwrap().len(), 10);
             assert_eq!(page["coverage"]["has_more"], true);
         }
@@ -758,7 +816,7 @@ async fn video_pages_accept_a_thousand_rows_while_events_keep_their_smaller_limi
         assert_eq!(events["data"]["events"].as_array().unwrap().len(), 100);
         for (tool, limit) in [("list_video_metrics", 1001), ("list_events", 101)] {
             assert_eq!(
-                call(&client, tool, json!({"limit":limit}), true).await["error"]["code"],
+                call_query(&client, tool, json!({"limit":limit}), true).await["error"]["code"],
                 "invalid_arguments"
             );
         }
@@ -912,6 +970,10 @@ async fn bounded_http_failures_cancellation_and_timeout() {
         Query(query): Query<HashMap<String, String>>,
         headers: HeaderMap,
     ) -> Response {
+        assert!(
+            !query.contains_key("kind"),
+            "MCP selection must not reach HTTP query parameters"
+        );
         match query.get("video_id").map(String::as_str) {
             Some("redirect") => (
                 StatusCode::FOUND,
@@ -965,7 +1027,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
         ("wrong-shape", "invalid_response"),
         ("error", "unavailable"),
     ] {
-        let result = call(&client, "get_summary", json!({"video_id":video}), true).await;
+        let result = call_metrics(&client, "summary", json!({"video_id":video}), true).await;
         assert_eq!(result["error"]["code"], code);
         assert!(!result.to_string().contains("test-secret-never-return"));
     }
@@ -987,8 +1049,8 @@ async fn bounded_http_failures_cancellation_and_timeout() {
                 .peer()
                 .send_request_with_option(
                     ClientRequest::CallToolRequest(CallToolRequest::new(params(
-                        "get_summary",
-                        json!({"video_id":"slow"}),
+                        "get_metrics",
+                        json!({"kind":"summary","video_id":"slow"}),
                     ))),
                     PeerRequestOptions::with_timeout(Duration::from_secs(20)),
                 )
@@ -1004,7 +1066,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
     .await
     .unwrap();
     assert_eq!(
-        call(&client, "get_summary", json!({}), true).await["error"]["code"],
+        call_metrics(&client, "summary", json!({}), true).await["error"]["code"],
         "busy"
     );
     for handle in pending {
@@ -1017,7 +1079,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let result = client
-                .call_tool(params("get_summary", json!({})))
+                .call_tool(params("get_metrics", json!({"kind":"summary"})))
                 .await
                 .unwrap();
             if result.is_error == Some(false) {
@@ -1029,7 +1091,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
     .await
     .unwrap();
     assert_eq!(
-        call(&client, "get_summary", json!({"video_id":"slow"}), true).await["error"]["code"],
+        call_metrics(&client, "summary", json!({"video_id":"slow"}), true).await["error"]["code"],
         "timeout"
     );
     client.cancel().await.unwrap();
@@ -1037,7 +1099,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
     let _ = server.await;
     let unreachable = connect(&url, "test-secret-never-return", false).await;
     assert_eq!(
-        call(&unreachable, "get_summary", json!({}), true).await["error"]["code"],
+        call_metrics(&unreachable, "summary", json!({}), true).await["error"]["code"],
         "connection_failed"
     );
     unreachable.cancel().await.unwrap();
@@ -1100,7 +1162,7 @@ async fn dotenv_supplies_mcp_settings_without_loading_server_configuration() {
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
         .unwrap();
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 5);
     client.cancel().await.unwrap();
 }
 
@@ -1124,7 +1186,7 @@ async fn toml_supplies_mcp_settings_without_loading_server_configuration() {
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
         .unwrap();
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 5);
     client.cancel().await.unwrap();
 }
 
@@ -1217,7 +1279,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
     let collector = Collector::start();
     let created = collector.admin(&["key", "create", "default", "secret", "MCP", "--read-only"]);
     let client = connect_http(&collector.url, created["key"].as_str().unwrap(), true).await;
-    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 7);
+    assert_eq!(client.list_tools(None).await.unwrap().tools.len(), 5);
     let rotated = collector.admin(&[
         "key",
         "rotate",
@@ -1230,7 +1292,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
     client.cancel().await.unwrap();
     let client = connect_http(&collector.url, rotated["key"].as_str().unwrap(), false).await;
     assert_eq!(
-        call(&client, "get_summary", json!({}), false).await["data"]["views"],
+        call_metrics(&client, "summary", json!({}), false).await["data"]["views"],
         0
     );
     collector.admin(&[
@@ -1274,4 +1336,174 @@ async fn embedded_http_can_be_disabled_and_supports_an_explicit_ingress_hostname
             .status(),
         200
     );
+}
+
+#[tokio::test]
+async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
+    let collector = Collector::start();
+    collector.seed().await;
+    let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    let example = &contract["paths"]["/v1/events"]["post"]["requestBody"]["content"]["application/json"]
+        ["example"];
+    let http_client = reqwest::Client::new();
+    for index in 0..104 {
+        let mut event = example.clone();
+        event["event_id"] = json!(uuid::Uuid::new_v4().to_string());
+        event["view_id"] = json!(uuid::Uuid::new_v4().to_string());
+        event["video_id"] = json!(format!("group-{index:03}"));
+        event["browser_context"] = json!({"schema_version":1,"browser_name":format!("Browser-{index:03}"),
+            "os_name":if index % 2 == 0 {"Linux"} else {"Windows"},
+            "device_type":if index % 2 == 0 {"desktop"} else {"mobile"}});
+        let response = http_client
+            .post(format!("{}/v1/events", collector.url))
+            .header(
+                "X-Chunkify-Ingest-Key",
+                collector.keys["public_key"].as_str().unwrap(),
+            )
+            .json(&event)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
+    }
+    let key = collector.admin(&[
+        "key",
+        "create",
+        "default",
+        "secret",
+        "Grouped metrics",
+        "--read-only",
+    ]);
+    let token = key["key"].as_str().unwrap();
+    for http in [false, true] {
+        let client = connect_mode(&collector.url, token, true, http).await;
+        let live = connect_mode(
+            &collector.url,
+            collector.live["secret_key"].as_str().unwrap(),
+            true,
+            http,
+        )
+        .await;
+        let tools = client.list_tools(None).await.unwrap().tools;
+        assert_eq!(tools.len(), 5);
+        for (tool, path) in [
+            ("summary", "/v1/summary"),
+            ("quality", "/v1/quality"),
+            ("engagement", "/v1/engagement"),
+        ] {
+            let schema = &tools
+                .iter()
+                .find(|item| item.name == "get_metrics")
+                .unwrap()
+                .input_schema;
+            assert_eq!(
+                schema["properties"]["group_by"]["enum"],
+                json!(["browser_name", "os_name", "device_type"])
+            );
+            assert_eq!(schema["properties"]["limit"]["maximum"], 100);
+            let default =
+                call_query(&client, tool, json!({"group_by":"browser_name"}), false).await;
+            assert_eq!(default["data"]["groups"].as_array().unwrap().len(), 10);
+            for group_by in ["browser_name", "os_name", "device_type"] {
+                let first = call_query(
+                    &client,
+                    tool,
+                    json!({"group_by":group_by,"limit":100}),
+                    false,
+                )
+                .await;
+                assert_eq!(first["coverage"]["kind"], "page");
+                assert_eq!(
+                    first["data"],
+                    collector
+                        .get(&format!("{path}?group_by={group_by}&limit=100"), token)
+                        .await
+                );
+                let mut groups = first["data"]["groups"].as_array().unwrap().clone();
+                let mut page = first;
+                while page["coverage"]["has_more"] == true {
+                    page = call_query(&client, tool, json!({"group_by":group_by,"limit":100,"cursor":page["data"]["next_cursor"]}), false).await;
+                    groups.extend(page["data"]["groups"].as_array().unwrap().clone());
+                }
+                assert_eq!(
+                    json!(groups),
+                    collector
+                        .get(&format!("{path}?group_by={group_by}&limit=1000"), token)
+                        .await["groups"]
+                );
+                let empty = call_query(
+                    &client,
+                    tool,
+                    json!({"group_by":group_by,"video_id":"missing"}),
+                    false,
+                )
+                .await;
+                assert_eq!(empty["data"]["groups"], json!([]));
+                assert_eq!(empty["coverage"]["has_more"], false);
+            }
+            for invalid in [
+                json!({"group_by":"country"}),
+                json!({"group_by":"browser_name","limit":101}),
+                json!({"group_by":"browser_name","sort_by":"views"}),
+                json!({"limit":1}),
+            ] {
+                assert_eq!(
+                    call_query(&client, tool, invalid, true).await["error"]["code"],
+                    "invalid_arguments"
+                );
+            }
+            let first = call_query(
+                &client,
+                tool,
+                json!({"group_by":"browser_name","limit":1}),
+                false,
+            )
+            .await;
+            let cursor = &first["data"]["next_cursor"];
+            for other_kind in ["summary", "quality", "engagement"] {
+                if other_kind != tool {
+                    assert_eq!(
+                        call_metrics(
+                            &client,
+                            other_kind,
+                            json!({"group_by":"browser_name","cursor":cursor}),
+                            true
+                        )
+                        .await["error"]["code"],
+                        "invalid_query"
+                    );
+                }
+            }
+            for changed in [
+                json!({"group_by":"os_name","cursor":cursor}),
+                json!({"group_by":"browser_name","video_id":"missing","cursor":cursor}),
+            ] {
+                assert_eq!(
+                    call_query(&client, tool, changed, true).await["error"]["code"],
+                    "invalid_query"
+                );
+            }
+            assert_eq!(
+                call_query(
+                    &live,
+                    tool,
+                    json!({"group_by":"browser_name","cursor":cursor}),
+                    true
+                )
+                .await["error"]["code"],
+                "invalid_query"
+            );
+        }
+        let totals = call_metrics(&client, "summary", json!({}), false).await;
+        assert_eq!(totals["coverage"]["kind"], "filtered_totals");
+        assert_eq!(totals["data"]["views"], 106);
+        assert!(totals["data"].get("groups").is_none());
+        let other = call_metrics(&live, "summary", json!({"group_by":"browser_name"}), false).await;
+        assert_eq!(
+            other["data"]["groups"],
+            json!([{"value":null,"data":{"views":2,"unique_viewers":1,"total_playing_time_ms":15000.0}}])
+        );
+        client.cancel().await.unwrap();
+        live.cancel().await.unwrap();
+    }
 }

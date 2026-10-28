@@ -20,7 +20,7 @@ for deployment overrides, or set these variables directly in your container:
 
 | Variable | TOML field | Use |
 | --- | --- | --- |
-| `CHUNKIFY_ADMIN_KEY` | Environment only | Enables project creation through the API. Unset or empty disables it. |
+| `CHUNKIFY_ADMIN_KEY` | Environment only | Enables project creation and key recovery through the API. Unset or empty disables these admin routes. |
 | `CHUNKIFY_DATA_DIR` | `data_dir` | Container state directory. |
 | `CHUNKIFY_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
 | `CHUNKIFY_STORAGE_BACKEND` | `storage.backend` | Select `local` or `s3` storage. |

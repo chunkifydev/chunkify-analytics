@@ -1767,7 +1767,7 @@
       "post": {
         "operationId": "rotateProjectKey",
         "summary": "Rotate a project key",
-        "description": "Replace a key in this project. The old value stops working immediately. Save the returned replacement. Requires a full-access private key; read-only keys receive 403.",
+        "description": "Replace a key in this project. The old value stops working immediately. Save the returned replacement. Requires a full-access private key; read-only keys receive 403. Only the selected key is rotated. If its replacement is lost, a trusted backend can rotate it again through the installation admin API.",
         "tags": [
           "Projects"
         ],
@@ -2074,6 +2074,225 @@
           }
         },
         "parameters": []
+      }
+    },
+    "/v1/projects/{project_id}/keys": {
+      "get": {
+        "operationId": "adminListProjectKeys",
+        "summary": "List project keys for recovery",
+        "description": "List key IDs, names and permissions by project ID using CHUNKIFY_ADMIN_KEY. No project credential is required. Key values are never returned. Intended for a trusted backend that verifies project ownership.",
+        "tags": [
+          "Projects"
+        ],
+        "responses": {
+          "200": {
+            "description": "Project keys.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectKeys"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid installation admin key. Project keys are not accepted.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Admin API disabled, or project unknown or deleted.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Project ID returned at creation, or default for the initial project."
+          }
+        ],
+        "security": [
+          {
+            "adminKey": []
+          }
+        ]
+      }
+    },
+    "/v1/projects/{project_id}/keys/{key_id}/rotate": {
+      "post": {
+        "operationId": "adminRotateProjectKey",
+        "summary": "Rotate a project key for recovery",
+        "description": "Replace one existing public or secret key using CHUNKIFY_ADMIN_KEY, even when the project secret was lost. The old value stops working immediately. Key ID, type and read-only access are preserved; other keys are unchanged. Save the returned replacement. Intended for a trusted backend that verifies project ownership.",
+        "tags": [
+          "Projects"
+        ],
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Project ID returned at creation, or default for the initial project."
+          },
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            },
+            "description": "Key ID from the project key list."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key rotated.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedProjectKey"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid installation admin key. Project keys are not accepted.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Admin API disabled, project unknown or deleted, or key not found in this project. Revoked keys cannot be restored.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The change could not be saved.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "adminKey": []
+          }
+        ]
       }
     },
     "/v1/project": {
@@ -3428,7 +3647,7 @@
       "adminKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Installation admin key from CHUNKIFY_ADMIN_KEY. Creates projects."
+        "description": "Installation admin key from CHUNKIFY_ADMIN_KEY. Creates projects and lists or rotates their keys for recovery. Keep it in a trusted backend and verify project ownership before using it for a customer."
       }
     },
     "parameters": {

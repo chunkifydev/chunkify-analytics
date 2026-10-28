@@ -114,8 +114,12 @@ pub struct Controller {
 pub enum ProjectAction {
     Update(projects::Update),
     Delete,
-    Keys,
-    RotateKey(String),
+    Keys(KeyAction),
+}
+
+pub enum KeyAction {
+    List,
+    Rotate(String),
 }
 
 impl Controller {
@@ -124,7 +128,7 @@ impl Controller {
         let expected = self.config.admin_key_hash.as_ref().ok_or_else(|| {
             ApiError::new(
                 axum::http::StatusCode::NOT_FOUND,
-                "Project creation is disabled".into(),
+                "Project administration is disabled".into(),
             )
         })?;
         if *expected != projects::hash(secret) {
@@ -192,29 +196,54 @@ impl Controller {
         // authorize another queued change.
         let resolved = self.registry.authorize(secret, Permission::Secret)?;
         resolved.require_write()?;
-        let id = resolved.project.id.clone();
-        let project = projects::projects(&keys)
+        self.apply_project_action(&mut keys, &resolved.project.id, action)
+    }
+
+    pub fn admin_keys(
+        &self,
+        secret: &str,
+        id: &str,
+        action: KeyAction,
+    ) -> std::result::Result<Value, crate::api::ApiError> {
+        self.authorize_admin(secret)?;
+        let mut keys = self
+            .keys
+            .lock()
+            .map_err(|_| crate::api::ApiError::unavailable())?;
+        self.apply_project_action(&mut keys, id, ProjectAction::Keys(action))
+    }
+
+    fn apply_project_action(
+        &self,
+        keys: &mut Keys,
+        id: &str,
+        action: ProjectAction,
+    ) -> std::result::Result<Value, crate::api::ApiError> {
+        use crate::api::ApiError;
+        let project = projects::projects(keys)
             .into_iter()
-            .find(|project| project.id == id)
-            .ok_or_else(ApiError::internal)?;
+            .find(|project| project.id == id && !project.deleted)
+            .ok_or_else(|| {
+                ApiError::new(axum::http::StatusCode::NOT_FOUND, "Unknown project".into())
+            })?;
         let request = match action {
-            ProjectAction::Keys => {
+            ProjectAction::Keys(KeyAction::List) => {
                 return Ok(
                     serde_json::json!({"project_id": id, "keys": project.keys.iter().map(projects::Credential::metadata).collect::<Vec<_>>() }),
                 );
             }
             ProjectAction::Delete => Request {
                 command: "project-delete".into(),
-                args: vec![id],
+                args: vec![id.into()],
             },
             ProjectAction::Update(update) => Request {
                 command: "project-update".into(),
                 args: vec![
-                    id,
+                    id.into(),
                     serde_json::to_string(&update).map_err(|_| ApiError::internal())?,
                 ],
             },
-            ProjectAction::RotateKey(key) => {
+            ProjectAction::Keys(KeyAction::Rotate(key)) => {
                 if !project.keys.iter().any(|credential| credential.id == key) {
                     return Err(ApiError::new(
                         axum::http::StatusCode::NOT_FOUND,
@@ -223,11 +252,11 @@ impl Controller {
                 }
                 Request {
                     command: "key-rotate".into(),
-                    args: vec![id, key],
+                    args: vec![id.into(), key],
                 }
             }
         };
-        execute(&self.config, &mut keys, Some(&self.registry), &request)
+        execute(&self.config, keys, Some(&self.registry), &request)
             .map_err(|_| ApiError::internal())
     }
 }
@@ -635,11 +664,13 @@ mod tests {
         );
         let before = fs::read(fixture.directory.join("keys.json")).unwrap();
         for action in [
-            ProjectAction::Keys,
+            ProjectAction::Keys(KeyAction::List),
             ProjectAction::Update(
                 serde_json::from_value(serde_json::json!({"name": "Forbidden"})).unwrap(),
             ),
-            ProjectAction::RotateKey(readonly["key_id"].as_str().unwrap().into()),
+            ProjectAction::Keys(KeyAction::Rotate(
+                readonly["key_id"].as_str().unwrap().into(),
+            )),
             ProjectAction::Delete,
         ] {
             let error = controller.project(token, action).err().unwrap();
@@ -651,7 +682,66 @@ mod tests {
         );
         assert!(
             controller
-                .project(&fixture.keys.secret_key, ProjectAction::Keys)
+                .project(
+                    &fixture.keys.secret_key,
+                    ProjectAction::Keys(KeyAction::List)
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn controller_requires_admin_authorization_for_key_recovery() {
+        let mut fixture = Fixture::new();
+        let admin_key = "installation-admin";
+        Arc::get_mut(&mut fixture.config).unwrap().admin_key_hash = Some(projects::hash(admin_key));
+        let controller = Controller::new(
+            fixture.config.clone(),
+            fixture.registry.clone(),
+            fixture.keys.clone(),
+        );
+        let before = fs::read(fixture.directory.join("keys.json")).unwrap();
+        for token in [
+            "",
+            "invalid",
+            &fixture.keys.secret_key,
+            &fixture.keys.public_key,
+        ] {
+            for action in [KeyAction::List, KeyAction::Rotate("primary-secret".into())] {
+                let error = controller
+                    .admin_keys(token, "default", action)
+                    .err()
+                    .unwrap();
+                assert_eq!(error.status, axum::http::StatusCode::UNAUTHORIZED);
+            }
+        }
+        assert_eq!(
+            fs::read(fixture.directory.join("keys.json")).unwrap(),
+            before
+        );
+        let recovered = controller
+            .admin_keys(
+                admin_key,
+                "default",
+                KeyAction::Rotate("primary-secret".into()),
+            )
+            .unwrap();
+        assert_eq!(recovered["key_id"], "primary-secret");
+        assert_eq!(recovered["read_only"], false);
+        assert!(
+            controller
+                .project(
+                    &fixture.keys.secret_key,
+                    ProjectAction::Keys(KeyAction::List)
+                )
+                .is_err()
+        );
+        assert!(
+            controller
+                .project(
+                    recovered["key"].as_str().unwrap(),
+                    ProjectAction::Keys(KeyAction::List)
+                )
                 .is_ok()
         );
     }

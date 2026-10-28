@@ -62,3 +62,4 @@ jobs:
     uses: ./.github/workflows/release.yml
     with:
       release-tag: ${{ needs.release-please.outputs.tag }}
+      publish: true

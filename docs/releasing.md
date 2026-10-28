@@ -37,9 +37,12 @@ Actions. Organization policies must allow these permissions.
 ## Check the release workflow
 
 In GitHub Actions, select **Release**, then **Run workflow** and choose a branch
-or tag. Manual runs build and test all four executable packages and both Linux
-container images. They upload a `release-assets` artifact containing the
-archives, `config.toml.example`, and `SHA256SUMS`, and publish nothing.
+or tag. Leave **publish** unchecked for a build-only run. The optional
+**release-tag** selects an existing version tag to build using the workflow
+from the chosen branch. Otherwise, the selected branch or tag supplies both
+the workflow and source. Build-only runs test all four executable packages and
+both Linux container images. They upload a `release-assets` artifact containing
+the archives, `config.toml.example`, and `SHA256SUMS`, and publish nothing.
 
 The workflow reuses the full CI checks, builds optimized executables on native
 runners, runs the CLI tests for each target, and tests an extracted package in a
@@ -113,9 +116,14 @@ both architectures pass their container tests.
 If a run fails, fix the cause and rerun the failed jobs in the same Actions run.
 The draft remains unpublished until the publishing job succeeds. The job can
 replace assets in a draft while retrying, and refuses to replace assets in an
-already published release. Do not move a published version tag. Manual runs of
-the Release workflow never publish, including when run against a tag. Manually
-running Release Please on `main` performs its normal PR and release processing.
+already published release. Do not move a published version tag.
+
+If the workflow itself needs a fix, rerunning the old run still uses its old
+workflow definition. Merge the fix, then run **Release** from `main`, set
+**release-tag** to the existing tag such as `v0.1.0`, and check **publish**. This
+builds the original tagged source with the corrected workflow and finishes its
+draft release. Publishing without a version tag is rejected. Manually running
+Release Please on `main` performs its normal PR and release processing.
 
 ## Package locally
 

@@ -20,28 +20,35 @@ Choose [Docker](#install-with-docker) for a packaged deployment, or
 
 ## Install with Docker
 
-Docker is the recommended way to run the service. These instructions build the
-image from this repository; prebuilt releases are not available yet.
+Docker is the recommended way to run the service. The prebuilt image supports
+Linux amd64 and arm64; Docker selects the architecture for your computer.
 
 ### 1. Get the application
 
-You need Git and Docker with BuildKit support.
+You need Docker. Pull the latest stable release:
 
 ```sh
-git clone https://github.com/chunkifydev/chunkify-analytics.git
-cd chunkify-analytics
-docker build -t chunkify-analytics:local .
+docker pull ghcr.io/chunkifydev/chunkify-analytics:latest
 ```
 
-The build downloads a prebuilt DuckDB library and compiles the analytics server.
-On a small build machine, add
-`--build-arg BUILD_JOBS=1` to reduce simultaneous compilation work.
+The image includes the analytics server and DuckDB. No Git, Rust, or local build
+is required. For a fixed version, replace `:latest` with a release version such
+as `:0.1.0` in every command, and download that version's sample configuration.
+See [building from source](docs/development.md#build-the-docker-image) if you want
+to build your own image.
 
 ### 2. Configure your website
 
 ```sh
-cp config.toml.example config.toml
+mkdir -p chunkify-analytics
+cd chunkify-analytics
+curl --fail --location \
+  https://github.com/chunkifydev/chunkify-analytics/releases/latest/download/config.toml.example \
+  --output config.toml
 ```
+
+For a fixed version, replace `releases/latest/download` with
+`releases/download/v0.1.0` in the URL, matching your image version.
 
 Edit `config.toml` and set the website origin that will send events:
 
@@ -69,7 +76,7 @@ docker volume create chunkify-analytics-data
 docker run --rm \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
   --mount type=bind,src="$(pwd)/config.toml",dst=/data/config.toml,readonly \
-  chunkify-analytics:local init
+  ghcr.io/chunkifydev/chunkify-analytics:latest init
 ```
 
 Run `init` once for a new installation. It generates your initial credentials
@@ -82,7 +89,7 @@ docker run -d --name chunkify-analytics --restart unless-stopped \
   --mount type=volume,src=chunkify-analytics-data,dst=/data \
   --mount type=bind,src="$(pwd)/config.toml",dst=/data/config.toml,readonly \
   -p 127.0.0.1:4174:4174 \
-  chunkify-analytics:local
+  ghcr.io/chunkifydev/chunkify-analytics:latest
 ```
 
 Check that it is running:
@@ -124,12 +131,47 @@ integration and revoke them independently.
 
 ## Install without Docker
 
-Run the executable directly on your computer without a container. You need Git,
-Rust 1.99.0, the toolchain used by CI, and your platform's C build tools.
-On macOS, install the Xcode Command Line Tools. On Linux, use your distribution's
-build tools. No Node.js runtime is required for the analytics server.
+Run the executable directly on your computer without a container. Published
+[GitHub Releases](https://github.com/chunkifydev/chunkify-analytics/releases)
+include executables and their DuckDB library. No Rust or Node.js runtime is
+required to run them.
 
-### 1. Build and install the executable
+### 1. Get and install the executable
+
+Download the archive for your computer and `SHA256SUMS` from the same release:
+
+| Computer | Archive target |
+| --- | --- |
+| Linux Intel/AMD 64-bit | `x86_64-unknown-linux-gnu` |
+| Linux ARM 64-bit | `aarch64-unknown-linux-gnu` |
+| macOS Intel | `x86_64-apple-darwin` |
+| macOS Apple Silicon | `aarch64-apple-darwin` |
+
+Linux builds use glibc and support Ubuntu 22.04, Debian Bookworm, and newer
+compatible distributions. Keep the included `bin` and `lib` directories together.
+For example, to install version 0.1.0 on Linux Intel/AMD, run these commands in
+the download directory. Replace the version and target to match your archive:
+
+```sh
+shasum -a 256 --check --ignore-missing SHA256SUMS
+tar -xzf chunkify-analytics-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+cd chunkify-analytics-0.1.0-x86_64-unknown-linux-gnu
+mkdir -p "$HOME/.local/bin" "$HOME/.local/lib"
+install -m 755 bin/chunkify-analytics "$HOME/.local/bin/"
+install -m 755 lib/libduckdb.* "$HOME/.local/lib/"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+On Linux without `shasum`, use
+`sha256sum --check --ignore-missing SHA256SUMS` instead. Keep
+`$HOME/.local/bin` in your shell's PATH for future sessions. Continue below from
+the extracted directory, which includes the sample configuration.
+
+#### Build from source
+
+To compile the executable yourself, you need Git, Rust 1.99.0, and your
+platform's C build tools. On macOS, install the Xcode Command Line Tools. On
+Linux, use your distribution's build tools.
 
 ```sh
 git clone https://github.com/chunkifydev/chunkify-analytics.git
@@ -148,7 +190,7 @@ its checksum. The executable finds the library in the adjacent `lib` directory.
 
 ### 2. Configure and initialize
 
-From the repository directory:
+From the extracted release or repository directory:
 
 ```sh
 cp config.toml.example config.toml

@@ -92,10 +92,10 @@ async function installation(t, storage, retention = 0, environment = {}) {
       assert.equal(response.status, 200, await response.clone().text());
       return response.json();
     },
-    async send(event, key = app.keys.public_key) {
+    async send(event, key = app.keys.public_key, expectedStatus = 201) {
       const response = await fetch(`${app.url}/v1/events`, { method: "POST",
         headers: { "content-type": "application/json", "x-chunkify-ingest-key": key }, body: JSON.stringify(event) });
-      assert.equal(response.status, 201, await response.clone().text());
+      assert.equal(response.status, expectedStatus, await response.clone().text());
       return response.json();
     },
     directory: () => directory,
@@ -425,3 +425,45 @@ test(
     assert.match(await refreshed.text(), /Chrome/);
   },
 );
+
+test("S3 video reports match local storage after repeated delivery and replacement", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const local = await installation(t, { backend: "local" });
+  const remote = await installation(t, s3Settings());
+  const records = [];
+  for (const [index, [playing, progress, outcome]] of [
+    [0, 0, "failed_before_start"], [10000, 0.5, "started"], [300000, 1, "started"],
+  ].entries()) {
+    const attempt = events().map(event => ({ ...event,
+      browser_context: { schema_version: 1, browser_name: index === 0 ? "Firefox" : "Chrome", device_type: "desktop" },
+      occurred_at: "2026-10-19T12:00:00Z" }));
+    Object.assign(attempt.at(-1), { playing_time_ms: playing, furthest_progress_ratio: progress,
+      media_duration_seconds: 600, startup_outcome: outcome });
+    records.push(...attempt);
+  }
+  const snapshots = [];
+  for (const app of [local, remote]) {
+    await app.command(["init"]);
+    await app.start();
+    for (const record of records) {
+      await app.send(record);
+      await app.send(record, undefined, app === local ? 200 : 201);
+    }
+    const responses = [];
+    for (const kind of ["engagement", "quality"]) {
+      const path = `/v1/${kind}?video_id=s3-video`;
+      responses.push(await app.get(path));
+      responses.push(await app.get(`${path}&group_by=browser_name`));
+      responses.push(await app.get(`/v1/timeseries?kind=${kind}&video_id=s3-video&from=2026-10-19T00:00:00Z&to=2026-10-21T00:00:00Z&interval=day`));
+    }
+    snapshots.push(responses);
+  }
+  assert.deepEqual(snapshots[1], snapshots[0]);
+  assert.equal(snapshots[1][0].progress_reached.sample_views, 3);
+  assert.equal(snapshots[1][0].watch_time_ms.distribution.from_10_to_30_seconds, 1);
+  assert.equal(snapshots[1][3].startup_outcomes.failed_before_start.views, 1);
+  await remote.replaceTask();
+  assert.deepEqual(await remote.get("/v1/engagement?video_id=s3-video"), snapshots[0][0]);
+  assert.deepEqual(await remote.get("/v1/quality?video_id=s3-video"), snapshots[0][3]);
+});

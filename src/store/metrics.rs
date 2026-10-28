@@ -320,6 +320,8 @@ impl Store {
                     views: 0,
                     playing: 0.0,
                     reached_end: 0,
+                    progress: ProgressMetrics::default(),
+                    watch_time: WatchTimeMetrics::default(),
                 },
                 MetricSet::Quality => MetricValues::Quality {
                     views: 0,
@@ -330,6 +332,7 @@ impl Store {
                     playing: 0.0,
                     buffering: 0.0,
                     affected: 0,
+                    outcomes: StartupOutcomes::default(),
                 },
             })?;
             if let Some(export) = &export {
@@ -389,6 +392,9 @@ pub(super) fn utc_timestamp(milliseconds: i64) -> String {
 const QUALITY_SAMPLES: &str = ", quality_samples AS (
     SELECT *, measurement.startup_time_ms AS startup_time_ms,
         measurement.rebuffer_duration_ms AS rebuffer_duration_ms,
+        COALESCE(measurement.startup_outcome,
+            CASE WHEN measurement.startup_time_ms IS NOT NULL OR measurement.playing_time_ms > 0
+                THEN 'started' ELSE 'unknown' END) AS startup_outcome,
         measurement.playing_time_ms IS NOT NULL
             AND measurement.rebuffer_duration_ms IS NOT NULL
             AND (measurement.playing_time_ms > 0 OR measurement.rebuffer_duration_ms > 0)
@@ -399,13 +405,110 @@ const QUALITY_SAMPLES: &str = ", quality_samples AS (
 fn metric_columns(metrics: MetricSet) -> &'static str {
     match metrics {
         MetricSet::Summary => "COUNT(*), COUNT(DISTINCT viewer_id), COALESCE(SUM(playing_time_ms ORDER BY view_id), 0)",
-        MetricSet::Engagement => "COUNT(*), COALESCE(SUM(playing_time_ms ORDER BY view_id), 0), COUNT(*) FILTER (WHERE measurement.reached_end)",
+        MetricSet::Engagement => "COUNT(*), COALESCE(SUM(playing_time_ms ORDER BY view_id), 0), COUNT(*) FILTER (WHERE measurement.reached_end),
+            COUNT(measurement.progress_ratio),
+            COUNT(*) FILTER (WHERE measurement.progress_ratio >= 0.25),
+            COUNT(*) FILTER (WHERE measurement.progress_ratio >= 0.5),
+            COUNT(*) FILTER (WHERE measurement.progress_ratio >= 0.75),
+            COUNT(*) FILTER (WHERE measurement.progress_ratio >= 1),
+            COUNT(measurement.playing_time_ms),
+            quantile_cont(measurement.playing_time_ms, 0.5),
+            quantile_cont(measurement.playing_time_ms, 0.95),
+            COUNT(*) FILTER (WHERE measurement.playing_time_ms < 10000),
+            COUNT(*) FILTER (WHERE measurement.playing_time_ms >= 10000 AND measurement.playing_time_ms < 30000),
+            COUNT(*) FILTER (WHERE measurement.playing_time_ms >= 30000 AND measurement.playing_time_ms < 60000),
+            COUNT(*) FILTER (WHERE measurement.playing_time_ms >= 60000 AND measurement.playing_time_ms < 300000),
+            COUNT(*) FILTER (WHERE measurement.playing_time_ms >= 300000)",
         MetricSet::Quality => "COUNT(*), COUNT(startup_time_ms),
             quantile_cont(startup_time_ms, 0.5), quantile_cont(startup_time_ms, 0.95),
             COUNT(*) FILTER (WHERE has_buffering_sample),
             COALESCE(SUM(playing_time_ms ORDER BY view_id) FILTER (WHERE has_buffering_sample), 0),
             COALESCE(SUM(rebuffer_duration_ms ORDER BY view_id) FILTER (WHERE has_buffering_sample), 0),
-            COUNT(*) FILTER (WHERE has_fatal_error)",
+            COUNT(*) FILTER (WHERE has_fatal_error),
+            COUNT(*) FILTER (WHERE startup_outcome = 'started'),
+            COUNT(*) FILTER (WHERE startup_outcome = 'failed_before_start'),
+            COUNT(*) FILTER (WHERE startup_outcome = 'ended_before_start'),
+            COUNT(*) FILTER (WHERE startup_outcome = 'unknown')",
+    }
+}
+
+fn count_ratio(views: i64, denominator: i64) -> Value {
+    json!({"views":views,"ratio":(denominator > 0).then(|| views as f64 / denominator as f64)})
+}
+
+#[derive(Default)]
+struct ProgressMetrics {
+    sample_views: i64,
+    milestones: [i64; 4],
+}
+
+impl ProgressMetrics {
+    fn json(self) -> Value {
+        let mut data = json!({"sample_views":self.sample_views});
+        for (name, count) in [
+            "at_25_percent",
+            "at_50_percent",
+            "at_75_percent",
+            "at_100_percent",
+        ]
+        .into_iter()
+        .zip(self.milestones)
+        {
+            data[name] = count_ratio(count, self.sample_views);
+        }
+        data
+    }
+}
+
+#[derive(Default)]
+struct WatchTimeMetrics {
+    sample_views: i64,
+    median: Option<f64>,
+    p95: Option<f64>,
+    distribution: [i64; 5],
+}
+
+impl WatchTimeMetrics {
+    fn is_finite(&self) -> bool {
+        [self.median, self.p95]
+            .into_iter()
+            .flatten()
+            .all(f64::is_finite)
+    }
+
+    fn json(self) -> Value {
+        let names = [
+            "under_10_seconds",
+            "from_10_to_30_seconds",
+            "from_30_to_60_seconds",
+            "from_1_to_5_minutes",
+            "at_least_5_minutes",
+        ];
+        let distribution: serde_json::Map<String, Value> = names
+            .into_iter()
+            .zip(self.distribution)
+            .map(|(name, count)| (name.into(), json!(count)))
+            .collect();
+        json!({"sample_views":self.sample_views,"median":self.median,"p95":self.p95,
+            "distribution":distribution})
+    }
+}
+
+#[derive(Default)]
+struct StartupOutcomes {
+    started: i64,
+    failed: i64,
+    exited: i64,
+    unknown: i64,
+}
+
+impl StartupOutcomes {
+    fn json(self, views: i64) -> Value {
+        json!({"sample_views":views - self.unknown,
+            "started":count_ratio(self.started, views),
+            "failed_before_start":count_ratio(self.failed, views),
+            "ended_before_start":count_ratio(self.exited, views),
+            "unknown":count_ratio(self.unknown, views)})
     }
 }
 
@@ -419,6 +522,8 @@ enum MetricValues {
         views: i64,
         playing: f64,
         reached_end: i64,
+        progress: ProgressMetrics,
+        watch_time: WatchTimeMetrics,
     },
     Quality {
         views: i64,
@@ -429,6 +534,7 @@ enum MetricValues {
         playing: f64,
         buffering: f64,
         affected: i64,
+        outcomes: StartupOutcomes,
     },
 }
 
@@ -447,6 +553,27 @@ fn read_metrics(
             views: row.get(offset)?,
             playing: row.get(offset + 1)?,
             reached_end: row.get(offset + 2)?,
+            progress: ProgressMetrics {
+                sample_views: row.get(offset + 3)?,
+                milestones: [
+                    row.get(offset + 4)?,
+                    row.get(offset + 5)?,
+                    row.get(offset + 6)?,
+                    row.get(offset + 7)?,
+                ],
+            },
+            watch_time: WatchTimeMetrics {
+                sample_views: row.get(offset + 8)?,
+                median: row.get(offset + 9)?,
+                p95: row.get(offset + 10)?,
+                distribution: [
+                    row.get(offset + 11)?,
+                    row.get(offset + 12)?,
+                    row.get(offset + 13)?,
+                    row.get(offset + 14)?,
+                    row.get(offset + 15)?,
+                ],
+            },
         },
         MetricSet::Quality => MetricValues::Quality {
             views: row.get(offset)?,
@@ -457,6 +584,12 @@ fn read_metrics(
             playing: row.get(offset + 5)?,
             buffering: row.get(offset + 6)?,
             affected: row.get(offset + 7)?,
+            outcomes: StartupOutcomes {
+                started: row.get(offset + 8)?,
+                failed: row.get(offset + 9)?,
+                exited: row.get(offset + 10)?,
+                unknown: row.get(offset + 11)?,
+            },
         },
     })
 }
@@ -477,13 +610,16 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
             views,
             playing,
             reached_end,
+            progress,
+            watch_time,
         } => {
-            if !playing.is_finite() {
+            if !playing.is_finite() || !watch_time.is_finite() {
                 return Err(ApiError::internal());
             }
             Ok(json!({"views":views,"total_playing_time_ms":playing,
                 "average_playing_time_ms":(views > 0).then(|| playing / views as f64),
-                "reached_end_views":reached_end,"reached_end_ratio":(views > 0).then(|| reached_end as f64 / views as f64)}))
+                "reached_end_views":reached_end,"reached_end_ratio":(views > 0).then(|| reached_end as f64 / views as f64),
+                "progress_reached":progress.json(), "watch_time_ms":watch_time.json()}))
         }
         MetricValues::Quality {
             views,
@@ -494,6 +630,7 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
             playing,
             buffering,
             affected,
+            outcomes,
         } => {
             if !playing.is_finite()
                 || !buffering.is_finite()
@@ -510,7 +647,8 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
                 "startup_time_ms":{"sample_views":startup_samples,"median":median,"p95":p95},
                 "buffering":{"sample_views":buffering_samples,"total_playing_time_ms":playing,
                     "total_rebuffer_duration_ms":buffering,"ratio":ratio},
-                "fatal_errors":{"affected_views":affected,"ratio":(views > 0).then(|| affected as f64 / views as f64)}}))
+                "fatal_errors":{"affected_views":affected,"ratio":(views > 0).then(|| affected as f64 / views as f64)},
+                "startup_outcomes":outcomes.json(views)}))
         }
     }
 }
@@ -542,7 +680,7 @@ pub(super) fn view_cohort(
         CohortMetrics::Basic => (String::new(), "", "", ""),
         CohortMetrics::Quality | CohortMetrics::Complete => (
             format!(
-                ", startup_time_ms := {}, rebuffer_duration_ms := {}, reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended'), has_ended_event := (event_name = 'chunkify.video.view_ended')",
+                ", startup_time_ms := {}, rebuffer_duration_ms := {}, startup_outcome := CASE WHEN event_name = 'chunkify.video.view_ended' THEN e_startup_outcome END, reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended'), has_ended_event := (event_name = 'chunkify.video.view_ended')",
                 stored_number("startup_time_ms"),
                 stored_number("rebuffer_duration_ms")
             ),
@@ -551,8 +689,9 @@ pub(super) fn view_cohort(
             ", 'chunkify.video.playback_error'",
         ),
         CohortMetrics::Engagement => (
-            ", reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended')"
-                .into(),
+            format!(", reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended'),
+                progress_ratio := CASE WHEN {} > 0 AND {} BETWEEN 0 AND 1 THEN {} END",
+                stored_number("media_duration_seconds"), stored_number("furthest_progress_ratio"), stored_number("furthest_progress_ratio")),
             "",
             ", measurement",
             "",

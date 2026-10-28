@@ -6,6 +6,7 @@
 .DS_Store
 .env
 .env.*
+!.env.example
 /config.toml
 /demo-data/
 /demo-data.setup-*/

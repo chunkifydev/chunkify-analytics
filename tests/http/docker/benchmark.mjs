@@ -15,9 +15,9 @@ function limit(name, fallback, min, max) {
   if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be ${min}..${max}`);
   return value;
 }
-export const safety = { max_data_mib: limit("COLLECTOR_LOAD_MAX_DATA_MIB", 512, 512, 4096), min_free_disk_mib: 4096,
+export const safety = { max_data_mib: limit("CHUNKIFY_LOAD_MAX_DATA_MIB", 512, 512, 4096), min_free_disk_mib: 4096,
   max_container_memory_mib: containerMemoryGuardMiB, max_generator_rss_mib: 1024,
-  max_unique_events: limit("COLLECTOR_LOAD_MAX_EVENTS", 200000, 1, 1000000), request_timeout_ms: 10000, max_schedule_lag_ms: 50,
+  max_unique_events: limit("CHUNKIFY_LOAD_MAX_EVENTS", 200000, 1, 1000000), request_timeout_ms: 10000, max_schedule_lag_ms: 50,
   max_generator_pause_ms: 5000 };
 export { resources };
 
@@ -166,6 +166,8 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
   if (await hostFreeBytes() < (safety.min_free_disk_mib + safety.max_data_mib) * mib) throw new Error("Benchmark requires its data budget plus the free-disk floor before starting");
   const settings = { "server.ingest_per_second": String(config.rate_limit), "server.max_body_bytes": "1048576",
     "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
+    // The monitor issues three concurrent reads for the same project.
+    "rate_limits.read_concurrent_per_project": "3",
     "retention.seconds": "2592000", "retention.interval_seconds": "5",
     "profile": String(config.profile), ...config.write_settings };
   const server = await containerCollector({ resources, settings, seed: fixture?.volume });

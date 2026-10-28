@@ -34,12 +34,12 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
 COPY --from=build /usr/local/bin/chunkify-analytics /usr/local/bin/
 COPY --from=build /opt/duckdb/libduckdb.so /usr/local/lib/
 RUN ldconfig
-ENV COLLECTOR_DATA_DIR=/data COLLECTOR_BIND=0.0.0.0:4174
+ENV CHUNKIFY_DATA_DIR=/data CHUNKIFY_BIND=0.0.0.0:4174
 USER 10001:10001
 WORKDIR /data
 EXPOSE 4174
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --start-interval=1s --retries=3 \
-    CMD curl --noproxy '*' --fail --silent --show-error --max-time 2 "http://${COLLECTOR_BIND}/healthz" > /dev/null || exit 1
+    CMD curl --noproxy '*' --fail --silent --show-error --max-time 2 "http://${CHUNKIFY_BIND}/healthz" > /dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/chunkify-analytics"]
 CMD ["serve"]

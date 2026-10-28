@@ -18,11 +18,11 @@ npm run test:collector
 node --test examples/dashboard/*.test.* examples/demo/*.test.mjs
 ```
 
-Tests start temporary collectors and use the analytics SDK and MCP client.
-No separate collector installation is required.
+Tests start temporary analytics servers and use the analytics SDK and MCP client.
+No separate analytics server installation is required.
 
-`COLLECTOR_BINARY` selects another executable for the Node integration tests.
-The optional database upgrade check requires `COLLECTOR_PREVIOUS_BINARY` and is
+`CHUNKIFY_BINARY` selects another executable for the Node integration tests.
+The optional database upgrade check requires `CHUNKIFY_PREVIOUS_BINARY` and is
 skipped when it is absent.
 
 ## S3 integration checks
@@ -35,15 +35,15 @@ isolated service; remove its data after the run. For example, with LocalStack:
 docker run -d --name chunkify-s3-test -p 127.0.0.1:19000:4566 \
   -e SERVICES=s3 localstack/localstack:4.14.0
 docker exec chunkify-s3-test awslocal s3 mb s3://chunkify-analytics-test
-COLLECTOR_S3_TEST_ENDPOINT=127.0.0.1:19000 node --test tests/http/s3.test.mjs
+CHUNKIFY_S3_TEST_ENDPOINT=127.0.0.1:19000 node --test tests/http/s3.test.mjs
 docker rm -f chunkify-s3-test
 ```
 
 Wait for LocalStack to be healthy before creating the bucket. Tests default to
 bucket `chunkify-analytics-test`, region `us-east-1`, access and secret keys `test`,
-path addressing and HTTP. Override these with `COLLECTOR_S3_TEST_BUCKET`,
-`COLLECTOR_S3_TEST_REGION`, `COLLECTOR_S3_TEST_ACCESS_KEY_ID`,
-`COLLECTOR_S3_TEST_SECRET_ACCESS_KEY` and `COLLECTOR_S3_TEST_USE_SSL=true`.
+path addressing and HTTP. Override these with `CHUNKIFY_S3_TEST_BUCKET`,
+`CHUNKIFY_S3_TEST_REGION`, `CHUNKIFY_S3_TEST_ACCESS_KEY_ID`,
+`CHUNKIFY_S3_TEST_SECRET_ACCESS_KEY` and `CHUNKIFY_S3_TEST_USE_SSL=true`.
 Without an endpoint, remote tests skip; the custom local-path test still runs.
 
 
@@ -84,13 +84,13 @@ credential management, persistence, and benchmark runner. The image runs as UID
 
 The image includes the shared DuckDB library and requires no host installation.
 The workflow runs one job per pull request or push to `main`, and cancels older
-runs for the same PR or branch. It builds the collector and Rust test executables
+runs for the same PR or branch. It builds the analytics server and Rust test executables
 together with `cargo test --profile ci --no-run`. The tests then reuse those
 artifacts. Native API tests and container tests exercise the same
 executable. Playwright is installed once for real-browser SDK coverage.
 
 The `ci` profile inherits development checks. Rust dependencies use optimization
-level 1; the collector and test harnesses use level 0 for fast compilation.
+level 1; the analytics server and test harnesses use level 0 for fast compilation.
 DuckDB uses its optimized upstream library. Normal Docker builds use the fully
 optimized release profile. The runner already includes Chromium's shared
 libraries, so browser setup downloads only the headless browser, without
@@ -99,7 +99,7 @@ reinstalling system packages and optional fonts.
 CI builds on Ubuntu 22.04 so the executable's glibc requirement is compatible
 with the Debian Bookworm runtime image. A Docker named build context replaces
 the compiler stage with that tested executable and its DuckDB library. The
-regular Docker build still compiles the collector from source and retains local
+regular Docker build still compiles the analytics server from source and retains local
 Cargo cache mounts between source edits. Docker's GitHub Actions cache
 stores runtime layers directly, without copying Cargo cache mounts into extra
 images.
@@ -116,12 +116,12 @@ Write generated reports under the ignored `target/` directory:
 
 ```sh
 mkdir -p target/benchmarks
-COLLECTOR_LOAD_REPORT=target/benchmarks/run.json npm run benchmark:collector
+CHUNKIFY_LOAD_REPORT=target/benchmarks/run.json npm run benchmark:collector
 ```
 
-Useful controls include `COLLECTOR_LOAD_CASES`, `COLLECTOR_LOAD_SECONDS`,
-`COLLECTOR_LOAD_CPUS`, `COLLECTOR_LOAD_MEMORY_MIB`, and
-`COLLECTOR_LOAD_CONCURRENCY`. Use `--list` to inspect workloads and limits before running.
+Useful controls include `CHUNKIFY_LOAD_CASES`, `CHUNKIFY_LOAD_SECONDS`,
+`CHUNKIFY_LOAD_CPUS`, `CHUNKIFY_LOAD_MEMORY_MIB`, and
+`CHUNKIFY_LOAD_CONCURRENCY`. Use `--list` to inspect workloads and limits before running.
 
 Benchmarks require Linux cgroup v2 and pressure counters. Some Docker VMs lack
 these counters and cannot run the benchmark. Measure production capacity with
@@ -136,7 +136,7 @@ cargo test --locked --test export_benchmark -- --ignored --nocapture \
 
 It seeds one million synthetic playback attempts, streams raw events, views and
 video metrics, and checks ingestion latency during the raw-event download. It
-reports time to first data, total time, download size and peak collector memory.
+reports time to first data, total time, download size and peak analytics server memory.
 Set `CHUNKIFY_EXPORT_BENCHMARK_ROWS` to change the dataset size. The fixture uses
 local storage and removes its temporary database after the run. It does not
 measure S3 transfer speed or production capacity.

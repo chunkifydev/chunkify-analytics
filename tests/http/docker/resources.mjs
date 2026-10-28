@@ -7,8 +7,8 @@ function integer(name, fallback, min, max) {
 }
 
 export const containerLimits = {
-  cpus: integer("COLLECTOR_LOAD_CPUS", 2, 1, 16),
-  memory_mib: integer("COLLECTOR_LOAD_MEMORY_MIB", 2048, 1024, 16384),
+  cpus: integer("CHUNKIFY_LOAD_CPUS", 2, 1, 16),
+  memory_mib: integer("CHUNKIFY_LOAD_MEMORY_MIB", 2048, 1024, 16384),
   swap_mib: 0,
 };
 export const resources = [

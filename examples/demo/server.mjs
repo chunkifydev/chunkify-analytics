@@ -5,7 +5,7 @@ const assets = { '/player': ['player.html', 'text/html'], '/player.js': ['player
 export function createDemoHandler({ collectorUrl, state }) {
   const from = new Date(Date.parse(state.seedDate) - 6 * 86400000).toISOString().slice(0, 10);
   const dashboard = createHandler({ env: {
-    COLLECTOR_URL: collectorUrl,
+    CHUNKIFY_URL: collectorUrl,
     CHUNKIFY_DEMO_SECRET_KEY: state.projects.demo.secret_key,
     CHUNKIFY_PLAYER_SECRET_KEY: state.projects.player.secret_key,
   }, demo: { player_url: '/player', from, to: state.seedDate.slice(0, 10) } });

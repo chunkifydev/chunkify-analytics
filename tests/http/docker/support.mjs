@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { configSource } from "../configuration.mjs";
 
 const execute = promisify(execFile);
-export const image = process.env.COLLECTOR_IMAGE ?? "chunkify-analytics:test";
+export const image = process.env.CHUNKIFY_IMAGE ?? "chunkify-analytics:test";
 
 export async function docker(args) {
   const { stdout } = await execute("docker", args, { timeout: 60000, maxBuffer: 1024 * 1024 });

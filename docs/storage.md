@@ -1,6 +1,7 @@
 # Storage
 
-Choose `local` or `s3` in the `[storage]` section of `config.toml`.
+Choose `local` or `s3` in the `[storage]` section of `config.toml`, or set
+`CHUNKIFY_STORAGE_BACKEND` in the environment.
 
 ## Local
 
@@ -14,7 +15,7 @@ path = "./data/analytics.duckdb"
 
 `path` is optional; it defaults to `analytics.duckdb` inside `data_dir`.
 Relative paths resolve beside the TOML file. Keep the database, its WAL and
-`data_dir/keys.json` on persistent storage. Run one collector per database.
+`data_dir/keys.json` on persistent storage. Run one analytics server per database.
 
 Repeated event IDs keep their first payload and context. Successful requests
 are committed to the database. Expiration frees space for reuse, but the database
@@ -40,11 +41,12 @@ HTTPS and path addressing are the defaults. Set `use_ssl = false` for HTTP or
 include `session_token`. See [environment overrides](configuration.md#environment-overrides)
 to supply connection settings and secrets through your deployment.
 
-For AWS S3, omit `endpoint` and use the bucket's region. Omit access and secret
-keys to use AWS credentials, including an ECS task role.
+For AWS S3, omit `endpoint` and set the bucket's region through `storage.region`
+or `CHUNKIFY_S3_REGION`. Omit access and secret keys to use AWS credentials,
+including an ECS task role.
 
 Credentials need list access to the prefix and object read, write and delete
-access. The collector uses delete access for expiration. Run `init` once, then
+access. The analytics server uses delete access for expiration. Run `init` once, then
 `serve`. Events, projects and credentials persist in S3; keep `<prefix>keys.json`
 private and include it in backups.
 
@@ -56,7 +58,7 @@ be writable, but does not need a persistent volume. Large queries can use up to
 1 GiB of temporary disk space. First startup needs access to DuckDB's extension
 repository.
 
-Run one collector per prefix. Stop it before starting a replacement, and run
+Run one analytics server per prefix. Stop it before starting a replacement, and run
 administration commands inside the active container.
 
 ### Events and expiration

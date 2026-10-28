@@ -3428,7 +3428,7 @@
       "adminKey": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Installation admin key from COLLECTOR_ADMIN_KEY. Creates projects."
+        "description": "Installation admin key from CHUNKIFY_ADMIN_KEY. Creates projects."
       }
     },
     "parameters": {

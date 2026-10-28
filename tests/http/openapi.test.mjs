@@ -12,11 +12,11 @@ import { attachAnalytics } from "@chunkify/analytics";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
-const binary = process.env.COLLECTOR_BINARY ?? resolve("target/debug/chunkify-analytics");
+const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 
 async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-openapi-test-"));
-  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("COLLECTOR_")));
+  const inherited = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("CHUNKIFY_")));
   const configuration = { ...inherited, "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
     "rate_limits.export_downloads_per_minute": "1000", "data_dir": directory, "server.bind": "127.0.0.1:0",

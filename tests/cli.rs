@@ -4,7 +4,7 @@ const BINARY: &str = env!("CARGO_BIN_EXE_chunkify-analytics");
 
 fn run(args: &[&str]) -> Output {
     let mut command = Command::new(BINARY);
-    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("COLLECTOR_")) {
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("CHUNKIFY_")) {
         command.env_remove(key);
     }
     let directory = std::env::temp_dir().join(format!("chunkify-cli-cwd-{}", uuid::Uuid::new_v4()));
@@ -25,8 +25,8 @@ fn help_and_version_work_without_valid_server_configuration() {
     ] {
         let output = Command::new(BINARY)
             .args(&args)
-            .env("COLLECTOR_BIND", "invalid")
-            .env("COLLECTOR_DATA_DIR", "/nonexistent-cli-help-data")
+            .env("CHUNKIFY_BIND", "invalid")
+            .env("CHUNKIFY_DATA_DIR", "/nonexistent-cli-help-data")
             .output()
             .unwrap();
         assert!(output.status.success(), "{args:?}: {output:?}");
@@ -53,7 +53,7 @@ fn missing_arguments_and_invalid_permissions_fail_in_the_parser() {
 fn flags_override_environment_and_configuration_check_needs_no_data_directory() {
     let output = Command::new(BINARY)
         .args(["serve", "--bind", "127.0.0.1:0", "--help"])
-        .env("COLLECTOR_BIND", "invalid")
+        .env("CHUNKIFY_BIND", "invalid")
         .output()
         .unwrap();
     assert!(output.status.success());

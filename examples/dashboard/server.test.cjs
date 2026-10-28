@@ -10,7 +10,7 @@ async function request(handler, url, method = 'GET') {
   return res;
 }
 function setup(fetchImpl) {
-  const env = { COLLECTOR_URL: 'http://127.0.0.1:9000', CHUNKIFY_LIVE_SECRET_KEY: randomBytes(24).toString('hex'), CHUNKIFY_STAGING_SECRET_KEY: randomBytes(24).toString('hex') };
+  const env = { CHUNKIFY_URL: 'http://127.0.0.1:9000', CHUNKIFY_LIVE_SECRET_KEY: randomBytes(24).toString('hex'), CHUNKIFY_STAGING_SECRET_KEY: randomBytes(24).toString('hex') };
   return { env, handler: createHandler({ env, fetchImpl }) };
 }
 test('fixed project and route mapping, summary passthrough, exact filters and eight-row pages', async () => {

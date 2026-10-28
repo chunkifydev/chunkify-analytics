@@ -17,13 +17,13 @@ test("the public load command leaves memory headroom below its RSS guard", async
 
 test("the load command forwards arguments and configuration errors", async () => {
   const { stdout } = await execute(process.execPath, ["--expose-gc", command, "--list"], {
-    env: { ...process.env, COLLECTOR_LOAD_CASES: "native-3000" },
+    env: { ...process.env, CHUNKIFY_LOAD_CASES: "native-3000" },
   });
   const plan = JSON.parse(stdout);
   assert.deepEqual(plan.cases.map((item) => item.name), ["native-3000"]);
   assert.ok(plan.generator_runtime.exec_args.includes("--expose-gc"));
   await assert.rejects(execute(process.execPath, [command, "--list"], {
-    env: { ...process.env, COLLECTOR_LOAD_CASES: "invalid-case" },
+    env: { ...process.env, CHUNKIFY_LOAD_CASES: "invalid-case" },
   }), (error) => error.code === 1 && /Unknown benchmark case/.test(error.stderr));
 });
 
@@ -35,13 +35,13 @@ test("the worker rejects an oversized heap before starting a benchmark", async (
 
 test("resource overrides configure the container and preserve proportional memory headroom", async () => {
   const { stdout } = await execute(process.execPath, [command, "--list"], {
-    env: { ...process.env, COLLECTOR_LOAD_CPUS: "2", COLLECTOR_LOAD_MEMORY_MIB: "4096" },
+    env: { ...process.env, CHUNKIFY_LOAD_CPUS: "2", CHUNKIFY_LOAD_MEMORY_MIB: "4096" },
   });
   const plan = JSON.parse(stdout);
   assert.deepEqual(plan.container_limits, { cpus: 2, memory_mib: 4096, swap_mib: 0 });
   assert.equal(plan.safety.max_container_memory_mib, 3600);
   assert.equal(plan.safety.max_generator_rss_mib, 1024);
-  for (const [name, value] of [["COLLECTOR_LOAD_CPUS", "0"], ["COLLECTOR_LOAD_MEMORY_MIB", "32768"]]) {
+  for (const [name, value] of [["CHUNKIFY_LOAD_CPUS", "0"], ["CHUNKIFY_LOAD_MEMORY_MIB", "32768"]]) {
     await assert.rejects(execute(process.execPath, [command, "--list"], {
       env: { ...process.env, [name]: value },
     }), (error) => error.code === 1 && error.stderr.includes(name));

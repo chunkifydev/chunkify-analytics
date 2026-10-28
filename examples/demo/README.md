@@ -1,6 +1,6 @@
-# Local collector and dashboard demo
+# Local analytics server and dashboard demo
 
-Run a local collector, dashboard and video player with sample analytics.
+Run a local analytics server, dashboard and video player with sample analytics.
 Docker is not required.
 
 ## Build and start

@@ -8,7 +8,7 @@ import { findCollector, root } from './start.mjs';
 const args = process.argv.slice(2);
 if (args.length && (args.length !== 2 || args[0] !== '--collector')) throw new Error('Usage: npm run demo:pack -- [--collector PATH]');
 if (!['darwin', 'linux'].includes(process.platform)) throw new Error('Demo packaging currently supports macOS and Linux. Windows packaging can be added later.');
-const binary = await findCollector(args[1] || process.env.CHUNKIFY_COLLECTOR_BIN);
+const binary = await findCollector(args[1] || process.env.CHUNKIFY_BINARY);
 const name = `chunkify-analytics-demo-${process.platform}-${process.arch}`;
 const output = path.join(root, 'dist');
 await mkdir(output, { recursive: true });

@@ -33,7 +33,7 @@ cd chunkify-analytics
 docker build -t chunkify-analytics:local .
 ```
 
-The build downloads a prebuilt DuckDB library and compiles the collector.
+The build downloads a prebuilt DuckDB library and compiles the analytics server.
 On a small build machine, add
 `--build-arg BUILD_JOBS=1` to reduce simultaneous compilation work.
 
@@ -59,7 +59,7 @@ path or trailing slash. For local development, that might be
 `http://localhost:3000`. Add multiple origins as separate array entries.
 
 Retention defaults to 30 days. Set `store_ip = false` under `[server]` to stop
-the collector from adding request IP addresses to new events.
+the analytics server from adding request IP addresses to new events.
 
 ### 3. Initialize persistent storage
 
@@ -98,7 +98,7 @@ from a public website. A proxy running in another container can use a shared
 Docker network instead.
 
 Keep the named volume when replacing containers. It holds the database and
-credentials. Run one collector process per data volume.
+credentials. Run one analytics server process per data volume.
 
 The container loads `/data/config.toml` automatically. Edit the host file and
 recreate the container with the same mounts to apply changes. The image uses
@@ -127,7 +127,7 @@ integration and revoke them independently.
 Run the executable directly on your computer without a container. You need Git,
 Rust 1.99.0, the toolchain used by CI, and your platform's C build tools.
 On macOS, install the Xcode Command Line Tools. On Linux, use your distribution's
-build tools. No Node.js runtime is required for the collector.
+build tools. No Node.js runtime is required for the analytics server.
 
 ### 1. Build and install the executable
 
@@ -217,9 +217,9 @@ const session = monitor(document.querySelector("video"), {
 });
 ```
 
-This URL connects to the collector on your computer for testing. Use that
+This URL connects to the analytics server on your computer for testing. Use that
 project's public key, and allow the player's origin in `[server].allowed_origins`.
-For a deployed player, replace the URL with your collector's public HTTPS address.
+For a deployed player, replace the URL with your analytics server's public HTTPS address.
 The adapter includes browser and device context by default; set
 `collectBrowserContext: false` in
 its options to disable that collection.
@@ -255,7 +255,7 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 
 Secret keys grant access to one project. Keep them out of browser code. Build
 customer dashboards with a backend that checks the customer's access before
-calling the collector.
+calling the analytics server.
 
 For the ten videos with the most views, query
 `/v1/videos?sort_by=views&order=desc&limit=10`. Use
@@ -290,7 +290,7 @@ your AI client:
   seven days."
 
 See the [MCP guide](docs/mcp.md) for client setup, available tools and the
-optional stdio adapter. API and MCP exports return a download link; the collector
+optional stdio adapter. API and MCP exports return a download link; the analytics server
 streams CSV when it is opened. The link needs no project key and expires after
 30 minutes. See [CSV exports](docs/api.md#csv-exports).
 
@@ -313,6 +313,9 @@ Relative TOML paths resolve beside that file. Restart after changing installatio
 settings. The [configuration reference](docs/configuration.md) lists all fields
 and the small set of environment overrides for deployments and secrets.
 
+Copy [.env.example](.env.example) to `.env` for local overrides, or pass the
+`CHUNKIFY_*` variables through your container settings.
+
 ## Manage projects and keys
 
 Give each customer or website a separate project and credentials:
@@ -329,16 +332,16 @@ new private keys without `--read-only` keep full project access.
 Use the returned `project_id` in later commands. Save new secrets when returned.
 In Docker, run these commands through
 `docker exec chunkify-analytics chunkify-analytics …`. Project creation, key
-management and retention changes work while serving on Linux and macOS. Stop the collector
+management and retention changes work while serving on Linux and macOS. Stop the analytics server
 to rename projects or replace project settings. For automatic customer onboarding,
 use [project creation through the API](docs/administration.md#create-projects-through-the-api)
-with `COLLECTOR_ADMIN_KEY`.
+with `CHUNKIFY_ADMIN_KEY`.
 
 ## Storage and backups
 
 Local storage is the default. Set `backend = "s3"` under `[storage]` for S3-compatible
 storage, including Cloudflare R2. S3 keeps events and credentials when a container
-is replaced. Run one collector per bucket prefix.
+is replaced. Run one analytics server per bucket prefix.
 
 Expiration defaults to 30 days by receipt time. Projects can override it.
 Expired events stop contributing to reports. Local database files can reuse
@@ -356,7 +359,7 @@ See [storage](docs/storage.md) for configuration and
 | MCP requests receive `403` | Add the client-facing HTTP hostname to `[mcp].allowed_hosts`; browser Origin headers must also be allowed. |
 | Ingestion receives `429` | Requests exceed an installation or project rate limit. See the admission settings. |
 | Requests receive `503` | The write/read queue or another configured resource budget is full. Retry later and check logs. |
-| Data directory is in use | Another collector or an offline administration command owns it. Run one writer per directory. |
+| Data directory is in use | Another analytics server or an offline administration command owns it. Run one writer per directory. |
 | Container configuration did not change | Recreate the container with the updated TOML file and the same data volume. Environment changes also require recreation. |
 
 ## Further documentation

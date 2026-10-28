@@ -26,7 +26,7 @@ export function configSource(settings) {
 
 export function collectorEnvironment(settings = process.env) {
   return Object.fromEntries(Object.entries(settings).filter(([name]) => !field(name)
-    && (!name.startsWith("COLLECTOR_") || name === "COLLECTOR_ADMIN_KEY") && !name.startsWith("CHUNKIFY_MCP_")));
+    && (!name.startsWith("CHUNKIFY_") || name === "CHUNKIFY_ADMIN_KEY")));
 }
 
 export async function writeConfig(directory, settings) {

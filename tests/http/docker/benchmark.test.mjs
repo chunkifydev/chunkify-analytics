@@ -41,8 +41,8 @@ test("benchmark reports rate-limited events separately from accepted events", { 
   assert.equal(result.reader_profile.worker, "reader");
   assert.equal(result.collector_profile.worker, "writer");
   for (const [name, query] of Object.entries(result.queries)) {
-    assert.ok(query.latency.count > 0);
-    assert.deepEqual(query.failures, {});
+    assert.ok(query.latency.count > 0, `${name} queries must succeed: ${JSON.stringify(query.failures)}`);
+    assert.deepEqual(query.failures, {}, `${name} queries must not fail`);
     assert.equal(result.reader_profile.jobs[name].execution.count, query.latency.count);
     assert.equal(result.collector_profile.jobs[name], undefined);
   }

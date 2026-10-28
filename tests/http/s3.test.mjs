@@ -316,3 +316,112 @@ test("S3 grouped metrics preserve context, project isolation and page watermarks
   const refreshed = await app.get("/v1/summary?group_by=browser_name");
   assert.deepEqual(refreshed.groups.map(group => group.value), [null, "Chrome", "Firefox", "Zulu", "unknown"]);
 });
+
+test(
+  "S3 session queries and CSV links use isolated read connections and survive replacement",
+  {
+    skip:
+      !endpoint &&
+      "Set COLLECTOR_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+  },
+  async (t) => {
+    const app = await installation(t, s3Settings());
+    await app.command(["init"]);
+    await app.start();
+    const create = async (resource) => {
+      const response = await fetch(`${app.url}/v1/exports`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${app.keys.secret_key}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ resource }),
+      });
+      assert.equal(response.status, 201, await response.clone().text());
+      return response.json();
+    };
+    const empty = await create("events");
+    const emptyResponse = await fetch(empty.download_url);
+    assert.equal(emptyResponse.status, 200);
+    assert.equal(
+      (await emptyResponse.text()).trimEnd().split("\r\n").length,
+      1,
+    );
+    const records = events().map((event) => ({
+      ...event,
+      browser_context: {
+        schema_version: 1,
+        browser_name: "Chrome",
+        os_name: "Linux",
+        device_type: "desktop",
+      },
+    }));
+    records.at(-1).startup_time_ms = 250;
+    for (const event of records) await app.send(event);
+    const error = {
+      ...records[0],
+      event_id: randomUUID(),
+      event_name: "chunkify.video.playback_error",
+      sequence: 3,
+      error_code: 2,
+      error_category: "network",
+      error_fatal: true,
+    };
+    await app.send(error);
+    await app.send(records[0]);
+    const other = JSON.parse(
+      await app.command(["project", "create", "Other export"]),
+    );
+    for (const event of records)
+      await app.send(
+        {
+          ...event,
+          browser_context: {
+            schema_version: 1,
+            browser_name: "Firefox",
+            os_name: "Linux",
+            device_type: "desktop",
+          },
+        },
+        other.public_key,
+      );
+    const views = await app.get("/v1/views?has_fatal_error=true");
+    assert.equal(views.views.length, 1);
+    assert.equal(views.views[0].playing_time_ms, 1200);
+    const detail = await app.get(`/v1/views/${records[0].view_id}`);
+    assert.equal(detail.events.length, records.length + 2);
+    assert.equal(detail.view.has_fatal_error, true);
+    assert.deepEqual((await app.get("/v1/errors")).errors, [
+      { error_code: 2, fatal: true, error_events: 1, affected_views: 1 },
+    ]);
+    assert.deepEqual((await app.get("/v1/dimensions/browser_name")).values, [
+      { value: "Chrome", views: 1 },
+    ]);
+    const from = records[0].occurred_at,
+      to = new Date(Date.parse(from) + 86400000).toISOString();
+    for (const kind of ["quality", "engagement"]) {
+      const series = await app.get(
+        `/v1/timeseries?${new URLSearchParams({ kind, from, to, interval: "day" })}`,
+      );
+      assert.equal(series.buckets[0].views, 1);
+      if (kind === "quality")
+        assert.equal(series.buckets[0].startup_time_ms.median, 250);
+    }
+    const link = await create("events");
+    const download = await fetch(link.download_url);
+    assert.equal(download.status, 200);
+    const csv = await download.text();
+    assert.equal(csv.trimEnd().split("\r\n").length, records.length + 3);
+    assert.match(csv, /Chrome/);
+    assert.doesNotMatch(csv, /Firefox/);
+    await app.replaceTask();
+    assert.equal(
+      (await fetch(`${app.url}${new URL(link.download_url).pathname}`)).status,
+      404,
+    );
+    const fresh = await create("views");
+    const refreshed = await fetch(fresh.download_url);
+    assert.equal(refreshed.status, 200);
+    assert.match(await refreshed.text(), /Chrome/);
+  },
+);

@@ -399,6 +399,28 @@ impl Resolved {
 }
 
 impl Registry {
+    pub fn export_fingerprint(&self, owner: &Resolved) -> Option<String> {
+        self.credentials
+            .read()
+            .ok()?
+            .iter()
+            .find_map(|(hash, (permission, resolved))| {
+                (*permission == Permission::Secret
+                    && resolved.key_id == owner.key_id
+                    && Arc::ptr_eq(&resolved.project, &owner.project))
+                .then(|| hash.clone())
+            })
+    }
+
+    pub fn export_owner(&self, fingerprint: &str) -> Option<Resolved> {
+        self.credentials
+            .read()
+            .ok()?
+            .get(fingerprint)
+            .filter(|(permission, _)| *permission == Permission::Secret)
+            .map(|(_, owner)| owner.clone())
+    }
+
     pub fn new(keys: &Keys, config: &Config) -> Result<Self, String> {
         let projects = projects(keys);
         validate(&projects)?;

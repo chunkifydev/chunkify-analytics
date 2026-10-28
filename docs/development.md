@@ -127,6 +127,20 @@ Benchmarks require Linux cgroup v2 and pressure counters. Some Docker VMs lack
 these counters and cannot run the benchmark. Measure production capacity with
 representative traffic, reads and retention.
 
+To measure CSV downloads separately, run the ignored local export benchmark:
+
+```sh
+cargo test --locked --test export_benchmark -- --ignored --nocapture \
+  > target/export-benchmark.log 2>&1
+```
+
+It seeds one million synthetic playback attempts, streams raw events, views and
+video metrics, and checks ingestion latency during the raw-event download. It
+reports time to first data, total time, download size and peak collector memory.
+Set `CHUNKIFY_EXPORT_BENCHMARK_ROWS` to change the dataset size. The fixture uses
+local storage and removes its temporary database after the run. It does not
+measure S3 transfer speed or production capacity.
+
 Keep reusable tests and workload generators in Git. Keep generated reports,
 progress logs, local data, credentials, and build output out of commits.
 

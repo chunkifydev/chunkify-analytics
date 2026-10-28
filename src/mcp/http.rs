@@ -9,6 +9,7 @@ use tokio::sync::Semaphore;
 
 pub fn router<S: Clone + Send + Sync + 'static>(
     store: Store,
+    exports: crate::exports::Exports,
     allowed_hosts: Vec<String>,
 ) -> Router<S> {
     let queries = Arc::new(Semaphore::new(4));
@@ -23,7 +24,10 @@ pub fn router<S: Clone + Send + Sync + 'static>(
     let service: StreamableHttpService<Companion, LocalSessionManager> = StreamableHttpService::new(
         move || {
             Ok(Companion {
-                backend: Backend::Local(store.clone()),
+                backend: Backend::Local {
+                    store: store.clone(),
+                    exports: exports.clone(),
+                },
                 contract: contract.clone(),
                 queries: queries.clone(),
             })

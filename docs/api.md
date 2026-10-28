@@ -109,8 +109,9 @@ context separately. Expiration removes context with its event.
 
 ### Filters and pagination
 
-All read endpoints accept `from`, `to`, `video_id`, `viewer_id`, `browser_name`,
-`os_name`, and `device_type`. Timestamps use
+Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `view_id`,
+`browser_name`, `os_name`, and `device_type`. View detail accepts only timeline
+pagination; export downloads use their saved query. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
 
@@ -220,10 +221,12 @@ GET /v1/engagement?group_by=os_name&browser_name=Chrome
 
 ### Hourly and daily charts
 
-`GET /v1/timeseries` returns the same metrics grouped by the time each view
-started. Supply `from`, `to` and `interval=hour` or `interval=day`. The
-video, viewer, browser, OS and device filters also apply. The project is selected
-by the private secret key.
+`GET /v1/timeseries` groups metrics by the time each view started.
+Choose `kind=summary`, `kind=quality` or `kind=engagement`; the default is summary.
+Each bucket uses the same calculations, sample counts and null semantics as that
+metric set's totals route. The response includes its `kind`. Supply `from`, `to`
+and `interval=hour` or `interval=day`. The video, viewer, view, browser, OS and
+device filters also apply. The project is selected by the private secret key.
 
 ```sh
 curl --get 'http://127.0.0.1:4174/v1/timeseries' \
@@ -234,8 +237,10 @@ curl --get 'http://127.0.0.1:4174/v1/timeseries' \
 ```
 
 The response contains normalized `from`/`to` bounds, `interval`, `timezone: "UTC"`
-and ascending `buckets`. Each bucket has `bucket_start`, `views`, `unique_viewers`
-and `total_playing_time_ms`. Empty buckets contain zeros. Hourly buckets align to
+and ascending `buckets`. Each summary bucket has `bucket_start`, `views`, `unique_viewers`
+and `total_playing_time_ms`. Quality and engagement buckets contain their corresponding
+metric fields plus `bucket_start`. Empty buckets have zero counts and null unavailable
+measurements or ratios. Hourly buckets align to
 UTC hours, and daily buckets align to midnight UTC, regardless of input offsets.
 
 ### Watch time and reaching the end
@@ -339,3 +344,123 @@ matching later measurements/errors contribute even after `to`. Start-only views
 have no startup/buffering sample. Views without a retained start are excluded.
 The MCP server provides the same result through `get_metrics` with
 `{"kind":"quality"}`.
+
+### Playback attempts and event history
+
+`GET /v1/views` returns `views` and `next_cursor`. Each row describes one attempt
+with a retained start: `view_id`, `video_id`, `viewer_id`, `started_at`, browser,
+OS and device names, `playing_time_ms`, optional `startup_time_ms` and
+`rebuffer_duration_ms`, and the booleans `reached_end`, `has_ended_event` and
+`has_fatal_error`. Measurements use the same final/latest selection as totals.
+The first retained start supplies context. A missing end event does not prove
+an attempt is ongoing, and a missing error does not prove successful playback.
+
+The usual identity, date and context filters apply, including `view_id`.
+`has_fatal_error=true|false` filters on observed fatal errors. Pages sort by
+`view_id`, ascending by default or descending with `order=desc`; HTTP page sizes
+are 1 to 1000, default 100. Cursors bind filters, order, fatal-error selection,
+project and the initial ingestion watermark.
+
+`GET /v1/views/{view_id}` returns `view`, `events` and `next_cursor`. Only `limit`
+and `cursor` are accepted. The metrics and event history share one ingestion
+watermark across pages. Events include original payloads and context, in
+ingestion order, with SDK sequence and occurrence times preserved. Follow the
+cursor with the same view ID to retrieve the remaining history. Expiration or
+deletion can still remove retained data between pages. A view with no retained
+start returns 404; its orphaned events remain queryable with
+`GET /v1/events?view_id=...`.
+
+### Error-code groups
+
+`GET /v1/errors` returns `errors` and `next_cursor`. Filters select the first
+retained start cohort, just like summary. Matching error events for the selected
+view identity contribute even after the date window. Each group contains
+`error_code`, `fatal`, `error_events` and `affected_views`. Codes retain their
+JSON type, so numeric `2`, text `"2"` and null are separate groups. Missing fatal
+status remains null. Event counts use distinct event IDs per group; affected
+views use distinct view IDs. A view can appear under several codes, so these
+counts must not be added to calculate a global affected-view count.
+
+Groups sort by canonical JSON code and fatal status ascending. HTTP pages use
+`limit=1..1000`, default 100. Continue with the same filters and cursor. Cursors
+bind the project and filters and exclude later arrivals. The MCP equivalent is
+`get_metrics` with `kind=errors`.
+
+### Available filter values
+
+`GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
+Supported dimensions are `browser_name`, `os_name`, `device_type`, `video_id` and
+`viewer_id`. Each value has `value` and `views`; values and counts come from first
+retained starts after applying the usual date, identity and context filters.
+Values sort ascending with null first. Literal `unknown` remains distinct from
+missing context. HTTP page sizes are 1 to 1000, default 100. Cursors bind the
+dimension, project, filters and ingestion watermark.
+
+### CSV exports
+
+API and MCP use the same export workflow. Request a download link with a project
+private key; read-only private keys can export:
+
+```sh
+curl --fail 'http://127.0.0.1:4174/v1/exports' \
+  -H "Authorization: Bearer $SECRET_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"resource":"videos","query":{"sort_by":"views","order":"desc"}}'
+```
+
+The 201 response contains `download_url`, `filename`, `content_type: "text/csv"`
+and `expires_at`. Open `download_url` or download it with:
+
+```sh
+curl --fail --output videos.csv "$DOWNLOAD_URL"
+```
+
+`GET /v1/exports/{token}` needs no Authorization header. The 256-bit random token
+authorizes only its saved project and filters; URL query overrides are rejected.
+Treat the URL as a credential. Tokens expire after 30 minutes and are invalidated
+by issuer-key rotation/revocation, project deletion or collector restart. Expiry
+is checked before a download starts; it does not interrupt an active download.
+
+CSV generation starts when the link is opened. It uses one read snapshot on a
+separate connection and streams rows with backpressure. CSV contents are never
+stored as an export file or sent inside MCP responses. All matching rows are
+included, without normal query page or byte limits; `limit` and `cursor` are
+rejected. Four downloads can execute concurrently; additional downloads wait.
+Date filters are optional except for `timeseries`; no fixed 30-day cap applies.
+The server retains at most 1024 active grant records and returns 503 when full.
+
+Supported resources are `summary`, `quality`, `engagement`, `timeseries`,
+`videos`, `events`, `views`, `errors` and `dimensions`. `query` uses the resource's
+normal query arguments. `timeseries` accepts `kind` and includes every requested
+UTC bucket, including ranges larger than the normal 1000-bucket query limit.
+`dimensions` requires a `dimension` in `query`.
+
+For reports to open in a spreadsheet, export `views`, `videos` or `timeseries`
+with `interval=day`. A 30-day daily report has 30 buckets even when the source
+contains millions of events. Raw `events` exports have one row per event and can
+be much larger.
+
+Files use UTF-8 and CRLF record separators. Fields containing commas, quotes or
+line breaks are quoted, and embedded quotes are doubled. Nested metric columns
+use paths such as `startup_time_ms/median`; grouped metrics use `data/...` columns.
+Event exports have one column for each documented scalar event field, such as
+`event_name`, `view_id`, `playing_time_ms`, `rebuffer_duration_ms` and `error_code`.
+Flat context columns use a `context.` prefix, such as `context.browser_name` and
+`context.client_ip`. Metadata columns include `received_at`, `project_id` and
+`ingest_key_id`. CSV cells never contain serialized JSON objects or arrays.
+Custom attributes, nested rendition arrays and historical OTLP payloads are
+excluded; use `GET /v1/events` for original payloads. Null values become empty
+cells. Strings that could be interpreted as spreadsheet formulas receive an
+apostrophe prefix. Empty exports contain headers.
+
+Normal analytics endpoints continue returning JSON. Interrupted or failed downloads
+terminate the stream; discard the partial file and retry the download. Local reads
+remain consistent during ingestion and retention. With S3 storage, deleting source
+objects during a download can abort it. Large queries still consume database CPU,
+memory and storage I/O.
+
+Behind an HTTPS ingress or a URL prefix, set `server.public_url` to the externally
+reachable collector base, for example `https://analytics.example.com/collector/`.
+Otherwise the collector derives the URL from the request Host and scheme; it only
+trusts `X-Forwarded-Proto` from configured trusted proxies. In-memory tokens belong
+to one collector process; route downloads to the process that issued their link.

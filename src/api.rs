@@ -24,15 +24,18 @@ use std::{
 #[derive(Clone)]
 struct App {
     store: Store,
+    exports: crate::exports::Exports,
     projects: Arc<Registry>,
     admin: Arc<crate::admin::Controller>,
     max_body_bytes: usize,
     store_ip: bool,
     trusted_proxies: Vec<ipnet::IpNet>,
     mcp_enabled: bool,
+    public_url: Option<reqwest::Url>,
     rate: Arc<Mutex<RateLimit>>,
 }
 
+#[derive(Debug)]
 pub struct ApiError(pub StatusCode, pub String);
 impl ApiError {
     pub fn bad(message: impl Into<String>) -> Self {
@@ -83,6 +86,7 @@ pub fn router(
     admin: Arc<crate::admin::Controller>,
 ) -> Router {
     let app = App {
+        exports: crate::exports::Exports::new(store.clone(), projects.clone()),
         store,
         projects,
         admin,
@@ -90,10 +94,15 @@ pub fn router(
         store_ip: config.store_ip,
         trusted_proxies: config.trusted_proxies.clone(),
         mcp_enabled: config.mcp_enabled,
+        public_url: config.public_url.clone(),
         rate: Arc::new(Mutex::new(RateLimit::new(config.ingest_per_second))),
     };
     let mcp = if config.mcp_enabled {
-        crate::mcp::router(app.store.clone(), config.mcp_allowed_hosts.clone())
+        crate::mcp::router(
+            app.store.clone(),
+            app.exports.clone(),
+            config.mcp_allowed_hosts.clone(),
+        )
     } else {
         Router::new()
     };
@@ -109,6 +118,15 @@ pub fn router(
         .route("/v1/engagement", get(engagement))
         .route("/v1/timeseries", get(timeseries))
         .route("/v1/videos", get(videos))
+        .route("/v1/views", get(views))
+        .route("/v1/views/{view_id}", get(view))
+        .route("/v1/errors", get(errors))
+        .route("/v1/dimensions/{dimension}", get(dimension))
+        .route("/v1/exports", post(create_export))
+        .route(
+            "/v1/exports/{token}",
+            get(download_export).head(export_head),
+        )
         .route(
             "/v1/events",
             get(events)
@@ -127,7 +145,11 @@ async fn access(
     let mcp = app.mcp_enabled && request.uri().path() == "/mcp";
     let ingest = request.uri().path() == "/v1/events"
         && matches!(*request.method(), Method::POST | Method::OPTIONS);
-    let resolved = if request.uri().path() == "/v1/projects" {
+    let download = matches!(*request.method(), Method::GET | Method::HEAD)
+        && request.uri().path().starts_with("/v1/exports/");
+    let resolved = if download {
+        None
+    } else if request.uri().path() == "/v1/projects" {
         app.admin.authorize_admin(&bearer(request.headers()))?;
         None
     } else if ingest && request.method() != Method::OPTIONS {
@@ -158,7 +180,14 @@ async fn access(
                     | "/v1/timeseries"
                     | "/v1/quality"
                     | "/v1/engagement"
-            );
+                    | "/v1/views"
+                    | "/v1/errors"
+            )
+            || matches!(*request.method(), Method::GET | Method::HEAD)
+                && ["/v1/views/", "/v1/dimensions/"]
+                    .iter()
+                    .any(|prefix| request.uri().path().starts_with(prefix))
+            || *request.method() == Method::POST && request.uri().path() == "/v1/exports";
         if !mcp && !analytics_read {
             resolved.require_write()?;
         }
@@ -226,6 +255,12 @@ async fn access(
             .lock()
             .map_err(|_| ApiError::unavailable())?
             .take()?;
+    }
+    if mcp {
+        let base = public_base(&app, &request)?;
+        request
+            .extensions_mut()
+            .insert(crate::exports::DownloadBase(base));
     }
     if let Some(resolved) = resolved {
         request.extensions_mut().insert(resolved);
@@ -486,4 +521,156 @@ async fn timeseries(
             .timeseries(resolved.project.id.clone(), query)
             .await?,
     ))
+}
+
+fn csv_response(bytes: impl Into<axum::body::Body>, filename: &str) -> Result<Response, ApiError> {
+    let mut response = Response::new(bytes.into());
+    response.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("text/csv; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        "content-disposition",
+        HeaderValue::from_str(&format!("attachment; filename=\"{filename}\""))
+            .map_err(|_| ApiError::internal())?,
+    );
+    response.headers_mut().insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    response
+        .headers_mut()
+        .insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    Ok(response)
+}
+
+async fn views(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::ViewsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store.views(resolved.project.id.clone(), query).await?,
+    ))
+}
+
+async fn view(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    Path(id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .view(resolved.project.id.clone(), id, query)
+            .await?,
+    ))
+}
+
+async fn dimension(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    Path(dimension): Path<crate::query::Dimension>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .dimension(resolved.project.id.clone(), dimension, query)
+            .await?,
+    ))
+}
+
+async fn errors(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store.errors(resolved.project.id.clone(), query).await?,
+    ))
+}
+
+async fn create_export(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    request: Request,
+) -> Result<impl IntoResponse, ApiError> {
+    let base = public_base(&app, &request)?;
+    let body = serde_json::from_value(read_json(request, 32 * 1024).await?)
+        .map_err(|_| ApiError::bad("Invalid export request"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(app.exports.create(&resolved, body, &base)?),
+    ))
+}
+async fn download_export(
+    State(app): State<App>,
+    Path(token): Path<String>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    if request.uri().query().is_some_and(|q| !q.is_empty()) {
+        return Err(ApiError::bad("Download filters are bound to the token"));
+    }
+    let report = app.exports.download(&token).await?;
+    let stream = futures::stream::unfold(report.chunks, |mut chunks| async move {
+        chunks
+            .recv()
+            .await
+            .map(|chunk| (chunk.map_err(|e| std::io::Error::other(e.1)), chunks))
+    });
+    csv_response(axum::body::Body::from_stream(stream), &report.filename)
+}
+async fn export_head(
+    State(app): State<App>,
+    Path(token): Path<String>,
+    request: Request,
+) -> Result<Response, ApiError> {
+    if request.uri().query().is_some_and(|q| !q.is_empty()) {
+        return Err(ApiError::bad("Download filters are bound to the token"));
+    }
+    let filename = app.exports.filename(&token)?;
+    csv_response(axum::body::Body::empty(), &filename)
+}
+fn public_base(app: &App, request: &Request) -> Result<reqwest::Url, ApiError> {
+    if let Some(url) = &app.public_url {
+        return Ok(url.clone());
+    }
+    let trusted = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .is_some_and(|peer| {
+            app.trusted_proxies
+                .iter()
+                .any(|network| network.contains(&peer.0.ip()))
+        });
+    let scheme = if trusted {
+        request
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| matches!(*v, "http" | "https"))
+            .unwrap_or("http")
+    } else {
+        request.uri().scheme_str().unwrap_or("http")
+    };
+    let authority = request
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| request.uri().authority().map(|a| a.as_str()))
+        .ok_or_else(|| ApiError::bad("Missing Host"))?;
+    let url = reqwest::Url::parse(&format!("{scheme}://{authority}/"))
+        .map_err(|_| ApiError::bad("Invalid Host"))?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ApiError::bad("Invalid Host"));
+    }
+    Ok(url)
 }

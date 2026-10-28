@@ -158,6 +158,9 @@ impl Store {
         project: String,
         operation: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
+        if let Some(reader) = &self.reader {
+            return reader.call(name, operation).await;
+        }
         if let Some(remote) = self.remote.clone() {
             return self
                 .writer
@@ -173,16 +176,38 @@ impl Store {
                 })
                 .await;
         }
-        match &self.reader {
-            Some(reader) => reader.call(name, operation).await,
-            None => {
-                self.writer
-                    .call(name, move |connection| {
-                        crate::reader::snapshot(connection, operation)
-                    })
-                    .await
+        self.writer
+            .call(name, move |connection| {
+                crate::reader::snapshot(connection, operation)
+            })
+            .await
+    }
+
+    pub async fn export_reader(&self, project: String) -> Result<Self, ApiError> {
+        let connection = self
+            .call("export_connection", |db| Ok(db.try_clone()?))
+            .await?;
+        let remote = self.remote.clone();
+        let connection = tokio::task::spawn_blocking(move || {
+            if let Some(remote) = remote {
+                crate::storage::create_parquet_stage(&connection)?;
+                let policy = remote
+                    .projects
+                    .retention
+                    .read()
+                    .map_err(|_| ApiError::internal())?;
+                remote.store.prepare_read(&connection, &project, &policy)?;
             }
-        }
+            Ok::<_, ApiError>(connection)
+        })
+        .await
+        .map_err(|_| ApiError::unavailable())??;
+        let (reader, _) = Reader::start(connection, false)?;
+        Ok(Self {
+            writer: self.writer.clone(),
+            reader: Some(reader),
+            remote: self.remote.clone(),
+        })
     }
 
     pub async fn purge_expired(
@@ -221,6 +246,7 @@ impl Store {
     }
 
     pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        let export = query.export.clone();
         if query.sort_by.is_some() || query.group_by.is_some() {
             return Err(ApiError::bad(
                 "sort_by and group_by are not supported by events",
@@ -271,13 +297,15 @@ impl Store {
             ]);
             let mut statement = connection.prepare(&(if remote {
                 crate::storage::parquet_page_sql
+            } else if export.is_some() {
+                crate::storage::export_sql
             } else {
                 crate::storage::page_sql
             })(
                 &conditions,
                 matches!(order, SortOrder::Desc),
             ))?;
-            let mut rows = statement.query(params_from_iter(values.iter()))?;
+            let mut rows = query_rows(&mut statement, &values, export.is_some())?;
             let mut events = Vec::new();
             let mut last = after;
             let mut next_cursor = None;
@@ -298,7 +326,7 @@ impl Store {
                 }
                 let (id, record) = crate::storage::decode(row)?;
                 last = id;
-                events.push(record);
+                crate::exports::emit(&export, &mut events, record)?;
             }
             Ok(json!({ "events": events, "next_cursor": next_cursor }))
         })
@@ -326,6 +354,21 @@ fn watermark(connection: &Connection, project: &str) -> Result<i64, ApiError> {
         [project],
         |row| row.get(0),
     )?)
+}
+
+fn query_rows<'s>(
+    statement: &'s mut duckdb::Statement<'_>,
+    values: &[SqlValue],
+    streaming: bool,
+) -> duckdb::Result<duckdb::Rows<'s>> {
+    if streaming {
+        // Initialize DuckDB's streaming result, then consume it through the
+        // fallible row API so fetch failures abort the HTTP stream cleanly.
+        drop(statement.stream_arrow(params_from_iter(values.iter()))?);
+        Ok(statement.raw_query())
+    } else {
+        statement.query(params_from_iter(values.iter()))
+    }
 }
 
 #[cfg(test)]
@@ -391,4 +434,5 @@ mod summary_tests;
 #[cfg(test)]
 mod page_lookup_tests;
 
+mod exploration;
 mod metrics;

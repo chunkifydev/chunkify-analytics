@@ -107,7 +107,8 @@
               }
             }
           }
-        }
+        },
+        "parameters": []
       }
     },
     "/v1/events": {
@@ -151,6 +152,9 @@
           },
           {
             "$ref": "#/components/parameters/order"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
           }
         ],
         "responses": {
@@ -197,6 +201,24 @@
           },
           "401": {
             "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -697,6 +719,9 @@
           },
           {
             "$ref": "#/components/parameters/cursor"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
           }
         ],
         "responses": {
@@ -748,6 +773,24 @@
           },
           "401": {
             "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -844,6 +887,9 @@
           },
           {
             "$ref": "#/components/parameters/order"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
           }
         ],
         "responses": {
@@ -906,6 +952,24 @@
               }
             }
           },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Storage operation failed.",
             "headers": {
@@ -948,8 +1012,8 @@
     "/v1/timeseries": {
       "get": {
         "operationId": "getTimeseries",
-        "summary": "Read hourly or daily metrics by view start",
-        "description": "Get hourly or daily totals in UTC. Playing time belongs to the view start bucket. Returns at most 1000 buckets.",
+        "summary": "Get summary, quality or engagement metrics over time",
+        "description": "Supply from, to and interval=hour|day. kind defaults to summary and also accepts quality or engagement. Every bucket selects first retained starts in its UTC interval and includes each selected view's whole retained measurement and errors, even after to. Empty buckets have zero counts and null unavailable measurements or ratios. At most 1000 buckets. Unique viewer counts are not additive.",
         "tags": [
           "Queries"
         ],
@@ -977,6 +1041,12 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          },
+          {
+            "$ref": "#/components/parameters/metric_kind"
           }
         ],
         "responses": {
@@ -993,7 +1063,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Timeseries"
+                  "$ref": "#/components/schemas/TimeseriesResponse"
                 },
                 "example": {
                   "from": "2026-10-19T00:00:00.000Z",
@@ -1013,7 +1083,8 @@
                       "unique_viewers": 0,
                       "total_playing_time_ms": 0
                     }
-                  ]
+                  ],
+                  "kind": "summary"
                 }
               }
             }
@@ -1043,6 +1114,24 @@
           },
           "401": {
             "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1136,6 +1225,9 @@
           },
           {
             "$ref": "#/components/parameters/cursor"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
           }
         ],
         "responses": {
@@ -1200,6 +1292,24 @@
           },
           "401": {
             "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1293,6 +1403,9 @@
           },
           {
             "$ref": "#/components/parameters/cursor"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
           }
         ],
         "responses": {
@@ -1346,6 +1459,24 @@
           },
           "401": {
             "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1444,23 +1575,6 @@
               }
             }
           },
-          "503": {
-            "description": "The service is temporarily unavailable.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "403": {
             "description": "Valid read-only private key; full-access private key required for project and key management.",
             "headers": {
@@ -1477,8 +1591,26 @@
                 }
               }
             }
+          },
+          "503": {
+            "description": "The service is temporarily unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
           }
-        }
+        },
+        "parameters": []
       }
     },
     "/v1/project/keys/{key_id}/rotate": {
@@ -1536,6 +1668,23 @@
               }
             }
           },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Key not found in this project.",
             "headers": {
@@ -1572,23 +1721,6 @@
           },
           "503": {
             "description": "The service is temporarily unavailable.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Valid read-only private key; full-access private key required for project and key management.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1790,7 +1922,8 @@
               }
             }
           }
-        }
+        },
+        "parameters": []
       }
     },
     "/v1/project": {
@@ -1854,6 +1987,23 @@
           },
           "401": {
             "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
             "headers": {
               "Cache-Control": {
                 "schema": {
@@ -1936,25 +2086,9 @@
                 }
               }
             }
-          },
-          "403": {
-            "description": "Valid read-only private key; full-access private key required for project and key management.",
-            "headers": {
-              "Cache-Control": {
-                "schema": {
-                  "const": "no-store"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
           }
-        }
+        },
+        "parameters": []
       },
       "delete": {
         "tags": [
@@ -2015,6 +2149,23 @@
               }
             }
           },
+          "403": {
+            "description": "Valid read-only private key; full-access private key required for project and key management.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "500": {
             "description": "The change could not be saved.",
             "headers": {
@@ -2048,14 +2199,905 @@
                 }
               }
             }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/v1/views": {
+      "get": {
+        "operationId": "listViews",
+        "summary": "List playback attempts",
+        "description": "One row per first retained start, using the same final/latest measurement selection as metrics. Filter by identity, context, dates or has_fatal_error. Order by view_id ascending by default or descending. Cursors bind filters, order, fatal-error selection, project and ingestion watermark. Missing end or error events are not proof of an ongoing or successful playback.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
           },
-          "403": {
-            "description": "Valid read-only private key; full-access private key required for project and key management.",
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          },
+          {
+            "$ref": "#/components/parameters/order"
+          },
+          {
+            "$ref": "#/components/parameters/has_fatal_error"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "View page; next_cursor is null at the end.",
             "headers": {
               "Cache-Control": {
                 "schema": {
                   "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewPage"
+                },
+                "example": {
+                  "views": [
+                    {
+                      "view_id": "616992d2-6db6-4578-8361-3f8813e963be",
+                      "video_id": "video-123",
+                      "viewer_id": null,
+                      "started_at": "2026-10-19T12:00:00.000Z",
+                      "browser_name": "Chrome",
+                      "os_name": "Linux",
+                      "device_type": "desktop",
+                      "playing_time_ms": 5000,
+                      "startup_time_ms": 120,
+                      "rebuffer_duration_ms": 0,
+                      "reached_end": true,
+                      "has_ended_event": true,
+                      "has_fatal_error": false
+                    }
+                  ],
+                  "next_cursor": null
                 }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/views/{view_id}": {
+      "get": {
+        "operationId": "getView",
+        "summary": "Inspect one playback attempt",
+        "description": "Returns start context and selected measurements, plus a paginated history of all retained events for that view ID, in ingestion order. SDK sequence and occurrence times remain in each event. Follow next_cursor with the same view ID; the summary and event pages share the initial ingestion watermark. Orphaned events without a retained start remain available through /v1/events?view_id=... .",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/view_id_path"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "View metadata and a page of retained events.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ViewDetail"
+                },
+                "example": {
+                  "view": {
+                    "view_id": "616992d2-6db6-4578-8361-3f8813e963be",
+                    "video_id": "video-123",
+                    "viewer_id": null,
+                    "started_at": "2026-10-19T12:00:00.000Z",
+                    "browser_name": "Chrome",
+                    "os_name": "Linux",
+                    "device_type": "desktop",
+                    "playing_time_ms": 5000,
+                    "startup_time_ms": 120,
+                    "rebuffer_duration_ms": 0,
+                    "reached_end": true,
+                    "has_ended_event": true,
+                    "has_fatal_error": false
+                  },
+                  "events": [],
+                  "next_cursor": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No retained start for this view in the authenticated project.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/errors": {
+      "get": {
+        "operationId": "getErrors",
+        "summary": "Group observed playback errors",
+        "description": "Filters select first retained starts. Error events from the selected view identity contribute even after to. Group by exact JSON error_code and fatal status, distinguishing numeric codes from text and missing from false. Sort by the canonical JSON code and fatal status ascending. error_events counts distinct event IDs per group, affected_views counts distinct view IDs. Groups are not additive across codes. Cursors exclude later arrivals.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Error-code and fatal-status groups; next_cursor is null at the end.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorPage"
+                },
+                "example": {
+                  "errors": [
+                    {
+                      "error_code": 2,
+                      "fatal": true,
+                      "error_events": 3,
+                      "affected_views": 2
+                    }
+                  ],
+                  "next_cursor": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/dimensions/{dimension}": {
+      "get": {
+        "operationId": "listDimensionValues",
+        "summary": "Discover available filter values",
+        "description": "Values and view counts come from the first retained view starts, after applying the same cohort filters as summary. Values sort ascending, null first; missing context is separate from the literal unknown. Cursors bind the dimension, filters, project and ingestion watermark.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/dimension_path"
+          },
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Dimension values and view counts; next_cursor is null at the end.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DimensionValues"
+                },
+                "example": {
+                  "dimension": "browser_name",
+                  "values": [
+                    {
+                      "value": "Chrome",
+                      "views": 2
+                    }
+                  ],
+                  "next_cursor": null
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/exports": {
+      "post": {
+        "operationId": "exportData",
+        "summary": "Generate a CSV report on request",
+        "description": "Create a scoped 256-bit random download token for all matching rows. Requires a project private key; read-only keys are allowed. The link expires after 30 minutes and is invalidated by issuer-key rotation/revocation, project deletion or collector restart. No CSV is generated or retained at creation. limit/cursor are rejected. Existing query endpoints continue returning JSON. Event CSV files contain documented scalar event fields and flat context.* columns. Custom attributes, nested arrays and historical OTLP payloads are excluded. CSV cells never contain JSON objects or arrays; use GET /v1/events for original payloads.",
+        "tags": [
+          "Analytics"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              },
+              "example": {
+                "resource": "videos",
+                "query": {
+                  "sort_by": "views",
+                  "order": "desc"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Scoped download link. Treat this URL as a secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Export"
+                },
+                "example": {
+                  "download_url": "https://analytics.example.com/v1/exports/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                  "filename": "chunkify-videos.csv",
+                  "content_type": "text/csv",
+                  "expires_at": "2026-10-28T12:30:00.000Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Unsupported Content-Type or Content-Encoding.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/v1/exports/{token}": {
+      "get": {
+        "operationId": "downloadExport",
+        "summary": "Stream a scoped CSV download",
+        "description": "The token authorizes only its saved project and query. Requires no Authorization header and accepts no query parameters. Generate CSV on demand from one read snapshot on a dedicated connection; stream with bounded application buffers and backpressure. Dataset is selected when the link is opened. Rows are not capped by query pagination. Nested metric columns use slash-separated paths. Events have documented scalar columns and flat context.* columns. Custom attributes, nested arrays and historical OTLP payloads are excluded. CSV cells never contain JSON objects or arrays. Nulls are empty cells; spreadsheet-formula strings are prefixed with an apostrophe. Interrupted or failed downloads terminate the stream; retry the full download. No files are retained. Four downloads execute concurrently; additional downloads wait. Link expiry is checked before starting, not during an active download. S3 retention/deletion can remove source objects during a download.",
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/export_token"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "CSV generated directly as a streamed attachment.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "\"video_id\",\"views\"\r\n\"video-123\",\"2\"\r\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Download token is invalid, expired or revoked.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
               }
             },
             "content": {
@@ -2282,6 +3324,80 @@
           ]
         },
         "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by."
+      },
+      "view_id": {
+        "name": "view_id",
+        "in": "query",
+        "required": false,
+        "description": "Filter one playback attempt by view ID. Metrics use its first retained start.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "view_id_path": {
+        "name": "view_id",
+        "in": "path",
+        "required": true,
+        "description": "Playback attempt to inspect.",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "dimension_path": {
+        "name": "dimension",
+        "in": "path",
+        "required": true,
+        "description": "Discover values from first retained view-start context, with view counts.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "browser_name",
+            "os_name",
+            "device_type",
+            "video_id",
+            "viewer_id"
+          ]
+        }
+      },
+      "metric_kind": {
+        "name": "kind",
+        "in": "query",
+        "required": false,
+        "description": "Metric set for every time bucket. Uses the same calculations and sample counts as the corresponding totals route.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "quality",
+            "engagement"
+          ],
+          "default": "summary"
+        }
+      },
+      "has_fatal_error": {
+        "name": "has_fatal_error",
+        "in": "query",
+        "required": false,
+        "description": "Select attempts with or without an observed fatal error. Absence of an observed error does not prove successful playback.",
+        "schema": {
+          "type": "boolean"
+        }
+      },
+      "export_token": {
+        "name": "token",
+        "in": "path",
+        "required": true,
+        "description": "Unguessable scoped download credential. No project key is needed.",
+        "schema": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 43,
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        }
       }
     },
     "schemas": {
@@ -4429,6 +5545,10 @@
             "items": {
               "$ref": "#/components/schemas/TimeBucket"
             }
+          },
+          "kind": {
+            "type": "string",
+            "const": "summary"
           }
         },
         "required": [
@@ -4436,7 +5556,8 @@
           "to",
           "interval",
           "timezone",
-          "buckets"
+          "buckets",
+          "kind"
         ],
         "additionalProperties": false
       },
@@ -5011,6 +6132,678 @@
             "$ref": "#/components/schemas/EngagementBreakdownPage"
           }
         ]
+      },
+      "QualityTimeseriesBucket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "views",
+          "startup_time_ms",
+          "buffering",
+          "fatal_errors",
+          "bucket_start"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Selected playback attempts with a retained start, including failed attempts."
+          },
+          "startup_time_ms": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sample_views",
+              "median",
+              "p95"
+            ],
+            "properties": {
+              "sample_views": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Views with a non-null startup measurement on the selected final event or latest snapshot."
+              },
+              "median": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Continuous median startup time in milliseconds, or null without samples."
+              },
+              "p95": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Continuous 95th percentile startup time in milliseconds, or null without samples."
+              }
+            },
+            "description": "Time from attempt to first playing, measured once per eligible view. This is not first-frame timing."
+          },
+          "buffering": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "sample_views",
+              "total_playing_time_ms",
+              "total_rebuffer_duration_ms",
+              "ratio"
+            ],
+            "properties": {
+              "sample_views": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Views with playing and rebuffer durations available and positive combined duration."
+              },
+              "total_playing_time_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Sum of playing time for eligible buffering samples only."
+              },
+              "total_rebuffer_duration_ms": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Sum of rebuffer time for the same samples."
+              },
+              "ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Total rebuffer time divided by combined playing and rebuffer time. Null without samples. Multiply by 100 for percent.",
+                "maximum": 1
+              }
+            },
+            "description": "Duration-weighted buffering. Startup wait, pauses and seeking are excluded by the SDK. Unknown durations are not treated as zero."
+          },
+          "fatal_errors": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "affected_views",
+              "ratio"
+            ],
+            "properties": {
+              "affected_views": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Distinct selected views with at least one observed matching fatal playback_error, including before playback starts."
+              },
+              "ratio": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "description": "Affected views divided by all selected attempts; null when views is zero. Multiply by 100 for percent.",
+                "maximum": 1
+              }
+            },
+            "description": "Observed fatal errors. Lost events can undercount this metric; absence of an error is not proof of successful playback."
+          },
+          "bucket_start": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
+      },
+      "QualityTimeseries": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive query bound normalized to UTC milliseconds."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive query bound normalized to UTC milliseconds."
+          },
+          "interval": {
+            "type": "string",
+            "enum": [
+              "hour",
+              "day"
+            ]
+          },
+          "timezone": {
+            "type": "string",
+            "const": "UTC"
+          },
+          "buckets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/QualityTimeseriesBucket"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "const": "quality"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "interval",
+          "timezone",
+          "buckets",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "EngagementTimeseriesBucket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "views",
+          "total_playing_time_ms",
+          "average_playing_time_ms",
+          "reached_end_views",
+          "reached_end_ratio",
+          "bucket_start"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Selected playback attempts with a retained start, including failed, ongoing and start-only attempts."
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Cumulative playing time summed once per selected view, as in summary."
+          },
+          "average_playing_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Total playing time divided by all selected attempts. Null with no views; zero when views exist with no measured time."
+          },
+          "reached_end_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Views whose winning final event has reason=ended. Counts each selected view at most once."
+          },
+          "reached_end_ratio": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Reached-end views divided by all selected attempts. Null without views. Multiply by 100 for percent. Does not imply the whole video was watched."
+          },
+          "bucket_start": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "description": "Observed watch time and end-of-media for the same start cohort as summary. Missing delivery can undercount both."
+      },
+      "EngagementTimeseries": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive query bound normalized to UTC milliseconds."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive query bound normalized to UTC milliseconds."
+          },
+          "interval": {
+            "type": "string",
+            "enum": [
+              "hour",
+              "day"
+            ]
+          },
+          "timezone": {
+            "type": "string",
+            "const": "UTC"
+          },
+          "buckets": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/EngagementTimeseriesBucket"
+            }
+          },
+          "kind": {
+            "type": "string",
+            "const": "engagement"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "interval",
+          "timezone",
+          "buckets",
+          "kind"
+        ],
+        "additionalProperties": false
+      },
+      "TimeseriesResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Timeseries"
+          },
+          {
+            "$ref": "#/components/schemas/QualityTimeseries"
+          },
+          {
+            "$ref": "#/components/schemas/EngagementTimeseries"
+          }
+        ]
+      },
+      "View": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "view_id": {
+            "type": "string"
+          },
+          "video_id": {
+            "type": "string"
+          },
+          "viewer_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "browser_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "os_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          },
+          "startup_time_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "rebuffer_duration_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "reached_end": {
+            "type": "boolean"
+          },
+          "has_ended_event": {
+            "type": "boolean"
+          },
+          "has_fatal_error": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "view_id",
+          "video_id",
+          "viewer_id",
+          "started_at",
+          "browser_name",
+          "os_name",
+          "device_type",
+          "playing_time_ms",
+          "startup_time_ms",
+          "rebuffer_duration_ms",
+          "reached_end",
+          "has_ended_event",
+          "has_fatal_error"
+        ]
+      },
+      "ViewPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "views": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/View"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "views",
+          "next_cursor"
+        ]
+      },
+      "ViewDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "view": {
+            "$ref": "#/components/schemas/View"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StoredEvent"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "view",
+          "events",
+          "next_cursor"
+        ]
+      },
+      "ErrorGroup": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "error_code": {
+            "type": [
+              "string",
+              "number",
+              "null"
+            ]
+          },
+          "fatal": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "error_events": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "affected_views": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "error_code",
+          "fatal",
+          "error_events",
+          "affected_views"
+        ]
+      },
+      "ErrorPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ErrorGroup"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "errors",
+          "next_cursor"
+        ]
+      },
+      "DimensionValues": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "browser_name",
+              "os_name",
+              "device_type",
+              "video_id",
+              "viewer_id"
+            ]
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "value": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "views": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "value",
+                "views"
+              ]
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "dimension",
+          "values",
+          "next_cursor"
+        ]
+      },
+      "ExportQuery": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "video_id": {
+            "type": "string"
+          },
+          "viewer_id": {
+            "type": "string"
+          },
+          "browser_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "os_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "device_type": {
+            "enum": [
+              "desktop",
+              "mobile",
+              "tablet",
+              "unknown"
+            ]
+          },
+          "event_name": {
+            "enum": [
+              "chunkify.video.view_started",
+              "chunkify.video.view_snapshot",
+              "chunkify.video.playback_error",
+              "chunkify.video.view_ended",
+              "chunkify.video.playback_state_changed",
+              "chunkify.video.rendition_changed",
+              "chunkify.video.seek_completed"
+            ]
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "default": "asc"
+          },
+          "view_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "group_by": {
+            "type": "string",
+            "enum": [
+              "browser_name",
+              "os_name",
+              "device_type"
+            ]
+          },
+          "sort_by": {
+            "type": "string",
+            "enum": [
+              "video_id",
+              "views",
+              "total_playing_time_ms"
+            ],
+            "default": "video_id"
+          },
+          "interval": {
+            "type": "string",
+            "enum": [
+              "hour",
+              "day"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "quality",
+              "engagement"
+            ],
+            "default": "summary"
+          },
+          "has_fatal_error": {
+            "type": "boolean"
+          },
+          "dimension": {
+            "type": "string",
+            "enum": [
+              "browser_name",
+              "os_name",
+              "device_type",
+              "video_id",
+              "viewer_id"
+            ]
+          }
+        }
+      },
+      "ExportRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "resource"
+        ],
+        "properties": {
+          "resource": {
+            "type": "string",
+            "enum": [
+              "summary",
+              "quality",
+              "engagement",
+              "timeseries",
+              "videos",
+              "events",
+              "views",
+              "errors",
+              "dimensions"
+            ]
+          },
+          "query": {
+            "$ref": "#/components/schemas/ExportQuery"
+          }
+        }
+      },
+      "Export": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "download_url",
+          "filename",
+          "content_type",
+          "expires_at"
+        ],
+        "properties": {
+          "download_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "filename": {
+            "type": "string"
+          },
+          "content_type": {
+            "type": "string",
+            "const": "text/csv"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       }
     }
   },

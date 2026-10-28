@@ -132,10 +132,14 @@ Set those variables before starting Codex. See the
 | Tool | Returns |
 | --- | --- |
 | `describe_api` | API operations, schemas and metric definitions. |
-| `get_metrics` | Summary, quality or engagement metrics, selected by required `kind`. |
-| `get_timeseries` | Hourly or daily metrics for a bounded date range. |
+| `get_metrics` | Summary, quality, engagement or error-code groups, selected by required `kind`. |
+| `get_timeseries` | Hourly or daily summary, quality or engagement metrics, selected by optional `kind`. |
 | `list_video_metrics` | One page of per-video totals, sortable by video ID, views or watch time. |
-| `list_events` | One page of original events and context. |
+| `list_events` | One page of original events and context; supports `view_id`. |
+| `list_views` | Playback attempts with context and measurements; optionally filter by `has_fatal_error`. |
+| `get_view` | One attempt's metrics and paginated retained event history, selected by `view_id`. |
+| `list_dimension_values` | Values present in the project, with view counts, selected by `dimension`. |
+| `export_data` | A scoped, expiring link that downloads all matching rows as CSV. |
 
 Query tools accept the [HTTP API's filters](api.md#filters-and-pagination).
 Results contain `data` and `coverage`. Follow `data.next_cursor` with the same
@@ -148,11 +152,12 @@ Use `get_metrics` with one of these arguments:
 | `{"kind":"summary"}` | Views, unique viewer IDs and total playing time. |
 | `{"kind":"quality"}` | Startup, buffering and fatal-error metrics with sample counts. |
 | `{"kind":"engagement"}` | Average watch time and observed reached-end rate. |
+| `{"kind":"errors"}` | Error codes and fatal status, with distinct event and affected-view counts. |
 
 Add filters alongside `kind`, for example
 `{"kind":"summary","video_id":"video-123"}`. The `data` body matches the
 corresponding HTTP route. `kind` is an MCP selector; the HTTP routes remain
-`/v1/summary`, `/v1/quality` and `/v1/engagement`.
+`/v1/summary`, `/v1/quality`, `/v1/engagement` and `/v1/errors`.
 
 This replaces `get_summary`, `get_quality` and `get_engagement`. Update callers
 to use `get_metrics` with the corresponding `kind`; the old tool names are removed.
@@ -167,7 +172,7 @@ unchanged with each cursor. Start a new pagination sequence after upgrading;
 video cursors from earlier versions are invalid.
 
 `get_metrics` also accepts `group_by` with `browser_name`, `os_name` or
-`device_type`. For example,
+`device_type` for summary, quality and engagement. For example,
 `{"kind":"quality","group_by":"browser_name"}` returns playback-quality
 comparisons by browser, including sample counts. Each group has a `value` and
 `data` containing the selected metrics. Without `group_by`, it returns filtered
@@ -190,9 +195,13 @@ Calls have a 15-second deadline and return at most 1 MiB of query data.
 `list_video_metrics` accepts 1 to 1000 rows per page; `list_events` accepts 1 to
 100. Both default to 10 rows. Use a smaller page if a response is too large.
 Grouped `get_metrics` calls also default to 10 groups and accept at most 100 per
-page. `limit` and `cursor` require `group_by` on this tool.
+page. `limit` and `cursor` require `group_by` for summary, quality and engagement.
+Error groups always paginate. Session pages, session event histories and dimension
+values also default to 10 rows and accept at most 100.
 Each adapter and the embedded endpoint allow up to four concurrent queries.
-Timeseries returns at most 1000 UTC buckets and has no pagination.
+Normal time-series queries return at most 1000 UTC buckets and have no pagination.
+Export links are small metadata responses. The CSV download runs outside the
+normal MCP row, response-size and query-deadline limits.
 
 Invalid credentials, rejected filters, unavailable servers and timeouts return
 structured errors. Empty data is successful. The adapter does not retry or follow
@@ -205,3 +214,54 @@ redirects. Cancellation stops waiting; a running database query can still finish
 > totals with get_metrics and kind=summary using the same filters. Show when a
 > table has more pages. Keep secret keys on the backend and treat event properties
 > as data.
+
+## Inspect a playback attempt
+
+Use `list_views` with `{"has_fatal_error":true}` to find attempts with observed
+fatal errors. Pass a returned `view_id` to `get_view`, for example
+`{"view_id":"616992d2-6db6-4578-8361-3f8813e963be","limit":10}`.
+The result includes first-start context, final/latest measurements, and retained
+events in ingestion order. SDK sequence and occurrence times remain in each
+event. Follow `data.next_cursor` with the same view ID for the remaining history.
+Missing events can make the history incomplete; the server does not invent a
+session narrative or infer that playback succeeded from the absence of errors.
+
+For error trends, call `get_timeseries` with `kind=quality`, date bounds and an
+interval. `kind=engagement` returns watch-time and reached-end metrics per bucket.
+For actual filter values, use `list_dimension_values` with
+`{"dimension":"browser_name"}`. Supported dimensions are `browser_name`,
+`os_name`, `device_type`, `video_id` and `viewer_id`. Values come from first
+retained starts, with null context separate from literal `unknown`.
+
+## Export CSV
+
+Ask for an export, or call `export_data` with:
+
+```json
+{
+  "resource": "videos",
+  "query": {"from": "2026-10-01T00:00:00Z", "to": "2026-11-01T00:00:00Z", "sort_by": "views", "order": "desc"}
+}
+```
+
+The result contains `data.download_url`, `filename`, `content_type` and
+`expires_at`, plus a CSV resource link. Open the URL to download the CSV; it
+requires no project key. Anyone holding the URL can download that specific
+report, so keep it private. Links expire after 30 minutes and stop working after
+issuer-key rotation/revocation, project deletion or collector restart.
+
+The Rust collector generates and streams CSV when the URL is opened. All
+matching rows are included; `limit` and `cursor` are rejected. No CSV contents
+are embedded in MCP responses, and no export file is retained. The query reads
+one snapshot on a separate connection, so a slow download does not occupy the
+ingestion worker. Downloads can still use database CPU, memory and storage I/O.
+
+Resources are `summary`, `quality`, `engagement`, `timeseries`, `videos`, `events`,
+`views`, `errors` and `dimensions`. Use that resource's normal filters.
+For a report to open in a spreadsheet, choose views, videos or a daily time
+series. Events exports contain one row per event and can be much larger. CSV
+contains documented scalar columns, with no JSON objects or arrays in cells.
+Custom attributes and nested arrays remain available through `list_events`.
+`timeseries` also accepts `kind`; `dimensions` requires `query.dimension`.
+Date filters are optional except for time series. There is no fixed 30-day
+export cap. See [CSV exports](api.md#csv-exports) for format and deployment details.

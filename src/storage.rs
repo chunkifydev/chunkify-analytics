@@ -421,6 +421,12 @@ pub fn page_sql(conditions: &str, descending: bool) -> String {
         SELECT page.*, event_otlp.payload FROM page LEFT JOIN event_otlp USING(project_id, event_id) ORDER BY page.ingest_id {direction}", *COLUMN_NAMES)
 }
 
+pub fn export_sql(conditions: &str, descending: bool) -> String {
+    let direction = if descending { "DESC" } else { "ASC" };
+    format!("SELECT events.ingest_id, {}, event_otlp.payload FROM events LEFT JOIN event_otlp USING(project_id,event_id)
+        WHERE {conditions} AND ingest_id > ? AND ingest_id <= ? ORDER BY ingest_id {direction} LIMIT ?",*COLUMN_NAMES)
+}
+
 fn migrate_v4(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     create_events(connection, "events_v4")?;
     let mut after = 0_i64;

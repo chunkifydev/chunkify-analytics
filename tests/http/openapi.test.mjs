@@ -52,6 +52,14 @@ async function collector(t, settings = {}) {
   });
   return {
     url, keys,
+    async admin(args) {
+      const process = spawn(binary, args, { cwd: directory, env, stdio: "pipe" });
+      let stdout = "", stderr = "";
+      process.stdout.on("data", chunk => { stdout += chunk; });
+      process.stderr.on("data", chunk => { stderr += chunk; });
+      assert.equal((await once(process, "close"))[0], 0, stderr);
+      return JSON.parse(stdout);
+    },
     async post(path, body, status, headers = {}) {
       const response = await fetch(`${url}${path}`, { method: "POST", body,
         headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": keys.public_key, ...headers } });
@@ -270,7 +278,7 @@ for (const separateReads of [false, true]) {
     const bucket = (hour, views, viewers, playing) => ({ bucket_start: `2026-10-19T${hour}:00:00.000Z`,
       views, unique_viewers: viewers, total_playing_time_ms: playing });
     const result = await series();
-    assert.deepEqual(result, { from: "2026-10-19T10:30:00.000Z", to: "2026-10-19T14:00:00.000Z",
+    assert.deepEqual(result, { kind: "summary", from: "2026-10-19T10:30:00.000Z", to: "2026-10-19T14:00:00.000Z",
       interval: "hour", timezone: "UTC", buckets: [bucket("10", 1, 1, 500), bucket("11", 2, 1, 1000), bucket("12", 0, 0, 0), bucket("13", 0, 0, 0)] });
     const summary = await server.get(`/v1/summary?${new URLSearchParams({ from: params.from, to: params.to })}`);
     assert.equal(result.buckets.reduce((sum, row) => sum + row.views, 0), summary.views);
@@ -670,4 +678,393 @@ for (const separateReads of [false, true]) test(`metric breakdowns preserve star
   }
   assert.deepEqual(frozen, byBrowser.groups);
   assert.ok((await grouped("summary", { group_by: "browser_name" })).groups.some(group => group.value === "Zulu"));
+});
+
+function csvRecords(text) {
+  const rows = [];
+  let row = [],
+    cell = "",
+    quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      if (quoted && text[i + 1] === '"') {
+        cell += '"';
+        i++;
+      } else quoted = !quoted;
+    } else if (c === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if (c === "\n" && !quoted) {
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+    } else if (c !== "\r" || quoted) cell += c;
+  }
+  assert.equal(quoted, false, "complete CSV");
+  assert.equal(cell, "");
+  assert.deepEqual(row, []);
+  return rows;
+}
+
+for (const separateReads of [false, true])
+  test(`analytics exploration and scoped CSV downloads (separate reads: ${separateReads})`, async (t) => {
+    const server = await collector(t, {
+      "experimental.read_worker": String(separateReads),
+      "server.ingest_per_second": "100000",
+    });
+    const example =
+      contract.paths["/v1/events"].post.requestBody.content["application/json"]
+        .example;
+    const starts = [];
+    for (const [index, browser] of ["Chrome", "Firefox", null].entries()) {
+      const start = {
+        ...structuredClone(example),
+        event_id: randomUUID(),
+        view_id: randomUUID(),
+        video_id: index === 0 ? '=formula,"line\n雪' : `video-${index}`,
+        viewer_id: index === 2 ? null : "same-viewer",
+        occurred_at: `2026-10-19T${10 + index}:00:00Z`,
+        custom_payload: { marker: "nested-custom-data" },
+        custom_note: "custom-scalar-data",
+        browser_context: {
+          schema_version: 1,
+          browser_name: browser,
+          os_name: "Linux",
+          device_type: index === 2 ? "unknown" : "desktop",
+        },
+      };
+      starts.push(start);
+      const end = {
+        ...start,
+        event_id: randomUUID(),
+        event_name: "chunkify.video.view_ended",
+        sequence: 3,
+        reason: "ended",
+        occurred_at: "2026-10-21T00:00:00Z",
+        playing_time_ms: 1000 * (index + 1),
+        startup_time_ms: 100 * (index + 1),
+        rebuffer_duration_ms: index * 100,
+      };
+      for (const event of [start, end])
+        await server.post("/v1/events", JSON.stringify(event), 201);
+      if (index === 0)
+        for (const code of [2, "2", null])
+          await server.post(
+            "/v1/events",
+            JSON.stringify({
+              ...start,
+              event_id: randomUUID(),
+              event_name: "chunkify.video.playback_error",
+              sequence: 2,
+              error_code: code,
+              error_fatal: code === 2,
+              error_category: "network",
+            }),
+            201,
+          );
+    }
+    const headers = { Authorization: `Bearer ${server.keys.secret_key}` };
+    const detail = async (id, query = "", status = 200) =>
+      assertResponse(
+        "/v1/views/{view_id}",
+        "get",
+        await fetch(`${server.url}/v1/views/${id}${query}`, { headers }),
+        status,
+      );
+    const dimensions = async (name, query = "", status = 200) =>
+      assertResponse(
+        "/v1/dimensions/{dimension}",
+        "get",
+        await fetch(`${server.url}/v1/dimensions/${name}${query}`, { headers }),
+        status,
+      );
+    for (const kind of ["quality", "engagement"]) {
+      const series = await server.get(
+        `/v1/timeseries?kind=${kind}&from=2026-10-19T10:00:00Z&to=2026-10-19T14:00:00Z&interval=hour`,
+      );
+      assert.equal(series.kind, kind);
+      assert.equal(series.buckets.length, 4);
+      for (let i = 0; i < 4; i++) {
+        const total = await server.get(
+          `/v1/${kind}?from=2026-10-19T${10 + i}:00:00Z&to=2026-10-19T${11 + i}:00:00Z`,
+        );
+        const { bucket_start, ...metrics } = series.buckets[i];
+        assert.deepEqual(metrics, total);
+      }
+    }
+    const first = await server.get("/v1/views?limit=1");
+    assert.equal(first.views.length, 1);
+    assert.ok(first.next_cursor);
+    const fatal = await server.get("/v1/views?has_fatal_error=true");
+    assert.equal(fatal.views.length, 1);
+    assert.equal(fatal.views[0].view_id, starts[0].view_id);
+    assert.equal(
+      (await server.get("/v1/views?has_fatal_error=false")).views.length,
+      2,
+    );
+    await server.get(
+      `/v1/views?has_fatal_error=true&cursor=${encodeURIComponent(first.next_cursor)}`,
+      400,
+    );
+    assert.equal(
+      (await server.get(`/v1/events?view_id=${starts[0].view_id}`)).events
+        .length,
+      5,
+    );
+    let page = await detail(starts[0].view_id, "?limit=2");
+    const info = page.view,
+      history = [...page.events];
+    assert.equal(info.playing_time_ms, 1000);
+    assert.equal(info.has_fatal_error, true);
+    assert.equal(info.reached_end, true);
+    while (page.next_cursor) {
+      page = await detail(
+        starts[0].view_id,
+        `?limit=2&cursor=${encodeURIComponent(page.next_cursor)}`,
+      );
+      assert.deepEqual(page.view, info);
+      history.push(...page.events);
+    }
+    assert.equal(history.length, 5);
+    assert.ok(history.every((e) => e.event.view_id === starts[0].view_id));
+    await detail(randomUUID(), "", 404);
+    const errors = await server.get("/v1/errors");
+    assert.equal(errors.errors.length, 3);
+    assert.deepEqual(
+      new Set(errors.errors.map((e) => JSON.stringify(e.error_code))),
+      new Set(["2", '"2"', "null"]),
+    );
+    assert.ok(
+      errors.errors.every(
+        (e) => e.error_events === 1 && e.affected_views === 1,
+      ),
+    );
+    let d = await dimensions("browser_name", "?limit=1");
+    assert.equal(d.values[0].value, null);
+    assert.ok(d.next_cursor);
+    const next = await dimensions(
+      "browser_name",
+      `?cursor=${encodeURIComponent(d.next_cursor)}`,
+    );
+    assert.equal(next.values.length, 2);
+    await dimensions(
+      "os_name",
+      `?cursor=${encodeURIComponent(d.next_cursor)}`,
+      400,
+    );
+    for (const invalid of [
+      "/v1/views?has_fatal_error=maybe",
+      "/v1/views?unknown=x",
+      "/v1/errors?group_by=browser_name",
+      "/v1/timeseries?kind=errors&from=2026-10-19T00:00:00Z&to=2026-10-20T00:00:00Z&interval=day",
+      "/v1/events?export=true",
+    ])
+      await server.get(invalid, 400);
+    const key = await server.admin([
+      "key",
+      "create",
+      "default",
+      "secret",
+      "Exports",
+      "--read-only",
+    ]);
+    const create = async (body, status = 201, token = key.key) =>
+      assertResponse(
+        "/v1/exports",
+        "post",
+        await fetch(`${server.url}/v1/exports`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+        }),
+        status,
+      );
+    for (const [resource, query, expectedRows] of [
+      ["summary", {}, 1],
+      ["quality", { group_by: "browser_name" }, 3],
+      ["engagement", {}, 1],
+      [
+        "timeseries",
+        {
+          kind: "quality",
+          from: "2026-10-19T10:00:00Z",
+          to: "2026-10-19T14:00:00Z",
+          interval: "hour",
+        },
+        4,
+      ],
+      ["videos", { sort_by: "views", order: "desc" }, 3],
+      ["events", { view_id: starts[0].view_id }, 5],
+      ["views", { has_fatal_error: true }, 1],
+      ["errors", {}, 3],
+      ["dimensions", { dimension: "browser_name" }, 3],
+    ]) {
+      const link = await create({ resource, query });
+      assert.ok(!JSON.stringify(link).includes(key.key));
+      assert.equal(new URL(link.download_url).origin, server.url);
+      const response = await fetch(link.download_url);
+      const text = await assertResponse(
+        "/v1/exports/{token}",
+        "get",
+        response,
+        200,
+      );
+      assert.equal(
+        response.headers.get("content-disposition"),
+        `attachment; filename="chunkify-${resource}.csv"`,
+      );
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(csvRecords(text).length, expectedRows + 1);
+      if (resource === "videos") assert.ok(text.includes("'=formula,"));
+      if (resource === "events") {
+        const [columns, ...records] = csvRecords(text);
+        const event = Object.fromEntries(
+          columns.map((name, i) => [name, records[0][i]]),
+        );
+        assert.equal(event.event_id, history[0].event.event_id);
+        assert.equal(event.video_id, `'${history[0].event.video_id}`);
+        assert.equal(
+          event.playing_time_ms,
+          String(history[0].event.playing_time_ms),
+        );
+        assert.equal(event["context.browser_name"], "Chrome");
+        for (const name of [
+          "rebuffer_count",
+          "rebuffer_duration_ms",
+          "startup_time_ms",
+          "error_code",
+          "error_fatal",
+          "from_state",
+          "seek_outcome",
+        ])
+          assert.ok(columns.includes(name), name);
+        assert.ok(
+          !columns.some((name) =>
+            [
+              "event",
+              "event_context",
+              "otlp",
+              "custom_payload",
+              "custom_note",
+              "rendition_playing_time",
+            ].includes(name),
+          ),
+        );
+        assert.ok(!text.includes("nested-custom-data"));
+        assert.ok(!text.includes("custom-scalar-data"));
+        const fatalColumn = columns.indexOf("error_fatal");
+        assert.equal(
+          records.filter((record) => record[fatalColumn] === "true").length,
+          1,
+        );
+      }
+      assert.equal(
+        (await fetch(link.download_url, { method: "HEAD" })).status,
+        200,
+      );
+      assert.equal(
+        (await fetch(`${link.download_url}?video_id=another`)).status,
+        400,
+      );
+    }
+    for (const body of [
+      { resource: "projects" },
+      { resource: "videos", query: { limit: 1 } },
+      { resource: "events", query: { project_id: "other" } },
+      { resource: "views", query: { has_fatal_error: "true" } },
+      { resource: "timeseries", query: {} },
+      { resource: "dimensions", query: { dimension: "country" } },
+      { resource: "summary", query: { sort_by: "views" } },
+    ])
+      await create(body, 400);
+    await create({ resource: "events" }, 401, server.keys.public_key);
+    const link = await create({ resource: "events" });
+    await server.admin(["key", "rotate", "default", key.key_id]);
+    assert.equal((await fetch(link.download_url)).status, 404);
+    assert.equal(
+      (await fetch(`${server.url}/v1/exports/${"A".repeat(43)}`)).status,
+      404,
+    );
+  });
+
+test("CSV exports contain every matching row beyond normal query page limits", async (t) => {
+  const server = await collector(t, { "server.ingest_per_second": "100000" });
+  const example =
+    contract.paths["/v1/events"].post.requestBody.content["application/json"]
+      .example;
+  for (let base = 0; base < 1105; base += 40)
+    await Promise.all(
+      Array.from({ length: Math.min(40, 1105 - base) }, (_, i) =>
+        server.post(
+          "/v1/events",
+          JSON.stringify({
+            ...example,
+            event_id: randomUUID(),
+            view_id: randomUUID(),
+            video_id: `video-${base + i}`,
+          }),
+          201,
+        ),
+      ),
+    );
+  assert.equal((await server.get("/v1/events?limit=1000")).events.length, 1000);
+  const response = await fetch(`${server.url}/v1/exports`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${server.keys.secret_key}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ resource: "events" }),
+  });
+  const link = await assertResponse("/v1/exports", "post", response, 201);
+  const csv = await fetch(link.download_url);
+  assert.equal(csv.status, 200);
+  assert.equal(csvRecords(await csv.text()).length, 1106);
+  const hourly = await fetch(`${server.url}/v1/exports`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${server.keys.secret_key}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      resource: "timeseries",
+      query: {
+        from: "2026-01-01T00:00:00Z",
+        to: "2026-03-01T00:00:00Z",
+        interval: "hour",
+      },
+    }),
+  });
+  const hours = await assertResponse("/v1/exports", "post", hourly, 201);
+  assert.equal(
+    csvRecords(await (await fetch(hours.download_url)).text()).length,
+    24 * 59 + 1,
+  );
+});
+
+test("export links use the configured public base including an ingress prefix", async (t) => {
+  const server = await collector(t, {
+    "server.public_url": "https://analytics.example.com/collector/",
+  });
+  const response = await fetch(`${server.url}/v1/exports`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${server.keys.secret_key}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ resource: "videos" }),
+  });
+  const link = await assertResponse("/v1/exports", "post", response, 201);
+  assert.ok(
+    link.download_url.startsWith(
+      "https://analytics.example.com/collector/v1/exports/",
+    ),
+  );
+  const token = new URL(link.download_url).pathname.split("/").at(-1);
+  assert.equal((await fetch(`${server.url}/v1/exports/${token}`)).status, 200);
 });

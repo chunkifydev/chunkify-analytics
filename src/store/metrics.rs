@@ -1,22 +1,7 @@
 use super::*;
 use crate::query::{TimeseriesQuery, VideoSort};
 
-#[derive(Clone, Copy)]
-enum MetricSet {
-    Summary,
-    Quality,
-    Engagement,
-}
-
-impl MetricSet {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Summary => "summary",
-            Self::Quality => "quality",
-            Self::Engagement => "engagement",
-        }
-    }
-}
+use crate::query::MetricKind as MetricSet;
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +24,7 @@ impl Store {
         if query.event_name.is_some() || query.sort_by.is_some() || query.order.is_some() {
             return Err(ApiError::bad("Unsupported breakdown query parameter"));
         }
+        let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
         let kind = format!("breakdown_{}_{}", group_by.column(), metrics.name());
@@ -82,12 +68,12 @@ impl Store {
                 ORDER BY {column} ASC NULLS FIRST LIMIT ?",
                 metric_columns(metrics)
             ))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| {
+            let rows = query_rows(&mut statement, &values, export.is_some())?.mapped(|row| {
                 Ok((
                     row.get::<_, Option<String>>(0)?,
                     read_metrics(row, 1, metrics)?,
                 ))
-            })?;
+            });
             let mut groups = Vec::new();
             let mut last = None;
             let mut next_cursor = None;
@@ -108,7 +94,11 @@ impl Store {
                     break;
                 }
                 last = value.clone();
-                groups.push(json!({"value":value,"data":metric_json(data)?}));
+                crate::exports::emit(
+                    &export,
+                    &mut groups,
+                    json!({"value":value,"data":metric_json(data)?}),
+                )?;
             }
             Ok(json!({"group_by":group_by,"groups":groups,"next_cursor":next_cursor}))
         })
@@ -136,6 +126,7 @@ impl Store {
         {
             return Err(ApiError::bad("Unsupported summary query parameter"));
         }
+        let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
         let sort = query.sort_by.unwrap_or_default();
@@ -199,12 +190,12 @@ impl Store {
                 )
                 SELECT video_id, views, unique_viewers, total_playing_time_ms FROM video_metrics
                 WHERE {continuation} ORDER BY {column} {direction}{tie_breaker} LIMIT ?"))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| Ok((VideoPosition {
+            let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|row| Ok((VideoPosition {
                 video_id: row.get(0)?, views: row.get(1)?, total_playing_time_ms: row.get(3)?,
             }, json!({
                 "video_id": row.get::<_, String>(0)?, "views": row.get::<_, i64>(1)?,
                 "unique_viewers": row.get::<_, i64>(2)?, "total_playing_time_ms": row.get::<_, f64>(3)?
-            }))))?;
+            }))));
             let mut videos = Vec::new();
             let mut last = None;
             let mut next_cursor = None;
@@ -218,7 +209,7 @@ impl Store {
                     break;
                 }
                 last = Some(position);
-                videos.push(video);
+                crate::exports::emit(&export,&mut videos,video)?;
             }
             Ok(json!({ "videos": videos, "next_cursor": next_cursor }))
         }).await
@@ -287,49 +278,100 @@ impl Store {
         project: String,
         query: TimeseriesQuery,
     ) -> Result<Value, ApiError> {
-        let window = query.validate()?;
+        let metrics = query.kind;
+        let export = query.export.clone();
+        let window = if export.is_some() {
+            query.validate_export()?
+        } else {
+            query.validate()?
+        };
         self.read("timeseries", project.clone(), move |connection| {
             let through = watermark(connection, &project)?;
-            let (sql, mut values) =
-                view_cohort(project, through, &window.filters, CohortMetrics::Basic);
+            let cohort = match metrics {
+                MetricSet::Summary => CohortMetrics::Basic,
+                MetricSet::Quality => CohortMetrics::Quality,
+                MetricSet::Engagement => CohortMetrics::Engagement,
+            };
+            let (sql, mut values) = view_cohort(project, through, &window.filters, cohort);
             let width = window.interval.milliseconds();
             values.extend([
                 SqlValue::BigInt(window.first_bucket_ms),
                 SqlValue::BigInt(width),
             ]);
-            // UTC bucket indices use integer arithmetic. The filtered starts are
-            // never before the first bucket, including dates before Unix epoch.
+            let (samples, source) = if matches!(metrics, MetricSet::Quality) {
+                (QUALITY_SAMPLES, "quality_samples")
+            } else {
+                ("", "view_metrics")
+            };
             let mut statement = connection.prepare(&format!(
-                "{sql}
-                SELECT (occurred_at_ms - ?) // ? AS bucket_index,
-                    COUNT(*), COUNT(DISTINCT viewer_id), SUM(playing_time_ms)
-                FROM view_metrics GROUP BY bucket_index ORDER BY bucket_index"
+                "{sql}{samples} SELECT (occurred_at_ms - ?) // ? AS bucket_index,
+                    {} FROM {source} GROUP BY bucket_index ORDER BY bucket_index",
+                metric_columns(metrics)
             ))?;
-            let rows = statement.query_map(params_from_iter(values.iter()), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, f64>(3)?,
-                ))
+            let rows = query_rows(&mut statement, &values, export.is_some())?
+                .mapped(|row| Ok((row.get::<_, i64>(0)?, read_metrics(row, 1, metrics)?)));
+            let empty = metric_json(match metrics {
+                MetricSet::Summary => MetricValues::Summary {
+                    views: 0,
+                    viewers: 0,
+                    playing: 0.0,
+                },
+                MetricSet::Engagement => MetricValues::Engagement {
+                    views: 0,
+                    playing: 0.0,
+                    reached_end: 0,
+                },
+                MetricSet::Quality => MetricValues::Quality {
+                    views: 0,
+                    startup_samples: 0,
+                    median: None,
+                    p95: None,
+                    buffering_samples: 0,
+                    playing: 0.0,
+                    buffering: 0.0,
+                    affected: 0,
+                },
             })?;
-            let mut buckets: Vec<_> = (0..window.bucket_count).map(|index| json!({
-                "bucket_start": utc_timestamp(window.first_bucket_ms + index as i64 * width),
-                "views": 0, "unique_viewers": 0, "total_playing_time_ms": 0.0,
-            })).collect();
-            for row in rows {
-                let (index, views, viewers, playing) = row?;
-                if !playing.is_finite() {
-                    return Err(ApiError::internal());
+            if let Some(export) = &export {
+                let mut index = 0usize;
+                let bucket = |mut data: Value, index: usize| {
+                    data["bucket_start"] =
+                        json!(utc_timestamp(window.first_bucket_ms + index as i64 * width));
+                    data
+                };
+                for row in rows {
+                    let (next, values) = row?;
+                    while index < next as usize {
+                        export.push(bucket(empty.clone(), index))?;
+                        index += 1;
+                    }
+                    export.push(bucket(metric_json(values)?, index))?;
+                    index += 1;
                 }
+                while index < window.bucket_count {
+                    export.push(bucket(empty.clone(), index))?;
+                    index += 1;
+                }
+                return Ok(json!({"buckets":[]}));
+            }
+            let mut buckets: Vec<_> = (0..window.bucket_count)
+                .map(|index| {
+                    let mut bucket = empty.clone();
+                    bucket["bucket_start"] =
+                        json!(utc_timestamp(window.first_bucket_ms + index as i64 * width));
+                    bucket
+                })
+                .collect();
+            for row in rows {
+                let (index, data) = row?;
                 let bucket = buckets
                     .get_mut(index as usize)
                     .ok_or_else(ApiError::internal)?;
-                bucket["views"] = json!(views);
-                bucket["unique_viewers"] = json!(viewers);
-                bucket["total_playing_time_ms"] = json!(playing);
+                let start = bucket["bucket_start"].clone();
+                *bucket = metric_json(data)?;
+                bucket["bucket_start"] = start;
             }
-            Ok(json!({
+            Ok(json!({"kind":metrics,
                 "from": utc_timestamp(window.from_ms), "to": utc_timestamp(window.to_ms),
                 "interval": window.interval, "timezone": "UTC", "buckets": buckets,
             }))
@@ -338,7 +380,7 @@ impl Store {
     }
 }
 
-fn utc_timestamp(milliseconds: i64) -> String {
+pub(super) fn utc_timestamp(milliseconds: i64) -> String {
     chrono::DateTime::from_timestamp_millis(milliseconds)
         .expect("validated RFC3339 time")
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -473,13 +515,14 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
     }
 }
 
-enum CohortMetrics {
+pub(super) enum CohortMetrics {
     Basic,
     Quality,
     Engagement,
+    Complete,
 }
 
-fn view_cohort(
+pub(super) fn view_cohort(
     project: String,
     through: i64,
     filters: &crate::query::Filters,
@@ -497,9 +540,9 @@ fn view_cohort(
     let (measurement_fields, error_aggregate, measurement_projection, error_events) = match metrics
     {
         CohortMetrics::Basic => (String::new(), "", "", ""),
-        CohortMetrics::Quality => (
+        CohortMetrics::Quality | CohortMetrics::Complete => (
             format!(
-                ", startup_time_ms := {}, rebuffer_duration_ms := {}",
+                ", startup_time_ms := {}, rebuffer_duration_ms := {}, reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended'), has_ended_event := (event_name = 'chunkify.video.view_ended')",
                 stored_number("startup_time_ms"),
                 stored_number("rebuffer_duration_ms")
             ),

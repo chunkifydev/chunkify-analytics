@@ -6,6 +6,7 @@ mod config;
 mod settings;
 
 use clap::Parser;
+use tracing_subscriber::prelude::*;
 mod context;
 mod event;
 mod exports;
@@ -45,6 +46,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         cli::Command::Serve { .. } => {
+            tracing_subscriber::registry()
+                // Dependency diagnostics can contain request or credential data.
+                .with(
+                    tracing_subscriber::filter::Targets::new()
+                        .with_target("chunkify_analytics", config.log_level),
+                )
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(std::io::stderr)
+                        .with_ansi(false)
+                        .with_target(false),
+                )
+                .try_init()
+                .map_err(|_| "Cannot initialize server logging")?;
             let _lock = config.lock()?;
             let keys = config.keys()?;
             let config = std::sync::Arc::new(config);

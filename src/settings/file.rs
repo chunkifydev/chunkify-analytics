@@ -10,6 +10,7 @@ use std::{
 struct FileConfig {
     data_dir: Option<PathBuf>,
     profile: Option<bool>,
+    logging: Logging,
     server: Server,
     retention: Retention,
     batch: Batch,
@@ -18,6 +19,12 @@ struct FileConfig {
     experimental: Experimental,
     mcp: Mcp,
     rate_limits: crate::limits::Config,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Logging {
+    level: Option<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -161,6 +168,9 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         settings
             .values
             .insert("profile".into(), value.to_string().into());
+    }
+    if let Some(value) = config.logging.level {
+        settings.values.insert("logging.level".into(), value.into());
     }
     if let Some(value) = config.server.bind {
         settings.values.insert("server.bind".into(), value.into());

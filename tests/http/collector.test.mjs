@@ -187,6 +187,40 @@ test("real SDK events survive a collector restart and duplicate delivery", async
   assert.equal((await fetch(`${server.url}/v1/events`)).status, 401);
 });
 
+test("batch logging works live without profiling and respects the configured level", async (t) => {
+  const server = await collector(t, { "retention.seconds": "0" });
+  const [event] = sdkEvents("private-log-video", "private-log-viewer");
+  await server.send(event);
+  await server.send(event);
+  // stderr is a separate pipe from the HTTP response; wait for it to drain.
+  for (let attempt = 0; attempt < 100 && server.logs().split("batch_saved").length < 3; attempt++) await delay(10);
+  const lines = server.logs().split("\n").filter(line => line.includes("batch_saved"));
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /INFO batch_saved backend="duckdb" requests=1 received=1 inserted=1 duplicates=0/);
+  assert.match(lines[1], /inserted=0 duplicates=1/);
+  assert.ok(!server.logs().includes("batch_started"));
+  for (const secret of [server.keys.public_key, server.keys.secret_key, event.event_id, "private-log-video", "private-log-viewer"]) {
+    assert.ok(!server.logs().includes(secret), "batch logs must not expose credentials or event values");
+  }
+  await server.stop();
+  await server.start(binary, { "logging.level": "warn" });
+  await server.send(event);
+  await server.stop();
+  assert.ok(!server.logs().includes("batch_saved") && !server.logs().includes("batch_started"));
+  await server.start(binary, { "logging.level": "debug" });
+  await server.send(event);
+  await server.stop();
+  assert.match(server.logs(), /DEBUG batch_started/);
+  assert.match(server.logs(), /INFO batch_saved/);
+  for (const secret of [server.keys.public_key, server.keys.secret_key, event.event_id, "private-log-video", "private-log-viewer"]) {
+    assert.ok(!server.logs().includes(secret));
+  }
+  await server.start(binary, { "logging.level": "off" });
+  await server.send(event);
+  await server.stop();
+  assert.ok(!server.logs().includes("batch_saved") && !server.logs().includes("batch_started"));
+});
+
 test("optional profiling reports database work on shutdown without event data or credentials", async (t) => {
   const server = await collector(t, { "profile": "true", "retention.seconds": "0", "batch.insert_mode": "row" });
   const events = sdkEvents("private-video", "private-viewer");

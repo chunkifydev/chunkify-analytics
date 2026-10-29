@@ -4,6 +4,10 @@
 data_dir = "./data"
 profile = false
 
+[logging]
+# One summary per saved batch. Use warn for failures only, debug for batch starts.
+level = "info"
+
 [storage]
 # Local storage is the default. S3-compatible storage also uses this section.
 backend = "local"

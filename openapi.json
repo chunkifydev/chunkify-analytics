@@ -6661,6 +6661,7 @@
         "additionalProperties": false,
         "properties": {
           "allowed_origins": {
+            "x-go-omitzero": true,
             "type": "array",
             "items": {
               "type": "string"

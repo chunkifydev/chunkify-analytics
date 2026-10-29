@@ -328,6 +328,19 @@ fn flush(
     remote: Option<&crate::s3_store::RemoteStore>,
     profile: &mut Profile,
 ) {
+    let write_started = Instant::now();
+    let backend = if remote.is_some() { "s3" } else { "duckdb" };
+    let queue_ms = batch
+        .iter()
+        .map(|request| (write_started - request.queued).as_millis())
+        .max()
+        .unwrap_or_default();
+    tracing::debug!(
+        backend,
+        requests = batch.len(),
+        received = records,
+        "batch_started"
+    );
     let started = profile.start();
     for request in &batch {
         profile.queue("ingest", Some(request.queued), started);
@@ -338,8 +351,33 @@ fn flush(
         None => write_batch(connection, &batch, bulk, profile),
     };
     profile.executed("ingest", started);
-    if let Ok(counts) = &result {
-        profile.committed(batch.len(), records, bytes, counts.iter().sum());
+    let duration_ms = write_started.elapsed().as_millis();
+    match &result {
+        Ok(counts) => {
+            let inserted = counts.iter().sum::<usize>();
+            profile.committed(batch.len(), records, bytes, inserted);
+            tracing::info!(
+                backend,
+                requests = batch.len(),
+                received = records,
+                inserted,
+                duplicates = records - inserted,
+                bytes,
+                queue_ms,
+                duration_ms,
+                "batch_saved"
+            );
+        }
+        Err(stage) => tracing::error!(
+            backend,
+            requests = batch.len(),
+            received = records,
+            bytes,
+            queue_ms,
+            duration_ms,
+            stage,
+            "batch_failed"
+        ),
     }
     for (index, request) in batch.into_iter().enumerate() {
         let response = match &result {
@@ -359,29 +397,36 @@ fn write_remote(
     connection: &Connection,
     batch: &[WriteRequest],
     remote: &crate::s3_store::RemoteStore,
-) -> Result<Vec<usize>, ApiError> {
-    connection.execute("DELETE FROM collector_parquet_stage", [])?;
+) -> Result<Vec<usize>, &'static str> {
+    connection
+        .execute("DELETE FROM collector_parquet_stage", [])
+        .map_err(|_| "clear_stage")?;
     let result = (|| {
-        let mut appender =
-            connection.appender_to_catalog_and_db("collector_parquet_stage", "temp", "main")?;
+        let mut appender = connection
+            .appender_to_catalog_and_db("collector_parquet_stage", "temp", "main")
+            .map_err(|_| "append_events")?;
         for request in batch {
             for row in &request.rows {
-                appender.append_row(appender_params_from_iter(
-                    std::iter::once(Value::BigInt(remote.next_id()?))
+                appender
+                    .append_row(appender_params_from_iter(
+                        std::iter::once(Value::BigInt(
+                            remote.next_id().map_err(|_| "allocate_id")?,
+                        ))
                         .chain(row.values.iter().cloned())
                         .chain(std::iter::once(
                             row.otlp.clone().map_or(Value::Null, Value::Text),
                         )),
-                ))?;
+                    ))
+                    .map_err(|_| "append_events")?;
             }
         }
-        appender.flush()?;
+        appender.flush().map_err(|_| "append_events")?;
         drop(appender);
-        remote.publish(connection)
+        remote.publish(connection).map_err(|_| "publish")
     })();
     let cleanup = connection.execute("DELETE FROM collector_parquet_stage", []);
     result?;
-    cleanup?;
+    cleanup.map_err(|_| "clear_stage")?;
     Ok(batch.iter().map(|request| request.rows.len()).collect())
 }
 
@@ -390,14 +435,19 @@ fn write_batch(
     batch: &[WriteRequest],
     bulk: bool,
     profile: &mut Profile,
-) -> Result<Vec<usize>, ApiError> {
-    let tx = profile.measure("begin", || connection.transaction())?;
+) -> Result<Vec<usize>, &'static str> {
+    // Keep stage names for diagnostics, never SQL errors that may include event values.
+    let tx = profile
+        .measure("begin", || connection.transaction())
+        .map_err(|_| "begin")?;
     let counts = if bulk {
-        write_bulk(&tx, batch, profile)?
+        write_bulk(&tx, batch, profile).map_err(|_| "insert_events")?
     } else {
-        write_rows(&tx, batch, profile)?
+        write_rows(&tx, batch, profile).map_err(|_| "insert_events")?
     };
-    profile.measure("commit", || tx.commit())?;
+    profile
+        .measure("commit", || tx.commit())
+        .map_err(|_| "commit")?;
     Ok(counts)
 }
 

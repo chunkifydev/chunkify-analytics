@@ -5,6 +5,7 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
 };
+use tracing::level_filters::LevelFilter;
 use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -25,6 +26,7 @@ pub struct Config {
     pub retention_interval_seconds: u64,
     pub store_ip: bool,
     pub profile: bool,
+    pub log_level: LevelFilter,
     pub checkpoint_threshold_mib: u32,
     pub duckdb_threads: Option<usize>,
     pub batch: crate::writer::BatchConfig,
@@ -209,6 +211,19 @@ impl Config {
                 .unwrap_or_else(|_| "false".into())
                 .parse()
                 .map_err(|_| "profile must be true or false")?,
+            log_level: match settings.var("logging.level").as_deref().unwrap_or("info") {
+                "off" => LevelFilter::OFF,
+                "error" => LevelFilter::ERROR,
+                "warn" => LevelFilter::WARN,
+                "info" => LevelFilter::INFO,
+                "debug" => LevelFilter::DEBUG,
+                "trace" => LevelFilter::TRACE,
+                _ => {
+                    return Err(
+                        "logging.level must be off, error, warn, info, debug or trace".into(),
+                    );
+                }
+            },
             trusted_proxies: crate::context::trusted_proxies(
                 &settings.var("server.trusted_proxies").unwrap_or_default(),
             )?,

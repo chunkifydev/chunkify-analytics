@@ -99,10 +99,33 @@ See [storage](storage.md) for local and S3/R2 examples.
 
 | TOML field | Default | Meaning |
 | --- | --- | --- |
+| `logging.level` | `info` | Server batch logs to stderr. Accepts `off`, `error`, `warn`, `info`, `debug` or `trace`. `warn` suppresses successful batch summaries; `debug` also reports batch starts. |
 | `batch.insert_mode` | `bulk` | `bulk` uses an appender and one event INSERT per transaction. `row` uses cached INSERT statements per event for diagnostic comparisons. Both share the same local batching and durability rules. S3 always uses an appender and Parquet output. |
 | `mcp.enabled` | `true` | Serve the authenticated `/mcp` endpoint in the analytics server process. |
 | `mcp.allowed_hosts` | `localhost,127.0.0.1,[::1]` | Allowed HTTP hostnames or host:port authorities for MCP. Add the ingress hostname for remote clients. |
 | `profile` | `false` | Emit one aggregate database timing report to stderr when the worker drains on graceful shutdown. Accepts only `true` or `false`. No event values or credentials are included. Intended for local performance diagnosis. |
+
+Each completed write batch emits one timestamped `INFO batch_saved` line, without
+requiring profiling or a shutdown. For example, with the timestamp omitted:
+
+```text
+INFO batch_saved backend="duckdb" requests=100 received=100 inserted=98 duplicates=2 bytes=243200 queue_ms=10 duration_ms=4
+```
+
+`received` counts validated events admitted to this batch, including duplicates;
+requests rejected before entering the writer are not included. `inserted` counts
+events saved after a successful local transaction commit or S3 publication.
+Local storage skips duplicates; S3 retains every delivery and reports zero
+duplicates. `bytes` measures prepared buffers, not HTTP body size. `queue_ms` is
+the oldest request's wait before writing, including batch collection time;
+`duration_ms` measures the write operation. Both use whole milliseconds.
+
+A failed batch emits one `ERROR batch_failed` line with counts and a fixed
+`stage`, without claiming any events were saved. S3 failures can leave partial
+uploads as described in [storage](storage.md). Logs contain no event values,
+project IDs, SQL, request headers, or credentials. Dependency logs are disabled,
+including at `debug` and `trace`. Existing startup, retention, administration,
+and optional shutdown-profile output is independent of `logging.level`.
 
 ### Batching and overload
 

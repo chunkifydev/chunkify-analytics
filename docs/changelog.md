@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.2.0...v0.3.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **auth:** Only the hash-only project registry format is accepted; previous development registries must be reinitialized.
+
+### Bug Fixes
+
+* **auth:** persist only hashed project credentials ([#37](https://github.com/chunkifydev/chunkify-analytics/issues/37)) ([4469734](https://github.com/chunkifydev/chunkify-analytics/commit/4469734fb2184e353acbed36933aa9e5bf8131a3))
+
 ## [0.2.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.1.0...v0.2.0) (2026-10-29)
 
 

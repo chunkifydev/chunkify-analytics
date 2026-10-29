@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.1.0...v0.2.0) (2026-10-29)
+
+
+### Features
+
+* **api:** add project retention and key creation ([#34](https://github.com/chunkifydev/chunkify-analytics/issues/34)) ([9994b76](https://github.com/chunkifydev/chunkify-analytics/commit/9994b763df76a707da013af22057688772056188))
+
 ## 0.1.0 (2026-10-28)
 
 

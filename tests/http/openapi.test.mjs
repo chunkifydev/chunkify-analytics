@@ -1312,3 +1312,32 @@ for (const separateReads of [false, true]) test(`video reports preserve progress
   assert.equal(seriesCsv[0]["startup_outcomes/started/views"], "6");
   assert.equal(seriesCsv[1]["startup_outcomes/started/ratio"], "");
 });
+
+test("renditions report weights bitrate by watch time and exports every row with a reader key", async t => {
+  const server = await collector(t);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(), video_id: "rendition-video", sequence: 1 };
+  const entries = [
+    {width:1280,height:720,codec:"avc1",bitrate_bps:2000000,frame_rate:30,playing_time_ms:6000},
+    {width:640,height:360,codec:"avc1",bitrate_bps:1000000,frame_rate:30,playing_time_ms:4000},
+  ];
+  for (const event of [start, {...start,event_id:randomUUID(),event_name:"chunkify.video.view_ended",sequence:2,reason:"destroyed",playing_time_ms:10000,rendition_playing_time:entries}]) await server.post("/v1/events", JSON.stringify(event),201);
+  const key = await server.admin(["key","create","default","secret","Renditions","--read-only"]);
+  const headers = {Authorization:`Bearer ${key.key}`};
+  const report = await server.get("/v1/renditions?video_id=rendition-video&limit=1",200,headers);
+  assert.equal(report.average_bitrate_bps,1600000);
+  assert.equal(report.total_renditions,2);
+  assert.equal(report.renditions.length,1);
+  assert.equal(report.renditions[0].playing_time_ratio,.6);
+  const empty = await server.get("/v1/renditions?video_id=missing",200,headers);
+  assert.equal(empty.average_bitrate_bps,null);
+  assert.deepEqual(empty.renditions,[]);
+  await server.get("/v1/renditions",401,{});
+  await server.get("/v1/renditions?group_by=browser_name",400,headers);
+  const request = {resource:"renditions",query:{video_id:"rendition-video"}};
+  assertRequest("/v1/exports","post",request);
+  const link = await assertResponse("/v1/exports","post",await fetch(`${server.url}/v1/exports`,{method:"POST",headers:{...headers,"Content-Type":"application/json"},body:JSON.stringify(request)}),201);
+  const csv = await (await fetch(link.download_url)).text();
+  assert.equal(csv.trim().split(/\r?\n/).length,3);
+  assert.ok(csv.startsWith("width,height,codec,bitrate_bps,frame_rate,views,playing_time_ms,playing_time_ratio"));
+});

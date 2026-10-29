@@ -475,6 +475,36 @@ budget. Show sample counts beside measurements and keep unknown values distinct
 from zero. No additional route or player SDK update is required. Historical
 stored events contribute where their measurements are available.
 
+### Renditions and average bitrate
+
+`GET /v1/renditions` accepts the usual date, video, viewer, view and browser/OS/device
+filters. It uses the same start cohort as summary and quality. Only the final
+cumulative `rendition_playing_time` array contributes, or the latest snapshot if
+there is no final event. A final null stays unknown; snapshots are never added
+together. Historical retained events work without a schema migration.
+
+The response contains `views`, `sample_views`, `total_playing_time_ms`,
+`bitrate_sample_playing_time_ms`, `average_bitrate_bps`, `total_renditions` and
+`renditions`. Renditions are grouped by dimensions, codec, declared bitrate and
+frame rate, then ranked by measured playing time descending. Each row includes
+`views`, `playing_time_ms` and its `playing_time_ratio` across all measured
+rendition time. A view can watch several renditions, so row view counts must not
+be added. Display dimensions as width × height, not an inferred resolution label.
+
+Average bitrate is `sum(bitrate_bps * playing_time_ms) / sum(playing_time_ms)`
+for entries with a known bitrate. It measures the declared bitrate selected by
+the player, not network throughput. Missing bitrate is excluded from that
+average but its watch time still contributes to rendition shares. No measured
+time with a known bitrate returns a null average. Report the sample time beside
+it. Missing rendition measurements can make this report's watch time smaller
+than overall watch time.
+
+`limit` defaults to 100 and accepts 1–1000. It limits ranked rows only, not totals
+or the average. Compare returned row count with `total_renditions` to identify a
+truncated ranking. There is no cursor or grouping parameter. CSV
+`resource=renditions` exports all matching rendition rows. MCP supports the same
+report through `get_metrics` with `kind=renditions`, bounded to 100 ranked rows.
+
 ### Playback attempts and event history
 
 `GET /v1/views` returns `views` and `next_cursor`. Each row describes one attempt
@@ -567,7 +597,7 @@ have a separate budget of 120/minute with a burst of 20, at most 2 queued/runnin
 per project and 8 server-wide. HTTP and MCP share these limits. See
 [configuration](configuration.md#read-and-export-limits) to override them.
 
-Supported resources are `summary`, `quality`, `engagement`, `timeseries`,
+Supported resources are `summary`, `quality`, `renditions`, `engagement`, `timeseries`,
 `videos`, `events`, `views`, `errors` and `dimensions`. `query` uses the resource's
 normal query arguments. `timeseries` accepts `kind` and includes every requested
 UTC bucket, including ranges larger than the normal 1000-bucket query limit.

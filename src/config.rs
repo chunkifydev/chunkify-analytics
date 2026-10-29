@@ -290,7 +290,14 @@ impl Config {
         file.write_all(&serde_json::to_vec_pretty(&keys)?)?;
         file.sync_all()?;
         #[cfg(unix)]
-        fs::File::open(&self.data_dir)?.sync_all()?;
+        if fs::File::open(&self.data_dir)
+            .and_then(|directory| directory.sync_all())
+            .is_err()
+        {
+            eprintln!(
+                "Registry was created, but syncing the directory failed; durability across a system crash is uncertain."
+            );
+        }
         Ok(output)
     }
 
@@ -303,18 +310,8 @@ impl Config {
                 |_| "Cannot read keys.json. Run the init command with this data directory first.",
             )?,
         };
-        let (keys, plaintext) = decode_keys(&bytes)?;
-        if plaintext && let Some(warning) = self.save_keys(&keys)? {
-            eprintln!("{warning}");
-        }
-        if matches!(self.backend, crate::backend::Backend::S3(_)) {
-            // Older installations cached raw default keys. S3 is authoritative.
-            match fs::remove_file(self.data_dir.join("s3-keys.json")) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
+        let keys: Keys = serde_json::from_slice(&bytes)?;
+        crate::projects::validate(&keys.projects)?;
         Ok(keys)
     }
 
@@ -360,33 +357,6 @@ impl Config {
         }
         Ok(None)
     }
-}
-
-fn decode_keys(bytes: &[u8]) -> Result<(Keys, bool)> {
-    // Rewrite the old registry once, preserving its active project hashes.
-    // Raw keys never enter the persistent Keys type.
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct StoredKeys {
-        public_key: Option<String>,
-        secret_key: Option<String>,
-        projects: Option<Vec<crate::projects::Project>>,
-    }
-    let stored: StoredKeys = serde_json::from_slice(bytes)?;
-    let plaintext = stored.public_key.is_some() || stored.secret_key.is_some();
-    let projects = match stored.projects {
-        Some(projects) => projects,
-        None => {
-            let public = stored.public_key.ok_or("Missing project registry")?;
-            let secret = stored.secret_key.ok_or("Missing project registry")?;
-            if public.len() < 32 || secret.len() < 32 || public == secret {
-                return Err("Invalid primary credentials in keys.json".into());
-            }
-            vec![crate::projects::primary_project(&public, &secret)]
-        }
-    };
-    crate::projects::validate(&projects)?;
-    Ok((Keys { projects }, plaintext))
 }
 
 pub(crate) fn validate_origin(origin: &str) -> std::result::Result<(), String> {

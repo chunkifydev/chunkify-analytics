@@ -198,10 +198,6 @@ pub struct Project {
     pub settings: Settings,
 }
 
-pub fn projects(keys: &Keys) -> Vec<Project> {
-    keys.projects.clone()
-}
-
 pub fn primary_project(public_key: &str, secret_key: &str) -> Project {
     Project {
         deleted: false,
@@ -470,12 +466,12 @@ impl Registry {
     }
 
     pub fn new(keys: &Keys, config: &Config) -> Result<Self, String> {
-        let projects = projects(keys);
-        validate(&projects)?;
+        let projects = &keys.projects;
+        validate(projects)?;
         let registry = Self {
             retention: RwLock::new(crate::retention::Policy::new(
                 config.retention_seconds,
-                &projects,
+                projects,
             )),
             projects: RwLock::new(HashMap::new()),
             credentials: RwLock::new(HashMap::new()),
@@ -487,7 +483,7 @@ impl Registry {
     // Preserve existing access state and in-flight admissions when adding projects
     // or rotating keys. New projects receive a share of the installation limits.
     pub fn replace_keys(&self, keys: &Keys, config: &Config) {
-        let next = projects(keys);
+        let next = keys.projects.clone();
         let count = next.iter().filter(|project| !project.deleted).count();
         let mut projects = self.projects.write().expect("projects lock");
         let mut credentials = HashMap::new();
@@ -571,7 +567,7 @@ pub fn apply_command(
     command: &str,
     args: &[String],
 ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
-    let mut list = projects(keys);
+    let mut list = keys.projects.clone();
     // Offline changes apply on startup; live administration clears this after
     // persisting the changes and updating the running registry.
     let mut output = serde_json::json!({"restart_required": true});

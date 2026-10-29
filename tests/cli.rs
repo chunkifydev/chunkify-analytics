@@ -117,60 +117,26 @@ fn initialization_and_primary_rotation_return_secrets_without_persisting_them() 
     std::fs::remove_dir_all(directory).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
-fn older_registries_are_rewritten_without_reviving_revoked_primary_keys() {
+fn initialization_returns_keys_after_a_post_commit_directory_sync_failure() {
+    use std::os::unix::fs::PermissionsExt;
     let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
-    let path = directory.to_str().unwrap();
-    let initialized = run(&["--data-dir", path, "init"]);
-    assert!(initialized.status.success());
-    let initial: serde_json::Value = serde_json::from_slice(&initialized.stdout).unwrap();
-    let file = directory.join("keys.json");
-    let mut legacy = serde_json::json!({
-        "public_key": initial["public_key"], "secret_key": initial["secret_key"],
-    });
-    std::fs::write(&file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    // Creation needs write+execute, but opening the directory for fsync needs read.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let output = run(&["--data-dir", directory.to_str().unwrap(), "init"]);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success());
+    let generated: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(
-        run(&["--data-dir", path, "project", "list"])
-            .status
-            .success()
+        generated["secret_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("ck_secret_")
     );
-    let converted: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    assert!(converted.get("public_key").is_none());
-    assert!(converted.get("secret_key").is_none());
-    let keys = converted["projects"][0]["keys"].as_array().unwrap();
-    assert_eq!(keys.len(), 2);
-    assert!(
-        keys.iter()
-            .all(|key| key["hash"].as_str().unwrap().len() == 64)
-    );
-    assert!(
-        run(&[
-            "--data-dir",
-            path,
-            "key",
-            "revoke",
-            "default",
-            "primary-secret"
-        ])
-        .status
-        .success()
-    );
-    let revoked: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
-    legacy["projects"] = revoked["projects"].clone();
-    std::fs::write(&file, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    assert!(
-        run(&["--data-dir", path, "project", "list"])
-            .status
-            .success()
-    );
-    let cleaned = std::fs::read_to_string(&file).unwrap();
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&cleaned).unwrap(),
-        revoked
-    );
-    assert!(!cleaned.contains(initial["secret_key"].as_str().unwrap()));
+    let saved = std::fs::read_to_string(directory.join("keys.json")).unwrap();
+    assert!(!saved.contains(generated["secret_key"].as_str().unwrap()));
     std::fs::remove_dir_all(directory).unwrap();
 }
 

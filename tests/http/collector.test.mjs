@@ -36,7 +36,7 @@ async function runCommand(args, env) {
   return { code, stdout, stderr };
 }
 
-async function collector(t, settings = {}, initialBinary = binary) {
+async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
@@ -47,7 +47,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
     "server.allowed_origins": "https://player.example", "server.store_ip": "true",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);
-  const init = spawn(initialBinary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
+  const init = spawn(binary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
   let errors = "";
   let initialized = "";
   init.stdout.on("data", chunk => { initialized += chunk; });
@@ -67,7 +67,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
       }
       return result;
     },
-    async reloadKeys() {
+    async assertStoredKeyHashes() {
       const stored = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
       assert.equal(stored.public_key, undefined);
       assert.equal(stored.secret_key, undefined);
@@ -114,7 +114,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
     },
 
   };
-  await server.start(initialBinary);
+  await server.start();
   return server;
 }
 
@@ -577,7 +577,7 @@ test("invalid IP configuration fails at startup without changing events or crede
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, keys);
   await server.start(binary, { "server.trusted_proxies": " ::ffff:127.0.0.1 , 2001:db8::/32 " });
   assert.deepEqual(await server.get("/v1/events"), before);
@@ -707,14 +707,14 @@ test("offline key rotation returns each credential once without persisting secre
   const busy = await server.command(["project", "rename", "default", "Renamed"]);
   assert.notEqual(busy.code, 0);
   assert.match(busy.stderr, /Stop the collector/);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, originalKeys);
   await server.stop();
   const invalid = await server.command(["key", "rotate-primary", "unknown"]);
   assert.notEqual(invalid.code, 0);
   const ingest = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(ingest.code, 0, ingest.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.notEqual(server.keys.public_key, originalKeys.public_key);
   assert.equal(server.keys.secret_key, originalKeys.secret_key);
   assert.ok(server.keys.public_key.length >= 32);
@@ -738,7 +738,7 @@ test("offline key rotation returns each credential once without persisting secre
   await server.stop("SIGKILL");
   const read = await server.command(["key", "rotate-primary", "secret"]);
   assert.equal(read.code, 0, read.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.notEqual(server.keys.secret_key, originalKeys.secret_key);
   assert.equal(server.keys.public_key, rotatedIngest);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
@@ -770,7 +770,7 @@ test("a stopped data-directory backup restores events, summaries and keys", asyn
   // Changes made after the backup must not appear in the restored installation.
   const rotation = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(rotation.code, 0, rotation.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.notEqual(server.keys.public_key, originalKeys.public_key);
   await server.start();
   await server.send(sdkEvents("after-backup")[0]);
@@ -808,7 +808,7 @@ test("invalid retention settings fail clearly without changing stored events or 
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, keys);
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), before);
@@ -939,44 +939,6 @@ test("ingestion rate limits reject excess requests without storing more events",
   }
   assert.equal((await server.get("/v1/events")).events.length, 1);
   assert.deepEqual(await (await fetch(`${server.url}/healthz`)).json(), { status: "ok" });
-});
-
-test("upgrading a previous collector preserves events and keys and accepts new events", {
-  skip: !process.env.CHUNKIFY_PREVIOUS_BINARY && "Set CHUNKIFY_PREVIOUS_BINARY to test a previous executable",
-}, async (t) => {
-  const server = await collector(t, {}, process.env.CHUNKIFY_PREVIOUS_BINARY);
-  const events = sdkPlayback(t).map((event, index) => index % 2 ? event : {
-    ...event, browser_context: { schema_version: 1, browser_name: "Firefox", device_type: "desktop" },
-  });
-  for (const event of events) await server.send(event);
-  const original = await server.get("/v1/events");
-  const beforePage = await server.get("/v1/events?limit=2");
-  const expected = structuredClone(original);
-  for (const record of expected.events) {
-    record.project_id ??= "default";
-    record.ingest_key_id ??= null;
-    if (!record.event_context && record.event.browser_context) record.event_context = record.event.browser_context;
-  }
-  const summary = await server.get("/v1/summary");
-  await server.stop("SIGKILL");
-  await server.start();
-  await server.stop("SIGKILL");
-  await server.start();
-  assert.deepEqual(await server.get("/v1/events"), expected);
-  const afterPage = await server.get(`/v1/events?limit=2&cursor=${encodeURIComponent(beforePage.next_cursor)}`);
-  assert.deepEqual(afterPage.events, expected.events.slice(2, 4), "pre-upgrade cursors retain their event ordering");
-  assert.deepEqual(await server.get("/v1/summary"), summary);
-  for (const event of events) await server.send(event);
-  assert.deepEqual(await server.get("/v1/events"), expected, "migration must not invent IP context for old events, even on retry");
-  const added = sdkEvents("after-upgrade")[0];
-  await server.send(added);
-  await server.stop("SIGKILL");
-  await server.start();
-  const upgraded = (await server.get("/v1/events")).events;
-  assert.deepEqual(upgraded.map((record) => record.event), [...events, added]);
-  assert.deepEqual(upgraded.slice(0, events.length), expected.events);
-  assert.equal(upgraded.at(-1).event_context.client_ip, "127.0.0.1");
-  assert.equal((await server.get("/v1/summary")).views, 2);
 });
 
 test("separate reader serves committed SDK events with stable pagination", async (t) => {
@@ -1365,7 +1327,7 @@ test("live primary rotation and revocation persist only hashes", async (t) => {
     const result = await server.command(["key", "rotate-primary", kind]);
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).restart_required, false);
-    await server.reloadKeys();
+    await server.assertStoredKeyHashes();
     for (const secret of Object.values(server.keys)) assert.ok(!(await readFile(join(server.directory, "keys.json"), "utf8")).includes(secret));
   }
   assert.equal((await projectPost(server, original.public_key, sdkEvents()[0])).status, 401);
@@ -1376,7 +1338,7 @@ test("live primary rotation and revocation persist only hashes", async (t) => {
   assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 401);
   const restored = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(restored.code, 0, restored.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   await server.send(sdkEvents()[0]);
   assert.equal((await server.get("/v1/summary")).views, 2);
 });
@@ -1647,7 +1609,7 @@ test("admin rotation is disabled without an admin key and preserves credentials 
   const recovered = await assertResponse(rotatePath, "post", await rotate(adminKey), 200);
   assert.equal((await projectApi(server, "/keys", { token: recovered.key })).status, 200);
   server.keys.secret_key = recovered.key;
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   await server.stop();
   await server.start(binary, { CHUNKIFY_ADMIN_KEY: "" });
   await assertResponse(listPath, "get", await adminProjectApi(server, "default", "/keys", { token: adminKey }), 404);

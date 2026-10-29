@@ -32,6 +32,9 @@ test('native demo seeds once, receives player events, resumes a seed and survive
     assert.equal(persisted.includes(config.ingestKey), false);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=demo')).views, 268);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=player')).views, 0);
+    await assert.rejects(launchDemo({ dataDir: dir, port: 0, open: false, log: quiet }), /Collector stopped/);
+    assert.equal((await json(demo.dashboardUrl, '/api/summary?project=demo')).views, 268);
+    assert.equal((await json(demo.dashboardUrl, '/api/player-config')).ingestKey, config.ingestKey);
     const event = { ...buildDemoEvents()[0], video_id: 'real-player-test' };
     for (let i = 0; i < 2; i++) {
       const response = await fetch(config.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': config.ingestKey, Origin: demo.dashboardUrl }, body: JSON.stringify(event) });

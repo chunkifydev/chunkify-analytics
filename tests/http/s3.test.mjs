@@ -135,8 +135,6 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   await app.command(["init"]);
   const cache = join(app.directory(), "state", "s3-keys.json");
   await assert.rejects(stat(cache), { code: "ENOENT" });
-  // A cache left by an older release is removed instead of used for auth.
-  await writeFile(cache, JSON.stringify({ public_key: "stale-public", secret_key: "stale-secret" }));
   await app.start();
   const created = await fetch(`${app.url}/v1/projects`, { method: "POST", headers: {
     authorization: `Bearer ${adminKey}`, "content-type": "application/json" },

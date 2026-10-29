@@ -87,8 +87,7 @@ fn execute(
         };
         let warning = config.save_keys(&next)?;
         if let Some(policy) = retention.as_mut() {
-            **policy =
-                crate::retention::Policy::new(config.retention_seconds, &projects::projects(&next));
+            **policy = crate::retention::Policy::new(config.retention_seconds, &next.projects);
         }
         if let Some(registry) = registry {
             if request.command == "project-update" {
@@ -156,7 +155,8 @@ impl Controller {
         self.authorize_admin(secret)?;
         projects::validate_retention(retention_seconds).map_err(ApiError::bad)?;
         let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
-        if projects::projects(&keys)
+        if keys
+            .projects
             .iter()
             .filter(|project| !project.deleted)
             .count()
@@ -228,8 +228,9 @@ impl Controller {
         action: ProjectAction,
     ) -> std::result::Result<Value, crate::api::ApiError> {
         use crate::api::ApiError;
-        let project = projects::projects(keys)
-            .into_iter()
+        let project = keys
+            .projects
+            .iter()
             .find(|project| project.id == id && !project.deleted)
             .ok_or_else(|| {
                 ApiError::new(axum::http::StatusCode::NOT_FOUND, "Unknown project".into())

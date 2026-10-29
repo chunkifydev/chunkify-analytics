@@ -75,12 +75,6 @@ Each command returns JSON with the replacement `key`, its `key_id`, permission
 and `restart_required`. Save that key and update clients. The secret is returned
 only by the command that generates it; stored events are unchanged.
 
-On first access, registries from older releases are rewritten with hashes only,
-preserving project IDs, active keys and settings. S3 mode removes the old
-`s3-keys.json` cache after reading the authoritative registry successfully.
-Historical backups or S3 object versions are not rewritten. Rotate credentials
-if those older copies were accessible to others.
-
 ## Project limits and origins
 
 Every project allows the shared TOML origins plus its own additional origins.

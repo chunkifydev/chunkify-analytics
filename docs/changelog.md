@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.3.0...v0.4.0) (2026-10-29)
+
+
+### Features
+
+* **logging:** report ingestion batch outcomes ([#39](https://github.com/chunkifydev/chunkify-analytics/issues/39)) ([df3cc7b](https://github.com/chunkifydev/chunkify-analytics/commit/df3cc7b7d2f7cde1692c79382686221c5603ce39))
+
 ## [0.3.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.2.0...v0.3.0) (2026-10-29)
 
 

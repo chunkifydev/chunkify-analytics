@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.4.0...v0.5.0) (2026-10-29)
+
+
+### Features
+
+* **analytics:** add rendition watch-time and bitrate reports ([#41](https://github.com/chunkifydev/chunkify-analytics/issues/41)) ([d0ebde6](https://github.com/chunkifydev/chunkify-analytics/commit/d0ebde6664ac18b74837c88aa8918da49498c040))
+
 ## [0.4.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.3.0...v0.4.0) (2026-10-29)
 
 

@@ -39,7 +39,7 @@ After updating source, rerun `npm ci` and `cargo build --locked` before launchin
    time after five seconds of playback.
 4. Press **Finish view**, then refresh to inspect the final result.
 
-The player already has its public key. Secret keys stay on the dashboard backend.
+The player already has its public key. Secret keys stay in dashboard memory. The demo rotates its keys on each launch; saved demo metadata contains no raw keys.
 Player libraries load from jsDelivr and need internet access. The video must allow
 browser access. Rendition measurements can be unavailable with MP4 or native HLS.
 

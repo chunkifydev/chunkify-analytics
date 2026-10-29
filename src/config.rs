@@ -33,11 +33,9 @@ pub struct Config {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Keys {
-    pub public_key: String,
-    pub secret_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projects: Option<Vec<crate::projects::Project>>,
+    pub projects: Vec<crate::projects::Project>,
 }
 
 impl Config {
@@ -259,14 +257,19 @@ impl Config {
         Ok(())
     }
 
-    pub fn initialize(&self) -> Result<()> {
+    pub fn initialize(&self) -> Result<serde_json::Value> {
         self.create_data_directory()?;
         let _lock = self.lock()?;
+        let public_key = crate::projects::generate_key(crate::projects::Permission::Public);
+        let secret_key = crate::projects::generate_key(crate::projects::Permission::Secret);
         let keys = Keys {
-            projects: None,
-            public_key: crate::projects::generate_key(crate::projects::Permission::Public),
-            secret_key: crate::projects::generate_key(crate::projects::Permission::Secret),
+            projects: vec![crate::projects::primary_project(&public_key, &secret_key)],
         };
+        let output = serde_json::json!({
+            "project_id": crate::projects::DEFAULT_PROJECT,
+            "public_key": public_key,
+            "secret_key": secret_key,
+        });
         if let crate::backend::Backend::S3(remote) = &self.backend {
             if remote.read_keys()?.is_some() {
                 return Err("S3 installation is already initialized; run serve to use it".into());
@@ -274,11 +277,7 @@ impl Config {
             if let Some(warning) = self.save_keys(&keys)? {
                 eprintln!("{warning}");
             }
-            println!(
-                "Initialized S3 storage. Keys are cached in {}.",
-                self.key_cache_path().display()
-            );
-            return Ok(());
+            return Ok(output);
         }
         let mut options = fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -291,47 +290,35 @@ impl Config {
         file.write_all(&serde_json::to_vec_pretty(&keys)?)?;
         file.sync_all()?;
         #[cfg(unix)]
-        fs::File::open(&self.data_dir)?.sync_all()?;
-        println!(
-            "Initialized {}. Keys are in keys.json.",
-            self.data_dir.display()
-        );
-        Ok(())
-    }
-
-    pub fn key_cache_path(&self) -> PathBuf {
-        self.data_dir
-            .join(if matches!(self.backend, crate::backend::Backend::S3(_)) {
-                "s3-keys.json"
-            } else {
-                "keys.json"
-            })
+        if fs::File::open(&self.data_dir)
+            .and_then(|directory| directory.sync_all())
+            .is_err()
+        {
+            eprintln!(
+                "Registry was created, but syncing the directory failed; durability across a system crash is uncertain."
+            );
+        }
+        Ok(output)
     }
 
     pub fn keys(&self) -> Result<Keys> {
-        if let crate::backend::Backend::S3(remote) = &self.backend {
-            let bytes = remote
+        let bytes = match &self.backend {
+            crate::backend::Backend::S3(remote) => remote
                 .read_keys()?
-                .ok_or("S3 installation is not initialized; run init first")?;
-            let keys = decode_keys(&bytes)?;
-            let _ = self.save_local_keys(&keys);
-            return Ok(keys);
-        }
-        let bytes = fs::read(self.data_dir.join("keys.json")).map_err(
-            |_| "Cannot read keys.json. Run the init command with this data directory first.",
-        )?;
-        decode_keys(&bytes)
+                .ok_or("S3 installation is not initialized; run init first")?,
+            _ => fs::read(self.data_dir.join("keys.json")).map_err(
+                |_| "Cannot read keys.json. Run the init command with this data directory first.",
+            )?,
+        };
+        let keys: Keys = serde_json::from_slice(&bytes)?;
+        crate::projects::validate(&keys.projects)?;
+        Ok(keys)
     }
 
     pub(crate) fn save_keys(&self, keys: &Keys) -> Result<Option<String>> {
         if let crate::backend::Backend::S3(remote) = &self.backend {
             remote.write_keys(&serde_json::to_vec_pretty(keys)?)?;
-            return Ok(self.save_local_keys(keys).unwrap_or_else(|_| {
-                Some(
-                    "Keys were saved to S3, but the local credential cache could not be updated."
-                        .into(),
-                )
-            }));
+            return Ok(None);
         }
         self.save_local_keys(keys)
     }
@@ -352,7 +339,7 @@ impl Config {
             file.write_all(&serde_json::to_vec_pretty(&keys)?)?;
             file.sync_all()?;
             drop(file);
-            fs::rename(&temporary, self.key_cache_path())?;
+            fs::rename(&temporary, self.data_dir.join("keys.json"))?;
             Ok(())
         })();
         if result.is_err() {
@@ -370,22 +357,6 @@ impl Config {
         }
         Ok(None)
     }
-}
-
-pub(crate) fn decode_keys(bytes: &[u8]) -> Result<Keys> {
-    let keys: Keys = serde_json::from_slice(bytes)?;
-    if keys.public_key.len() < 32
-        || keys.secret_key.len() < 32
-        || keys.public_key == keys.secret_key
-    {
-        return Err(
-            "Invalid keys.json: two distinct keys of at least 32 characters are required.".into(),
-        );
-    }
-    if let Some(projects) = &keys.projects {
-        crate::projects::validate(projects)?;
-    }
-    Ok(keys)
 }
 
 pub(crate) fn validate_origin(origin: &str) -> std::result::Result<(), String> {

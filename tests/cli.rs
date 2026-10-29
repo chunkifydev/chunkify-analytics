@@ -84,6 +84,63 @@ fn data_directory_flag_is_global_and_controls_initialization() {
 }
 
 #[test]
+fn initialization_and_primary_rotation_return_secrets_without_persisting_them() {
+    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
+    let path = directory.to_str().unwrap();
+    let initialized = run(&["--data-dir", path, "init"]);
+    assert!(initialized.status.success());
+    let initial: serde_json::Value = serde_json::from_slice(&initialized.stdout).unwrap();
+    let public = initial["public_key"].as_str().unwrap();
+    let secret = initial["secret_key"].as_str().unwrap();
+    for kind in ["public", "secret"] {
+        let rotated = run(&["--data-dir", path, "key", "rotate-primary", kind]);
+        assert!(rotated.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&rotated.stdout).unwrap();
+        let raw = value["key"].as_str().unwrap();
+        assert_ne!(raw, public);
+        assert_ne!(raw, secret);
+        assert_eq!(value["key_id"], format!("primary-{kind}"));
+        let stored = std::fs::read_to_string(directory.join("keys.json")).unwrap();
+        for key in [public, secret, raw] {
+            assert!(!stored.contains(key));
+            assert!(!String::from_utf8_lossy(&rotated.stderr).contains(key));
+        }
+        let registry: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(registry.as_object().unwrap().len(), 1);
+        assert_eq!(registry["projects"][0]["keys"].as_array().unwrap().len(), 2);
+    }
+    let before = std::fs::read(directory.join("keys.json")).unwrap();
+    let repeated = run(&["--data-dir", path, "init"]);
+    assert!(!repeated.status.success());
+    assert!(repeated.stdout.is_empty());
+    assert_eq!(std::fs::read(directory.join("keys.json")).unwrap(), before);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn initialization_returns_keys_after_a_post_commit_directory_sync_failure() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    // Creation needs write+execute, but opening the directory for fsync needs read.
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300)).unwrap();
+    let output = run(&["--data-dir", directory.to_str().unwrap(), "init"]);
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success());
+    let generated: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        generated["secret_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("ck_secret_")
+    );
+    let saved = std::fs::read_to_string(directory.join("keys.json")).unwrap();
+    assert!(!saved.contains(generated["secret_key"].as_str().unwrap()));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
     let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
     let path = directory.to_str().unwrap();

@@ -34,7 +34,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let config = config::Config::load_with(&settings, cli.data_dir.as_deref(), bind)?;
     match cli.command {
-        cli::Command::Init => config.initialize(),
+        cli::Command::Init => {
+            println!("{}", config.initialize()?);
+            Ok(())
+        }
         cli::Command::Config {
             command: cli::ConfigCommand::Check,
         } => {

@@ -23,10 +23,18 @@ test('native demo seeds once, receives player events, resumes a seed and survive
     const config = await json(demo.dashboardUrl, '/api/player-config');
     assert.equal(config.endpoint, demo.collectorUrl + '/v1/events');
     const publicJson = JSON.stringify(config) + JSON.stringify(await json(demo.dashboardUrl, '/api/projects'));
-    for (const project of Object.values(state.projects)) assert.equal(publicJson.includes(project.secret_key), false);
-    assert.equal(publicJson.includes(state.projects.demo.public_key), false);
+    for (const project of Object.values(state.projects)) {
+      assert.equal(project.secret_key, undefined);
+      assert.equal(project.public_key, undefined);
+    }
+    assert.equal(publicJson.includes('ck_secret_'), false);
+    const persisted = await readFile(path.join(dir, 'demo.json'), 'utf8');
+    assert.equal(persisted.includes(config.ingestKey), false);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=demo')).views, 268);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=player')).views, 0);
+    await assert.rejects(launchDemo({ dataDir: dir, port: 0, open: false, log: quiet }), /Collector stopped/);
+    assert.equal((await json(demo.dashboardUrl, '/api/summary?project=demo')).views, 268);
+    assert.equal((await json(demo.dashboardUrl, '/api/player-config')).ingestKey, config.ingestKey);
     const event = { ...buildDemoEvents()[0], video_id: 'real-player-test' };
     for (let i = 0; i < 2; i++) {
       const response = await fetch(config.endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': config.ingestKey, Origin: demo.dashboardUrl }, body: JSON.stringify(event) });
@@ -48,7 +56,8 @@ test('native demo seeds once, receives player events, resumes a seed and survive
     demo = await launchDemo({ dataDir: dir, port: 0, open: false, log: quiet });
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=demo')).views, 268);
     assert.equal((await json(demo.dashboardUrl, '/api/summary?project=player')).views, 1);
-    assert.equal((await json(demo.dashboardUrl, '/api/player-config')).ingestKey, config.ingestKey);
+    assert.notEqual((await json(demo.dashboardUrl, '/api/player-config')).ingestKey, config.ingestKey);
+    assert.equal((await fetch(demo.collectorUrl + '/v1/events', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Chunkify-Ingest-Key': config.ingestKey }, body: JSON.stringify(event) })).status, 401);
     const saved = JSON.parse(await readFile(path.join(dir, 'demo.json'), 'utf8'));
     assert.equal(saved.seedDate, state.seedDate); assert.equal(saved.seeded, true);
     await demo.stop(); demo = null;

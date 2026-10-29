@@ -22,13 +22,11 @@ Tests start temporary analytics servers and use the analytics SDK and MCP client
 No separate analytics server installation is required.
 
 `CHUNKIFY_BINARY` selects another executable for the Node integration tests.
-The optional database upgrade check requires `CHUNKIFY_PREVIOUS_BINARY` and is
-skipped when it is absent.
 
 ## S3 integration checks
 
 The S3 tests require an existing disposable bucket and an S3-compatible endpoint.
-They store test prefixes containing events and private test credentials. Use an
+They store test prefixes containing events and test credential hashes. Use an
 isolated service; remove its data after the run. For example, with LocalStack:
 
 ```sh

@@ -58,9 +58,11 @@ Changes take effect before a successful live command returns. Requests already
 authenticated may finish. If a command times out, check `project list` before
 retrying. If you lose a new key's secret, rotate or revoke it.
 
-The initial default credentials remain available in the private key registry:
-`data_dir/keys.json` for local storage or `data_dir/s3-keys.json` for S3. S3 keeps
-the registry in the bucket as well. Do not edit it while the analytics server runs.
+All project credentials, including the default project's keys, are stored only
+as hashes. The registry contains project IDs, settings and key hashes in
+`data_dir/keys.json` for local storage or `<prefix>keys.json` in S3. S3 mode does
+not write a local credential cache. Do not edit the registry while the server runs.
+`init` returns the default keys once as JSON; save them in your secret manager.
 
 To replace a default primary credential:
 
@@ -69,8 +71,9 @@ chunkify-analytics key rotate-primary public
 chunkify-analytics key rotate-primary secret
 ```
 
-Read the replacement from the key registry, then update clients. These commands
-do not print the secret or change stored events.
+Each command returns JSON with the replacement `key`, its `key_id`, permission
+and `restart_required`. Save that key and update clients. The secret is returned
+only by the command that generates it; stored events are unchanged.
 
 ## Project limits and origins
 

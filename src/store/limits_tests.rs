@@ -14,9 +14,10 @@ async fn cancelled_clients_keep_database_concurrency_permits_until_work_finishes
         let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();
         let config = crate::config::Config::load_with(&settings, Some(&directory), None).unwrap();
         let keys = crate::config::Keys {
-            public_key: "test-public".into(),
-            secret_key: "test-secret".into(),
-            projects: None,
+            projects: vec![crate::projects::primary_project(
+                "test-public",
+                "test-secret",
+            )],
         };
         let projects = Arc::new(crate::projects::Registry::new(&keys, &config).unwrap());
         let (store, worker) = Store::from_config(&config, projects).unwrap();

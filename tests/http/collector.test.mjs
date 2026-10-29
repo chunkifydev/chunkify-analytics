@@ -1,7 +1,7 @@
 import { sdkDist } from "./sdk-path.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -36,7 +36,7 @@ async function runCommand(args, env) {
   return { code, stdout, stderr };
 }
 
-async function collector(t, settings = {}, initialBinary = binary) {
+async function collector(t, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-collector-test-"));
   let server;
   t.after(async () => { await server?.stop(); await rm(directory, { recursive: true, force: true }); });
@@ -47,19 +47,35 @@ async function collector(t, settings = {}, initialBinary = binary) {
     "server.allowed_origins": "https://player.example", "server.store_ip": "true",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);
-  const init = spawn(initialBinary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
+  const init = spawn(binary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
   let errors = "";
+  let initialized = "";
+  init.stdout.on("data", chunk => { initialized += chunk; });
   init.stderr.on("data", (chunk) => { errors += chunk; });
-  assert.equal((await once(init, "exit"))[0], 0, errors);
-  const keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+  assert.equal((await once(init, "close"))[0], 0, errors);
+  const {public_key, secret_key} = JSON.parse(initialized);
+  const keys = {public_key, secret_key};
   let child;
   let exited;
   server = {
     directory,
     keys,
-    command: (args, overrides = {}) => runCommand(args, { ...env, ...overrides }),
-    async reloadKeys() {
-      Object.assign(keys, JSON.parse(await readFile(join(directory, "keys.json"), "utf8")));
+    async command(args, overrides = {}) {
+      const result = await runCommand(args, { ...env, ...overrides });
+      if (result.code === 0 && args[0] === "key" && args[1] === "rotate-primary") {
+        keys[`${args[2]}_key`] = JSON.parse(result.stdout).key;
+      }
+      return result;
+    },
+    async assertStoredKeyHashes() {
+      const stored = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+      assert.equal(stored.public_key, undefined);
+      assert.equal(stored.secret_key, undefined);
+      const primary = stored.projects.find(project => project.id === "default");
+      for (const kind of ["public", "secret"]) {
+        const credential = primary.keys.find(key => key.id === `primary-${kind}`);
+        if (credential) assert.equal(credential.hash, createHash("sha256").update(keys[`${kind}_key`]).digest("hex"));
+      }
     },
     async start(executable = binary, overrides = {}) {
       await writeConfig(directory, { ...env, ...overrides });
@@ -98,7 +114,7 @@ async function collector(t, settings = {}, initialBinary = binary) {
     },
 
   };
-  await server.start(initialBinary);
+  await server.start();
   return server;
 }
 
@@ -561,7 +577,7 @@ test("invalid IP configuration fails at startup without changing events or crede
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, keys);
   await server.start(binary, { "server.trusted_proxies": " ::ffff:127.0.0.1 , 2001:db8::/32 " });
   assert.deepEqual(await server.get("/v1/events"), before);
@@ -682,7 +698,7 @@ test("viewer deletion is not a supported command", async (t) => {
   assert.match(result.stderr, /unrecognized subcommand/);
 });
 
-test("offline key rotation replaces each credential independently without exposing keys or losing data", async (t) => {
+test("offline key rotation returns each credential once without persisting secrets or losing data", async (t) => {
   const server = await collector(t);
   const originalKeys = { ...server.keys };
   const event = sdkEvents()[0];
@@ -691,19 +707,20 @@ test("offline key rotation replaces each credential independently without exposi
   const busy = await server.command(["project", "rename", "default", "Renamed"]);
   assert.notEqual(busy.code, 0);
   assert.match(busy.stderr, /Stop the collector/);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, originalKeys);
   await server.stop();
   const invalid = await server.command(["key", "rotate-primary", "unknown"]);
   assert.notEqual(invalid.code, 0);
   const ingest = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(ingest.code, 0, ingest.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.notEqual(server.keys.public_key, originalKeys.public_key);
   assert.equal(server.keys.secret_key, originalKeys.secret_key);
   assert.ok(server.keys.public_key.length >= 32);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
-    assert.equal(`${ingest.stdout}${ingest.stderr}`.includes(key), false);
+    assert.equal((await readFile(join(server.directory, "keys.json"), "utf8")).includes(key), false);
+    assert.equal(ingest.stderr.includes(key), false);
   }
   if (process.platform !== "win32") {
     assert.equal((await stat(join(server.directory, "keys.json"))).mode & 0o777, 0o600);
@@ -721,11 +738,12 @@ test("offline key rotation replaces each credential independently without exposi
   await server.stop("SIGKILL");
   const read = await server.command(["key", "rotate-primary", "secret"]);
   assert.equal(read.code, 0, read.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.notEqual(server.keys.secret_key, originalKeys.secret_key);
   assert.equal(server.keys.public_key, rotatedIngest);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
-    assert.equal(`${read.stdout}${read.stderr}`.includes(key), false);
+    assert.equal((await readFile(join(server.directory, "keys.json"), "utf8")).includes(key), false);
+    assert.equal(read.stderr.includes(key), false);
   }
   await server.start();
   const deniedRead = await fetch(`${server.url}/v1/events`, {
@@ -752,7 +770,7 @@ test("a stopped data-directory backup restores events, summaries and keys", asyn
   // Changes made after the backup must not appear in the restored installation.
   const rotation = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(rotation.code, 0, rotation.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.notEqual(server.keys.public_key, originalKeys.public_key);
   await server.start();
   await server.send(sdkEvents("after-backup")[0]);
@@ -760,8 +778,9 @@ test("a stopped data-directory backup restores events, summaries and keys", asyn
   const restored = join(backups, "restored");
   await cp(join(backups, "snapshot"), restored, { recursive: true, force: false, errorOnExist: true });
   const restoredKeys = JSON.parse(await readFile(join(restored, "keys.json"), "utf8"));
-  assert.deepEqual(restoredKeys, originalKeys);
-  Object.assign(server.keys, restoredKeys);
+  assert.equal(restoredKeys.public_key, undefined);
+  assert.equal(restoredKeys.secret_key, undefined);
+  Object.assign(server.keys, originalKeys);
   await server.start(binary, { "data_dir": restored });
   assert.deepEqual(await server.get("/v1/events"), originalEvents);
   assert.deepEqual(await server.get("/v1/summary"), originalSummary);
@@ -789,7 +808,7 @@ test("invalid retention settings fail clearly without changing stored events or 
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
   }
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, keys);
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), before);
@@ -920,44 +939,6 @@ test("ingestion rate limits reject excess requests without storing more events",
   }
   assert.equal((await server.get("/v1/events")).events.length, 1);
   assert.deepEqual(await (await fetch(`${server.url}/healthz`)).json(), { status: "ok" });
-});
-
-test("upgrading a previous collector preserves events and keys and accepts new events", {
-  skip: !process.env.CHUNKIFY_PREVIOUS_BINARY && "Set CHUNKIFY_PREVIOUS_BINARY to test a previous executable",
-}, async (t) => {
-  const server = await collector(t, {}, process.env.CHUNKIFY_PREVIOUS_BINARY);
-  const events = sdkPlayback(t).map((event, index) => index % 2 ? event : {
-    ...event, browser_context: { schema_version: 1, browser_name: "Firefox", device_type: "desktop" },
-  });
-  for (const event of events) await server.send(event);
-  const original = await server.get("/v1/events");
-  const beforePage = await server.get("/v1/events?limit=2");
-  const expected = structuredClone(original);
-  for (const record of expected.events) {
-    record.project_id ??= "default";
-    record.ingest_key_id ??= null;
-    if (!record.event_context && record.event.browser_context) record.event_context = record.event.browser_context;
-  }
-  const summary = await server.get("/v1/summary");
-  await server.stop("SIGKILL");
-  await server.start();
-  await server.stop("SIGKILL");
-  await server.start();
-  assert.deepEqual(await server.get("/v1/events"), expected);
-  const afterPage = await server.get(`/v1/events?limit=2&cursor=${encodeURIComponent(beforePage.next_cursor)}`);
-  assert.deepEqual(afterPage.events, expected.events.slice(2, 4), "pre-upgrade cursors retain their event ordering");
-  assert.deepEqual(await server.get("/v1/summary"), summary);
-  for (const event of events) await server.send(event);
-  assert.deepEqual(await server.get("/v1/events"), expected, "migration must not invent IP context for old events, even on retry");
-  const added = sdkEvents("after-upgrade")[0];
-  await server.send(added);
-  await server.stop("SIGKILL");
-  await server.start();
-  const upgraded = (await server.get("/v1/events")).events;
-  assert.deepEqual(upgraded.map((record) => record.event), [...events, added]);
-  assert.deepEqual(upgraded.slice(0, events.length), expected.events);
-  assert.equal(upgraded.at(-1).event_context.client_ip, "127.0.0.1");
-  assert.equal((await server.get("/v1/summary")).views, 2);
 });
 
 test("separate reader serves committed SDK events with stable pagination", async (t) => {
@@ -1339,15 +1320,15 @@ test("live administration serializes concurrent commands and rejects invalid cha
   assert.equal((await projectCommand(server, ["project", "list"]))[0].keys.length, 2);
 });
 
-test("live primary rotation and revocation keep legacy exports consistent", async (t) => {
+test("live primary rotation and revocation persist only hashes", async (t) => {
   const server = await collector(t);
   const original = { ...server.keys };
   for (const kind of ["public", "secret"]) {
     const result = await server.command(["key", "rotate-primary", kind]);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /new key is active/);
-    await server.reloadKeys();
-    for (const secret of Object.values(server.keys)) assert.ok(!result.stdout.includes(secret));
+    assert.equal(JSON.parse(result.stdout).restart_required, false);
+    await server.assertStoredKeyHashes();
+    for (const secret of Object.values(server.keys)) assert.ok(!(await readFile(join(server.directory, "keys.json"), "utf8")).includes(secret));
   }
   assert.equal((await projectPost(server, original.public_key, sdkEvents()[0])).status, 401);
   assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.secret_key}` } })).status, 401);
@@ -1357,7 +1338,7 @@ test("live primary rotation and revocation keep legacy exports consistent", asyn
   assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 401);
   const restored = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(restored.code, 0, restored.stderr);
-  await server.reloadKeys();
+  await server.assertStoredKeyHashes();
   await server.send(sdkEvents()[0]);
   assert.equal((await server.get("/v1/summary")).views, 2);
 });
@@ -1627,8 +1608,8 @@ test("admin rotation is disabled without an admin key and preserves credentials 
   assert.equal((await projectApi(server, "/keys")).status, 200);
   const recovered = await assertResponse(rotatePath, "post", await rotate(adminKey), 200);
   assert.equal((await projectApi(server, "/keys", { token: recovered.key })).status, 200);
-  await server.reloadKeys();
-  assert.equal(server.keys.secret_key, recovered.key, "default primary credential stays consistent");
+  server.keys.secret_key = recovered.key;
+  await server.assertStoredKeyHashes();
   await server.stop();
   await server.start(binary, { CHUNKIFY_ADMIN_KEY: "" });
   await assertResponse(listPath, "get", await adminProjectApi(server, "default", "/keys", { token: adminKey }), 404);

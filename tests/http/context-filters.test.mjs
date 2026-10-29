@@ -70,8 +70,8 @@ async function collector(t, separateReads) {
     try { await server.stop(); } finally { await rm(directory, { recursive: true, force: true }); }
   });
   await writeConfig(directory, env);
-  await command(binary, ["init"], { env: collectorEnvironment(env), cwd: directory, timeout: 10000 });
-  server.keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+  const initialized = await command(binary, ["init"], { env: collectorEnvironment(env), cwd: directory, timeout: 10000 });
+  server.keys = JSON.parse(initialized.stdout);
   await server.start();
   return server;
 }

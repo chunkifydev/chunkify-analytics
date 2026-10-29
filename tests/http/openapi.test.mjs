@@ -35,10 +35,11 @@ async function collector(t, settings = {}) {
     await rm(directory, { recursive: true, force: true });
   });
   const init = spawn(binary, ["init"], { env, cwd: directory, stdio: "pipe" });
-  init.stdout.resume();
+  let initialized = "";
+  init.stdout.on("data", chunk => { initialized += chunk; });
   init.stderr.on("data", chunk => { logs += chunk; });
   assert.equal((await once(init, "close"))[0], 0, logs);
-  const keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+  const keys = JSON.parse(initialized);
   child = spawn(binary, ["serve"], { env, cwd: directory, stdio: "pipe" });
   closed = once(child, "close");
   child.stderr.on("data", chunk => { logs += chunk; });

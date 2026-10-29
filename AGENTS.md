@@ -24,3 +24,10 @@ references and contributor instructions in `docs/`. Keep reusable tests and
 benchmark tools in the repository, but write generated reports under ignored
 `target/` directories. Do not commit progress logs, one-off experiment outputs,
 or benchmark result files.
+
+Persist generated API credentials only as hashes, including initial and default
+project keys. Return raw keys once at creation or rotation, never in server logs
+or credential files. When S3 owns the project registry, do not write a local
+credential cache. Tests and examples must follow the same storage rules.
+Do not add compatibility formats or migration paths when the user explicitly
+excludes backward compatibility.

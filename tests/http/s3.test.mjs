@@ -51,6 +51,7 @@ async function installation(t, storage, retention = 0, environment = {}) {
       process.stderr.on("data", chunk => { stderr += chunk; });
       const [code] = await once(process, "close");
       assert.equal(code, 0, stderr);
+      if (args[0] === "init") app.keys = JSON.parse(stdout);
       return stdout;
     },
     async start() {
@@ -69,8 +70,10 @@ async function installation(t, storage, retention = 0, environment = {}) {
           if (match) { clearTimeout(timeout); ready(match[1]); }
         });
       });
-      const filename = storage.backend === "s3" ? "s3-keys.json" : "keys.json";
-      app.keys = JSON.parse(await readFile(join(directory, "state", filename), "utf8"));
+      app.projects = JSON.parse(await app.command(["project", "list"]));
+      if (storage.backend === "s3") {
+        await assert.rejects(stat(join(directory, "state", "s3-keys.json")), { code: "ENOENT" });
+      }
     },
     stop,
     async replaceTask() {
@@ -130,6 +133,8 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   const adminKey = `s3-admin-${randomUUID()}`;
   const app = await installation(t, s3Settings(), 0, { CHUNKIFY_ADMIN_KEY: adminKey });
   await app.command(["init"]);
+  const cache = join(app.directory(), "state", "s3-keys.json");
+  await assert.rejects(stat(cache), { code: "ENOENT" });
   await app.start();
   const created = await fetch(`${app.url}/v1/projects`, { method: "POST", headers: {
     authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
@@ -166,11 +171,11 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   assert.equal(app.keys.public_key, originalKeys.public_key);
   assert.equal(app.keys.secret_key, originalKeys.secret_key);
   assert.equal(JSON.stringify(app.keys).includes(adminKey), false);
-  assert.equal(app.keys.projects.find(project => project.id === live.project_id).name, "Renamed S3 customer");
-  assert.deepEqual(app.keys.projects.find(project => project.id === live.project_id).settings.allowed_origins, ["https://s3-customer.example"]);
+  assert.equal(app.projects.find(project => project.id === live.project_id).name, "Renamed S3 customer");
+  assert.deepEqual(app.projects.find(project => project.id === live.project_id).settings.allowed_origins, ["https://s3-customer.example"]);
   assert.equal((await fetch(`${app.url}/v1/project/keys`, { headers: { authorization: `Bearer ${oldSecret}` } })).status, 401);
   assert.equal((await app.get("/v1/events", dashboard.key)).events.length, records.length + 1);
-  assert.equal(app.keys.projects.find(project => project.id === "default").keys.find(key => key.id === dashboard.key_id).read_only, true);
+  assert.equal(app.projects.find(project => project.id === "default").keys.find(key => key.id === dashboard.key_id).read_only, true);
   const denied = await fetch(`${app.url}/v1/project`, { method: "DELETE", headers: { authorization: `Bearer ${dashboard.key}` } });
   assert.equal(denied.status, 403);
   const rotatedDashboard = await app.manage(`/keys/${dashboard.key_id}/rotate`, "POST");
@@ -279,7 +284,7 @@ test("S3 project deletion survives replacement and expires retained events with 
   await app.replaceTask();
   assert.match(app.logs(), /Retention removed 1 events/);
   assert.equal((await app.get("/v1/events")).events.length, 1);
-  const saved = app.keys.projects.find(project => project.id === customer.project_id);
+  const saved = app.projects.find(project => project.id === customer.project_id);
   assert.equal(saved.deleted, true);
   assert.deepEqual(saved.keys, []);
   assert.equal(saved.settings.retention_seconds, 1);

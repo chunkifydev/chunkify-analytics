@@ -381,7 +381,7 @@ async fn exercise_project_queries(http: bool) {
     assert_eq!(metric_schema["required"], json!(["kind"]));
     assert_eq!(
         metric_schema["properties"]["kind"]["enum"],
-        json!(["summary", "quality", "engagement", "errors"])
+        json!(["summary", "quality", "engagement", "errors", "renditions"])
     );
     for arguments in [
         json!({}),
@@ -396,6 +396,20 @@ async fn exercise_project_queries(http: bool) {
             "invalid_arguments"
         );
     }
+    let renditions = call(&client, "get_metrics", json!({"kind":"renditions"}), false).await;
+    assert_eq!(renditions["coverage"]["kind"], "ranked_renditions");
+    assert_eq!(renditions["data"]["average_bitrate_bps"], Value::Null);
+    assert_eq!(renditions["data"]["renditions"], json!([]));
+    assert_eq!(
+        call(
+            &client,
+            "get_metrics",
+            json!({"kind":"renditions", "cursor":"invalid"}),
+            true
+        )
+        .await["error"]["code"],
+        "invalid_arguments"
+    );
     for old in ["get_summary", "get_quality", "get_engagement"] {
         assert!(client.call_tool(params(old, json!({}))).await.is_err());
     }

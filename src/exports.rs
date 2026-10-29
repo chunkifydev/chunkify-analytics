@@ -38,6 +38,7 @@ impl ExportRequest {
         match self.resource.as_str() {
             "summary" => Ok("/v1/summary"),
             "quality" => Ok("/v1/quality"),
+            "renditions" => Ok("/v1/renditions"),
             "engagement" => Ok("/v1/engagement"),
             "errors" => Ok("/v1/errors"),
             "events" => Ok("/v1/events"),
@@ -345,6 +346,7 @@ async fn run(
         "videos" => store.summary(project, q, true).await,
         "summary" => store.summary(project, q, false).await,
         "quality" => store.quality(project, q).await,
+        "renditions" => store.renditions(project, q).await,
         "engagement" => store.engagement(project, q).await,
         "errors" => store.errors(project, q).await,
         "dimensions" => {
@@ -357,7 +359,14 @@ async fn run(
 }
 fn table_rows(data: &Value) -> Result<Vec<Value>, ApiError> {
     for name in [
-        "groups", "buckets", "videos", "events", "views", "errors", "values",
+        "groups",
+        "buckets",
+        "videos",
+        "events",
+        "views",
+        "errors",
+        "values",
+        "renditions",
     ] {
         if let Some(rows) = data.get(name).and_then(Value::as_array) {
             return Ok(rows.clone());
@@ -467,6 +476,16 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
             "views",
             "unique_viewers",
             "total_playing_time_ms",
+        ],
+        "renditions" => &[
+            "width",
+            "height",
+            "codec",
+            "bitrate_bps",
+            "frame_rate",
+            "views",
+            "playing_time_ms",
+            "playing_time_ratio",
         ],
         "views" => &[
             "view_id",

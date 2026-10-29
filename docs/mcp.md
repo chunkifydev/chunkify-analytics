@@ -293,3 +293,12 @@ add `group_by=browser_name`; OS and device comparisons work the same way.
 names or player collection changes are needed. See the
 [metric definitions](api.md#progress-reached-and-watch-time-distribution) for
 sampling, bucket boundaries and startup classification.
+
+### Rendition measurements
+
+Use `get_metrics` with `kind=renditions` and an optional `video_id` to read the
+most-played renditions and time-weighted average bitrate. Totals cover all
+matching measurements; `limit` controls the ranked rows, default 10 and maximum
+100. Coverage reports whether more renditions exist. Use `export_data` with
+`resource=renditions` for all matching rows. Rendition counts can overlap across
+views. Missing bitrate contributes no weight to the average.

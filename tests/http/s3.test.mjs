@@ -157,7 +157,7 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   let liveRows = (await app.get("/v1/events", live.secret_key)).events;
   assert.equal(liveRows.length, records.length);
   assert.ok(liveRows.every(row => row.project_id === live.project_id && !row.otlp));
-  for (const path of ["/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos"]) {
+  for (const path of ["/v1/summary", "/v1/quality", "/v1/engagement", "/v1/videos", "/v1/renditions"]) {
     assert.deepEqual(await app.get(path), await app.get(path, live.secret_key));
   }
   await app.manage("", "PATCH", { name: "Renamed S3 customer", allowed_origins: ["https://s3-customer.example"] }, live.secret_key);
@@ -486,7 +486,9 @@ test("S3 video reports match local storage after repeated delivery and replaceme
       browser_context: { schema_version: 1, browser_name: index === 0 ? "Firefox" : "Chrome", device_type: "desktop" },
       occurred_at: "2026-10-19T12:00:00Z" }));
     Object.assign(attempt.at(-1), { playing_time_ms: playing, furthest_progress_ratio: progress,
-      media_duration_seconds: 600, startup_outcome: outcome });
+      media_duration_seconds: 600, startup_outcome: outcome,
+      rendition_playing_time: [{ width: 1280, height: 720, codec: "avc1", bitrate_bps: 2000000,
+        frame_rate: 30, playing_time_ms: playing }] });
     records.push(...attempt);
   }
   const snapshots = [];
@@ -504,13 +506,18 @@ test("S3 video reports match local storage after repeated delivery and replaceme
       responses.push(await app.get(`${path}&group_by=browser_name`));
       responses.push(await app.get(`/v1/timeseries?kind=${kind}&video_id=s3-video&from=2026-10-19T00:00:00Z&to=2026-10-21T00:00:00Z&interval=day`));
     }
+    responses.push(await app.get("/v1/renditions?video_id=s3-video"));
     snapshots.push(responses);
   }
   assert.deepEqual(snapshots[1], snapshots[0]);
   assert.equal(snapshots[1][0].progress_reached.sample_views, 3);
   assert.equal(snapshots[1][0].watch_time_ms.distribution.from_10_to_30_seconds, 1);
   assert.equal(snapshots[1][3].startup_outcomes.failed_before_start.views, 1);
+  assert.equal(snapshots[1][6].average_bitrate_bps, 2000000);
+  assert.equal(snapshots[1][6].total_playing_time_ms, 310000);
+  assert.equal(snapshots[1][6].sample_views, 2);
   await remote.replaceTask();
   assert.deepEqual(await remote.get("/v1/engagement?video_id=s3-video"), snapshots[0][0]);
   assert.deepEqual(await remote.get("/v1/quality?video_id=s3-video"), snapshots[0][3]);
+  assert.deepEqual(await remote.get("/v1/renditions?video_id=s3-video"), snapshots[0][6]);
 });

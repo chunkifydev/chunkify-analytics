@@ -143,6 +143,7 @@ pub fn router(
         .route("/v1/project/keys/{key_id}/rotate", post(rotate_project_key))
         .route("/v1/summary", get(summary))
         .route("/v1/quality", get(quality))
+        .route("/v1/renditions", get(renditions))
         .route("/v1/engagement", get(engagement))
         .route("/v1/timeseries", get(timeseries))
         .route("/v1/videos", get(videos))
@@ -209,6 +210,7 @@ async fn access(
                     | "/v1/videos"
                     | "/v1/timeseries"
                     | "/v1/quality"
+                    | "/v1/renditions"
                     | "/v1/engagement"
                     | "/v1/views"
                     | "/v1/errors"
@@ -594,6 +596,18 @@ async fn quality(
     Ok(Json(
         app.store
             .quality(resolved.project.id.clone(), query)
+            .await?,
+    ))
+}
+
+async fn renditions(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .renditions(resolved.project.id.clone(), query)
             .await?,
     ))
 }

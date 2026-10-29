@@ -658,6 +658,7 @@ pub(super) enum CohortMetrics {
     Quality,
     Engagement,
     Complete,
+    Renditions,
 }
 
 pub(super) fn view_cohort(
@@ -678,6 +679,10 @@ pub(super) fn view_cohort(
     let (measurement_fields, error_aggregate, measurement_projection, error_events) = match metrics
     {
         CohortMetrics::Basic => (String::new(), "", "", ""),
+        CohortMetrics::Renditions => (
+            ", rendition_playing_time := json_extract(event_remainder, '$.rendition_playing_time')".into(),
+            "", ", measurement", "",
+        ),
         CohortMetrics::Quality | CohortMetrics::Complete => (
             format!(
                 ", startup_time_ms := {}, rebuffer_duration_ms := {}, startup_outcome := CASE WHEN event_name = 'chunkify.video.view_ended' THEN e_startup_outcome END, reached_end := (event_name = 'chunkify.video.view_ended' AND e_reason = 'ended'), has_ended_event := (event_name = 'chunkify.video.view_ended')",

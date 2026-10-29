@@ -3860,6 +3860,215 @@
           }
         }
       }
+    },
+    "/v1/renditions": {
+      "get": {
+        "operationId": "getRenditions",
+        "summary": "Read rendition watch time and average bitrate",
+        "description": "Summarize rendition measurements for the filtered view-start cohort. Use only the selected final event, or latest snapshot when no final exists. Expand its cumulative rendition_playing_time array once per view. Missing or empty measurements contribute no rendition time. Rank by playing time descending; limit bounds returned rows only, while totals and average cover every matching rendition. Average bitrate is sum(bitrate_bps * playing_time_ms) divided by playing time with a known bitrate. Dimensions, codec, bitrate and frame rate together identify a rendition. Views can contribute to several renditions and must not be summed. No cursor, group_by, sort_by or order. Export resource=renditions includes all matching rows.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered rendition totals and ranked watch-time rows.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenditionReport"
+                },
+                "example": {
+                  "views": 2,
+                  "sample_views": 2,
+                  "total_playing_time_ms": 10000,
+                  "bitrate_sample_playing_time_ms": 10000,
+                  "average_bitrate_bps": 1600000,
+                  "total_renditions": 2,
+                  "renditions": [
+                    {
+                      "width": 1280,
+                      "height": 720,
+                      "codec": "avc1.64001f",
+                      "bitrate_bps": 2000000,
+                      "frame_rate": 30,
+                      "views": 2,
+                      "playing_time_ms": 6000,
+                      "playing_time_ratio": 0.6
+                    },
+                    {
+                      "width": 640,
+                      "height": 360,
+                      "codec": "avc1.42001e",
+                      "bitrate_bps": 1000000,
+                      "frame_rate": 30,
+                      "views": 1,
+                      "playing_time_ms": 4000,
+                      "playing_time_ratio": 0.4
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, limit, or unsupported query parameters.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -7602,7 +7811,8 @@
               "events",
               "views",
               "errors",
-              "dimensions"
+              "dimensions",
+              "renditions"
             ]
           },
           "query": {
@@ -7837,6 +8047,131 @@
       "CreatedProjectKey": {
         "$ref": "#/components/schemas/RotatedProjectKey",
         "description": "A newly created key. Save the key value now; later key listings contain only metadata."
+      },
+      "RenditionReport": {
+        "type": "object",
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "All attempts in the filtered start cohort."
+          },
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Attempts with positive measured rendition playing time."
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Total measured rendition playing time across all matching rows. Can be less than overall watch time when rendition information is missing."
+          },
+          "bitrate_sample_playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Measured playing time with a known rendition bitrate, used as the average denominator."
+          },
+          "average_bitrate_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Time-weighted mean declared bitrate. Null without playing time with a known bitrate."
+          },
+          "total_renditions": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of distinct renditions before applying the row limit."
+          },
+          "renditions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RenditionMetric"
+            },
+            "description": "Most-played renditions first. Defaults to 100 rows, maximum 1000. CSV exports include all matching rows."
+          }
+        },
+        "required": [
+          "views",
+          "sample_views",
+          "total_playing_time_ms",
+          "bitrate_sample_playing_time_ms",
+          "average_bitrate_bps",
+          "total_renditions",
+          "renditions"
+        ]
+      },
+      "RenditionMetric": {
+        "type": "object",
+        "description": "One rendition identified by its dimensions, codec, declared bitrate and frame rate.",
+        "properties": {
+          "width": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Reported width in pixels; null when unknown."
+          },
+          "height": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Reported height in pixels; null when unknown."
+          },
+          "codec": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reported codec; null when unknown."
+          },
+          "bitrate_bps": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Declared rendition bitrate in bits per second, not measured network throughput."
+          },
+          "frame_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Reported frames per second; null when unknown."
+          },
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct attempts with positive playing time for this rendition."
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Cumulative measured playing time for this rendition, summed once per attempt."
+          },
+          "playing_time_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Share of all measured rendition playing time, including rows outside the returned limit.",
+            "maximum": 1
+          }
+        },
+        "required": [
+          "width",
+          "height",
+          "codec",
+          "bitrate_bps",
+          "frame_rate",
+          "views",
+          "playing_time_ms",
+          "playing_time_ratio"
+        ]
       }
     }
   },

@@ -156,9 +156,7 @@ impl Collector {
             );
             result.stdout
         };
-        command(&["init"]);
-        let keys =
-            serde_json::from_slice(&std::fs::read(directory.join("keys.json")).unwrap()).unwrap();
+        let keys = serde_json::from_slice(&command(&["init"])).unwrap();
         let live =
             serde_json::from_slice(&command(&["project", "create", "Live website"])).unwrap();
         let mut config = "retention.seconds = 0\n".to_owned();

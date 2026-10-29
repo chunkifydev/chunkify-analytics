@@ -84,6 +84,97 @@ fn data_directory_flag_is_global_and_controls_initialization() {
 }
 
 #[test]
+fn initialization_and_primary_rotation_return_secrets_without_persisting_them() {
+    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
+    let path = directory.to_str().unwrap();
+    let initialized = run(&["--data-dir", path, "init"]);
+    assert!(initialized.status.success());
+    let initial: serde_json::Value = serde_json::from_slice(&initialized.stdout).unwrap();
+    let public = initial["public_key"].as_str().unwrap();
+    let secret = initial["secret_key"].as_str().unwrap();
+    for kind in ["public", "secret"] {
+        let rotated = run(&["--data-dir", path, "key", "rotate-primary", kind]);
+        assert!(rotated.status.success());
+        let value: serde_json::Value = serde_json::from_slice(&rotated.stdout).unwrap();
+        let raw = value["key"].as_str().unwrap();
+        assert_ne!(raw, public);
+        assert_ne!(raw, secret);
+        assert_eq!(value["key_id"], format!("primary-{kind}"));
+        let stored = std::fs::read_to_string(directory.join("keys.json")).unwrap();
+        for key in [public, secret, raw] {
+            assert!(!stored.contains(key));
+            assert!(!String::from_utf8_lossy(&rotated.stderr).contains(key));
+        }
+        let registry: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        assert_eq!(registry.as_object().unwrap().len(), 1);
+        assert_eq!(registry["projects"][0]["keys"].as_array().unwrap().len(), 2);
+    }
+    let before = std::fs::read(directory.join("keys.json")).unwrap();
+    let repeated = run(&["--data-dir", path, "init"]);
+    assert!(!repeated.status.success());
+    assert!(repeated.stdout.is_empty());
+    assert_eq!(std::fs::read(directory.join("keys.json")).unwrap(), before);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn older_registries_are_rewritten_without_reviving_revoked_primary_keys() {
+    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
+    let path = directory.to_str().unwrap();
+    let initialized = run(&["--data-dir", path, "init"]);
+    assert!(initialized.status.success());
+    let initial: serde_json::Value = serde_json::from_slice(&initialized.stdout).unwrap();
+    let file = directory.join("keys.json");
+    let mut legacy = serde_json::json!({
+        "public_key": initial["public_key"], "secret_key": initial["secret_key"],
+    });
+    std::fs::write(&file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(
+        run(&["--data-dir", path, "project", "list"])
+            .status
+            .success()
+    );
+    let converted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert!(converted.get("public_key").is_none());
+    assert!(converted.get("secret_key").is_none());
+    let keys = converted["projects"][0]["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 2);
+    assert!(
+        keys.iter()
+            .all(|key| key["hash"].as_str().unwrap().len() == 64)
+    );
+    assert!(
+        run(&[
+            "--data-dir",
+            path,
+            "key",
+            "revoke",
+            "default",
+            "primary-secret"
+        ])
+        .status
+        .success()
+    );
+    let revoked: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    legacy["projects"] = revoked["projects"].clone();
+    std::fs::write(&file, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    assert!(
+        run(&["--data-dir", path, "project", "list"])
+            .status
+            .success()
+    );
+    let cleaned = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&cleaned).unwrap(),
+        revoked
+    );
+    assert!(!cleaned.contains(initial["secret_key"].as_str().unwrap()));
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
     let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
     let path = directory.to_str().unwrap();

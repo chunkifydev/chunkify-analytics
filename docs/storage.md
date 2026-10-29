@@ -45,10 +45,13 @@ For AWS S3, omit `endpoint` and set the bucket's region through `storage.region`
 or `CHUNKIFY_S3_REGION`. Omit access and secret keys to use AWS credentials,
 including an ECS task role.
 
-Credentials need list access to the prefix and object read, write and delete
-access. The analytics server uses delete access for expiration. Run `init` once, then
-`serve`. Events, projects and credentials persist in S3; keep `<prefix>keys.json`
-private and include it in backups.
+Credentials need bucket list access and object read, write and delete access
+under the analytics prefix. Bucket list access lets S3 return 404 for a registry
+that does not exist yet. The analytics server uses delete access for expiration.
+Run `init` once and save the keys returned in its JSON output, then run `serve`.
+Events, projects and key hashes persist in S3. `<prefix>keys.json` is the
+project registry, not a backup; keep it private and include it in backups.
+No local `s3-keys.json` cache is created.
 
 ### Containers
 

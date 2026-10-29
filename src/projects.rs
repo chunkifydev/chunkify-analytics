@@ -199,30 +199,32 @@ pub struct Project {
 }
 
 pub fn projects(keys: &Keys) -> Vec<Project> {
-    keys.projects.clone().unwrap_or_else(|| {
-        vec![Project {
-            deleted: false,
-            id: default_project(),
-            name: "Default project".into(),
-            settings: Settings::default(),
-            keys: vec![
-                Credential {
-                    id: "primary-public".into(),
-                    name: "Primary public".into(),
-                    permission: Permission::Public,
-                    read_only: false,
-                    hash: hash(&keys.public_key),
-                },
-                Credential {
-                    id: "primary-secret".into(),
-                    name: "Primary secret".into(),
-                    permission: Permission::Secret,
-                    read_only: false,
-                    hash: hash(&keys.secret_key),
-                },
-            ],
-        }]
-    })
+    keys.projects.clone()
+}
+
+pub fn primary_project(public_key: &str, secret_key: &str) -> Project {
+    Project {
+        deleted: false,
+        id: default_project(),
+        name: "Default project".into(),
+        settings: Settings::default(),
+        keys: vec![
+            Credential {
+                id: "primary-public".into(),
+                name: "Primary public".into(),
+                permission: Permission::Public,
+                read_only: false,
+                hash: hash(public_key),
+            },
+            Credential {
+                id: "primary-secret".into(),
+                name: "Primary secret".into(),
+                permission: Permission::Secret,
+                read_only: false,
+                hash: hash(secret_key),
+            },
+        ],
+    }
 }
 
 pub fn validate_id(id: &str) -> Result<(), String> {
@@ -582,10 +584,8 @@ pub fn apply_command(
                 let permission = Permission::parse(kind)?;
                 let (mut key, secret) = credential(&format!("Primary {kind}"), permission);
                 key.id = format!("primary-{kind}");
-                if permission == Permission::Public { keys.public_key = secret; }
-                else { keys.secret_key = secret; }
-                // Keep the legacy format until named projects/keys are used.
-                if keys.projects.is_none() { return Ok(output); }
+                output = serde_json::json!({"project_id": DEFAULT_PROJECT, "key_id": key.id, "key": secret,
+                    "permission": permission, "read_only": false, "restart_required": true});
                 let project = active_project_mut(&mut list, DEFAULT_PROJECT)?;
                 project.keys.retain(|k| k.id != key.id);
                 project.keys.push(key);
@@ -664,13 +664,11 @@ pub fn apply_command(
                 let old = project.keys.iter_mut().find(|k| &k.id == key_id).ok_or("Unknown key")?;
                 let (new, secret) = credential(&old.name, old.permission);
                 old.hash = new.hash;
-                if id == DEFAULT_PROJECT && key_id == "primary-public" { keys.public_key = secret.clone(); }
-                if id == DEFAULT_PROJECT && key_id == "primary-secret" { keys.secret_key = secret.clone(); }
                 output = serde_json::json!({"project_id": id, "key_id": key_id, "key": secret, "permission": old.permission, "read_only": old.read_only, "restart_required": true});
             }
             _ => return Err("Expected project list | project create <name> | project rename <id> <name> | project configure <id> <settings.json> | project retention <id> <seconds|inherit> | key create <project> <public|secret> <name> [--read-only] | key rotate <project> <key-id> | key revoke <project> <key-id>".into()),
         }
     validate(&list)?;
-    keys.projects = Some(list);
+    keys.projects = list;
     Ok(output)
 }

@@ -305,23 +305,7 @@ pub async fn command(config: &Config, command: &str, args: &[String]) -> Result<
     } else {
         return Err("Stop the collector before changing projects or project settings.".into());
     };
-    if command == "rotate-key" {
-        let suffix = if output["restart_required"] == false {
-            "The new key is active."
-        } else {
-            "Start the collector to use it."
-        };
-        println!(
-            "Rotated {} key. Read the new value from {}. {suffix}",
-            args[0],
-            config.key_cache_path().display()
-        );
-        if let Some(warning) = output["warning"].as_str() {
-            eprintln!("{warning}");
-        }
-    } else {
-        println!("{output}");
-    }
+    println!("{output}");
     Ok(())
 }
 
@@ -637,6 +621,8 @@ mod tests {
     struct Fixture {
         config: Arc<Config>,
         keys: Keys,
+        public_key: String,
+        secret_key: String,
         registry: Arc<Registry>,
         directory: PathBuf,
     }
@@ -648,10 +634,12 @@ mod tests {
                 "ck-admin-{}",
                 &uuid::Uuid::new_v4().simple().to_string()[..12]
             ));
-            config.initialize().unwrap();
+            let generated = config.initialize().unwrap();
             let keys = config.keys().unwrap();
             let registry = Arc::new(Registry::new(&keys, &config).unwrap());
             Self {
+                public_key: generated["public_key"].as_str().unwrap().into(),
+                secret_key: generated["secret_key"].as_str().unwrap().into(),
                 directory: config.data_dir.clone(),
                 config: Arc::new(config),
                 keys,
@@ -714,10 +702,7 @@ mod tests {
         );
         assert!(
             controller
-                .project(
-                    &fixture.keys.secret_key,
-                    ProjectAction::Keys(KeyAction::List)
-                )
+                .project(&fixture.secret_key, ProjectAction::Keys(KeyAction::List))
                 .is_ok()
         );
     }
@@ -733,12 +718,7 @@ mod tests {
             fixture.keys.clone(),
         );
         let before = fs::read(fixture.directory.join("keys.json")).unwrap();
-        for token in [
-            "",
-            "invalid",
-            &fixture.keys.secret_key,
-            &fixture.keys.public_key,
-        ] {
+        for token in ["", "invalid", &fixture.secret_key, &fixture.public_key] {
             for action in [KeyAction::List, KeyAction::Rotate("primary-secret".into())] {
                 let error = controller
                     .admin_keys(token, "default", action)
@@ -762,10 +742,7 @@ mod tests {
         assert_eq!(recovered["read_only"], false);
         assert!(
             controller
-                .project(
-                    &fixture.keys.secret_key,
-                    ProjectAction::Keys(KeyAction::List)
-                )
+                .project(&fixture.secret_key, ProjectAction::Keys(KeyAction::List))
                 .is_err()
         );
         assert!(
@@ -783,7 +760,7 @@ mod tests {
         let mut fixture = Fixture::new();
         let access = fixture
             .registry
-            .authorize(&fixture.keys.public_key, projects::Permission::Public)
+            .authorize(&fixture.public_key, projects::Permission::Public)
             .ok()
             .unwrap()
             .project;
@@ -852,7 +829,7 @@ mod tests {
             fixture.keys.clone(),
         );
         let result = controller
-            .project(&fixture.keys.secret_key, ProjectAction::Delete)
+            .project(&fixture.secret_key, ProjectAction::Delete)
             .ok()
             .unwrap();
         assert_eq!(result["deleted"], true);
@@ -860,22 +837,22 @@ mod tests {
         assert!(
             fixture
                 .registry
-                .authorize(&fixture.keys.public_key, projects::Permission::Public)
+                .authorize(&fixture.public_key, projects::Permission::Public)
                 .is_err()
         );
         assert!(
             fixture
                 .registry
-                .authorize(&fixture.keys.secret_key, projects::Permission::Secret)
+                .authorize(&fixture.secret_key, projects::Permission::Secret)
                 .is_err()
         );
         let saved = fixture.config.keys().unwrap();
-        assert!(saved.projects.as_ref().unwrap()[0].deleted);
-        assert!(saved.projects.as_ref().unwrap()[0].keys.is_empty());
+        assert!(saved.projects[0].deleted);
+        assert!(saved.projects[0].keys.is_empty());
         let restored = Registry::new(&saved, &fixture.config).unwrap();
         assert!(
             restored
-                .authorize(&saved.secret_key, projects::Permission::Secret)
+                .authorize(&fixture.secret_key, projects::Permission::Secret)
                 .is_err()
         );
         let policy = restored.retention.read().unwrap();
@@ -895,7 +872,7 @@ mod tests {
         );
         assert!(
             controller
-                .project(&fixture.keys.secret_key, ProjectAction::Delete)
+                .project(&fixture.secret_key, ProjectAction::Delete)
                 .is_err()
         );
     }
@@ -920,7 +897,7 @@ mod tests {
         assert!(
             fixture
                 .registry
-                .authorize(&fixture.keys.public_key, projects::Permission::Public)
+                .authorize(&fixture.public_key, projects::Permission::Public)
                 .is_ok()
         );
         assert_eq!(serde_json::to_vec_pretty(&fixture.keys).unwrap(), before);

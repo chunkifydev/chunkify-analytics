@@ -606,9 +606,10 @@ mod tests {
             crate::settings::Settings::load(Some(&env_file), Some(&config_file)).unwrap();
         let config = crate::config::Config::load_with(&settings, Some(&directory), None).unwrap();
         let keys = crate::config::Keys {
-            public_key: "test-public".into(),
-            secret_key: "test-secret".into(),
-            projects: None,
+            projects: vec![crate::projects::primary_project(
+                "test-public",
+                "test-secret",
+            )],
         };
         let registry = Arc::new(Registry::new(&keys, &config).unwrap());
         let owner = registry
@@ -663,8 +664,10 @@ mod tests {
         );
         registry.replace_keys(
             &crate::config::Keys {
-                secret_key: "rotated-secret".into(),
-                ..keys
+                projects: vec![crate::projects::primary_project(
+                    "test-public",
+                    "rotated-secret",
+                )],
             },
             &config,
         );

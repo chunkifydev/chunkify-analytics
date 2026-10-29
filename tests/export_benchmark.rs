@@ -82,9 +82,7 @@ async fn stream_large_exports_while_ingestion_continues() {
     assert!(output.status.success());
     fixture.start();
     fixture.stop();
-    let keys: Value =
-        serde_json::from_slice(&std::fs::read(fixture.directory.join("state/keys.json")).unwrap())
-            .unwrap();
+    let keys: Value = serde_json::from_slice(&output.stdout).unwrap();
     let started = Instant::now();
     {
         let connection =

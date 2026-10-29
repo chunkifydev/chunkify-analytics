@@ -1,7 +1,7 @@
 import { sdkDist } from "./sdk-path.mjs";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -49,17 +49,33 @@ async function collector(t, settings = {}, initialBinary = binary) {
   await writeConfig(directory, env);
   const init = spawn(initialBinary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
   let errors = "";
+  let initialized = "";
+  init.stdout.on("data", chunk => { initialized += chunk; });
   init.stderr.on("data", (chunk) => { errors += chunk; });
-  assert.equal((await once(init, "exit"))[0], 0, errors);
-  const keys = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+  assert.equal((await once(init, "close"))[0], 0, errors);
+  const {public_key, secret_key} = JSON.parse(initialized);
+  const keys = {public_key, secret_key};
   let child;
   let exited;
   server = {
     directory,
     keys,
-    command: (args, overrides = {}) => runCommand(args, { ...env, ...overrides }),
+    async command(args, overrides = {}) {
+      const result = await runCommand(args, { ...env, ...overrides });
+      if (result.code === 0 && args[0] === "key" && args[1] === "rotate-primary") {
+        keys[`${args[2]}_key`] = JSON.parse(result.stdout).key;
+      }
+      return result;
+    },
     async reloadKeys() {
-      Object.assign(keys, JSON.parse(await readFile(join(directory, "keys.json"), "utf8")));
+      const stored = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+      assert.equal(stored.public_key, undefined);
+      assert.equal(stored.secret_key, undefined);
+      const primary = stored.projects.find(project => project.id === "default");
+      for (const kind of ["public", "secret"]) {
+        const credential = primary.keys.find(key => key.id === `primary-${kind}`);
+        if (credential) assert.equal(credential.hash, createHash("sha256").update(keys[`${kind}_key`]).digest("hex"));
+      }
     },
     async start(executable = binary, overrides = {}) {
       await writeConfig(directory, { ...env, ...overrides });
@@ -682,7 +698,7 @@ test("viewer deletion is not a supported command", async (t) => {
   assert.match(result.stderr, /unrecognized subcommand/);
 });
 
-test("offline key rotation replaces each credential independently without exposing keys or losing data", async (t) => {
+test("offline key rotation returns each credential once without persisting secrets or losing data", async (t) => {
   const server = await collector(t);
   const originalKeys = { ...server.keys };
   const event = sdkEvents()[0];
@@ -703,7 +719,8 @@ test("offline key rotation replaces each credential independently without exposi
   assert.equal(server.keys.secret_key, originalKeys.secret_key);
   assert.ok(server.keys.public_key.length >= 32);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
-    assert.equal(`${ingest.stdout}${ingest.stderr}`.includes(key), false);
+    assert.equal((await readFile(join(server.directory, "keys.json"), "utf8")).includes(key), false);
+    assert.equal(ingest.stderr.includes(key), false);
   }
   if (process.platform !== "win32") {
     assert.equal((await stat(join(server.directory, "keys.json"))).mode & 0o777, 0o600);
@@ -725,7 +742,8 @@ test("offline key rotation replaces each credential independently without exposi
   assert.notEqual(server.keys.secret_key, originalKeys.secret_key);
   assert.equal(server.keys.public_key, rotatedIngest);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
-    assert.equal(`${read.stdout}${read.stderr}`.includes(key), false);
+    assert.equal((await readFile(join(server.directory, "keys.json"), "utf8")).includes(key), false);
+    assert.equal(read.stderr.includes(key), false);
   }
   await server.start();
   const deniedRead = await fetch(`${server.url}/v1/events`, {
@@ -760,8 +778,9 @@ test("a stopped data-directory backup restores events, summaries and keys", asyn
   const restored = join(backups, "restored");
   await cp(join(backups, "snapshot"), restored, { recursive: true, force: false, errorOnExist: true });
   const restoredKeys = JSON.parse(await readFile(join(restored, "keys.json"), "utf8"));
-  assert.deepEqual(restoredKeys, originalKeys);
-  Object.assign(server.keys, restoredKeys);
+  assert.equal(restoredKeys.public_key, undefined);
+  assert.equal(restoredKeys.secret_key, undefined);
+  Object.assign(server.keys, originalKeys);
   await server.start(binary, { "data_dir": restored });
   assert.deepEqual(await server.get("/v1/events"), originalEvents);
   assert.deepEqual(await server.get("/v1/summary"), originalSummary);
@@ -1339,15 +1358,15 @@ test("live administration serializes concurrent commands and rejects invalid cha
   assert.equal((await projectCommand(server, ["project", "list"]))[0].keys.length, 2);
 });
 
-test("live primary rotation and revocation keep legacy exports consistent", async (t) => {
+test("live primary rotation and revocation persist only hashes", async (t) => {
   const server = await collector(t);
   const original = { ...server.keys };
   for (const kind of ["public", "secret"]) {
     const result = await server.command(["key", "rotate-primary", kind]);
     assert.equal(result.code, 0, result.stderr);
-    assert.match(result.stdout, /new key is active/);
+    assert.equal(JSON.parse(result.stdout).restart_required, false);
     await server.reloadKeys();
-    for (const secret of Object.values(server.keys)) assert.ok(!result.stdout.includes(secret));
+    for (const secret of Object.values(server.keys)) assert.ok(!(await readFile(join(server.directory, "keys.json"), "utf8")).includes(secret));
   }
   assert.equal((await projectPost(server, original.public_key, sdkEvents()[0])).status, 401);
   assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.secret_key}` } })).status, 401);
@@ -1627,8 +1646,8 @@ test("admin rotation is disabled without an admin key and preserves credentials 
   assert.equal((await projectApi(server, "/keys")).status, 200);
   const recovered = await assertResponse(rotatePath, "post", await rotate(adminKey), 200);
   assert.equal((await projectApi(server, "/keys", { token: recovered.key })).status, 200);
+  server.keys.secret_key = recovered.key;
   await server.reloadKeys();
-  assert.equal(server.keys.secret_key, recovered.key, "default primary credential stays consistent");
   await server.stop();
   await server.start(binary, { CHUNKIFY_ADMIN_KEY: "" });
   await assertResponse(listPath, "get", await adminProjectApi(server, "default", "/keys", { token: adminKey }), 404);

@@ -79,8 +79,9 @@ docker run --rm \
   ghcr.io/chunkifydev/chunkify-analytics:latest init
 ```
 
-Run `init` once for a new installation. It generates your initial credentials
-and refuses to overwrite existing credentials.
+Run `init` once for a new installation. It prints the initial `public_key` and
+`secret_key` once as JSON and refuses to overwrite an existing registry. Save the
+keys in your secret manager; the collector stores only their hashes.
 
 ### 4. Start the service
 
@@ -113,13 +114,10 @@ recreate the container with the same mounts to apply changes. The image uses
 image settings override `data_dir` and `[server].bind` in TOML. The port mapping
 above restricts access from your computer to localhost.
 
-### 5. Get your credentials
+### 5. Use your credentials
 
-```sh
-docker exec chunkify-analytics cat /data/keys.json
-```
-
-The initial `default` project has two credentials:
+Use the credentials returned by `init`. The initial `default` project has two
+credentials:
 
 | Credential | Use |
 | --- | --- |
@@ -200,11 +198,10 @@ chunkify-analytics init
 ```
 
 Edit the website origins and data path before initialization. The example stores
-its data in `./data`, beside `config.toml`. Read the initial credentials with:
-
-```sh
-cat data/keys.json
-```
+its data in `./data`, beside `config.toml`. `init` returns the initial credentials
+once as JSON. Save them in your secret manager; they cannot be read back from the
+registry. Use `key rotate-primary public` or `key rotate-primary secret` to
+replace a lost credential.
 
 Use `public_key` in the player and keep `secret_key` private for API and MCP
 access. This secret key must stay out of browser code.

@@ -22,7 +22,8 @@ export async function findCollector(explicit) {
 }
 async function saveState(dir, state) {
   const temporary = path.join(dir, 'demo.json.tmp');
-  await writeFile(temporary, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  const saved = { ...state, projects: Object.fromEntries(Object.entries(state.projects).map(([id, project]) => [id, { project_id: project.project_id, name: project.name }])) };
+  await writeFile(temporary, JSON.stringify(saved, null, 2) + '\n', { mode: 0o600 });
   await rename(temporary, path.join(dir, 'demo.json'));
 }
 async function prepareData(dir, binary, env, signal) {
@@ -30,9 +31,26 @@ async function prepareData(dir, binary, env, signal) {
     const content = await readFile(path.join(dir, 'demo.json'), 'utf8');
     let state;
     try { state = JSON.parse(content); } catch { throw new Error('Invalid demo.json. Restore the saved demo state or choose a new data directory.'); }
-    const hasKeys = id => ['secret_key', 'public_key'].every(key => typeof state.projects?.[id]?.[key] === 'string' && state.projects[id][key].length > 0);
-    if (state.version !== 1 || typeof state.seeded !== 'boolean' || !hasKeys('demo') || !hasKeys('player') ||
+    const hasProject = id => typeof state.projects?.[id]?.project_id === 'string' && /^[0-9a-f-]{36}$/.test(state.projects[id].project_id);
+    if (state.version !== 1 || typeof state.seeded !== 'boolean' || !hasProject('demo') || !hasProject('player') ||
       !/^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/.test(state.seedDate) || !Number.isFinite(Date.parse(state.seedDate))) throw new Error('Invalid demo state.');
+    // Keep runtime credentials in memory. Each launch replaces the demo's keys.
+    const run = async args => {
+      signal.throwIfAborted();
+      try { return JSON.parse((await exec(binary, args, { env: { ...env, CHUNKIFY_DATA_DIR: dir }, cwd: dir, signal, timeout: 30000 })).stdout); }
+      catch { throw new Error('Could not refresh demo credentials. Stop any running demo using this directory and try again.'); }
+    };
+    const projects = await run(['project', 'list']);
+    for (const project of Object.values(state.projects)) {
+      const saved = projects.find(item => item.id === project.project_id && !item.deleted);
+      if (!saved) throw new Error('Demo project is missing from the registry.');
+      for (const permission of ['public', 'secret']) {
+        const key = saved.keys.find(item => item.permission === permission && !item.read_only);
+        if (!key) throw new Error('Demo project credential is missing.');
+        project[`${permission}_key`] = (await run(['key', 'rotate', project.project_id, key.id])).key;
+      }
+    }
+    await saveState(dir, state);
     return state;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;

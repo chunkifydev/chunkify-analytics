@@ -55,10 +55,11 @@ fn execute(
                 .into();
         }
     }
-    if matches!(
+    let changes_retention = matches!(
         request.command.as_str(),
         "project-retention" | "project-create" | "project-update"
-    ) {
+    );
+    if changes_retention {
         output["effective_retention_seconds"] = output["retention_seconds"]
             .as_u64()
             .unwrap_or(config.retention_seconds)
@@ -72,10 +73,7 @@ fn execute(
         ));
     }
     if request.command != "project-list" {
-        let mut retention = if matches!(
-            request.command.as_str(),
-            "project-retention" | "project-create" | "project-update"
-        ) {
+        let mut retention = if changes_retention {
             registry
                 .map(|registry| {
                     registry

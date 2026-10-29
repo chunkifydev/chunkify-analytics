@@ -136,7 +136,10 @@ pub fn router(
             post(admin_rotate_project_key),
         )
         .route("/v1/project", patch(update_project).delete(delete_project))
-        .route("/v1/project/keys", get(project_keys))
+        .route(
+            "/v1/project/keys",
+            get(project_keys).post(create_project_key),
+        )
         .route("/v1/project/keys/{key_id}/rotate", post(rotate_project_key))
         .route("/v1/summary", get(summary))
         .route("/v1/quality", get(quality))
@@ -413,6 +416,7 @@ struct NewProject {
     name: String,
     #[serde(default)]
     allowed_origins: Vec<String>,
+    retention_seconds: Option<u64>,
 }
 
 async fn create_project(
@@ -421,22 +425,27 @@ async fn create_project(
 ) -> Result<impl IntoResponse, ApiError> {
     let token = bearer(request.headers());
     let body: NewProject = serde_json::from_value(read_json(request, app.max_body_bytes).await?)
-        .map_err(|_| ApiError::bad("Expected a name and optional allowed_origins"))?;
+        .map_err(|_| {
+            ApiError::bad("Expected a name and optional allowed_origins and retention_seconds")
+        })?;
     crate::projects::validate_name(&body.name).map_err(ApiError::bad)?;
     let mut origins = body.allowed_origins;
     crate::projects::normalize_origins(&mut origins).map_err(ApiError::bad)?;
-    let result =
-        tokio::task::spawn_blocking(move || app.admin.create_project(&token, body.name, origins))
-            .await
-            .map_err(|_| ApiError::unavailable())??;
+    let result = tokio::task::spawn_blocking(move || {
+        app.admin
+            .create_project(&token, body.name, origins, body.retention_seconds)
+    })
+    .await
+    .map_err(|_| ApiError::unavailable())??;
     Ok((StatusCode::CREATED, Json(result)))
 }
 
 async fn update_project(State(app): State<App>, request: Request) -> Result<Json<Value>, ApiError> {
     let token = bearer(request.headers());
     let mut update: crate::projects::Update =
-        serde_json::from_value(read_json(request, app.max_body_bytes).await?)
-            .map_err(|_| ApiError::bad("Expected optional name and allowed_origins"))?;
+        serde_json::from_value(read_json(request, app.max_body_bytes).await?).map_err(|_| {
+            ApiError::bad("Expected optional name, allowed_origins and retention_seconds")
+        })?;
     update.validate().map_err(ApiError::bad)?;
     project_action(app, token, crate::admin::ProjectAction::Update(update)).await
 }
@@ -461,6 +470,24 @@ async fn project_keys(State(app): State<App>, headers: HeaderMap) -> Result<Json
         crate::admin::ProjectAction::Keys(crate::admin::KeyAction::List),
     )
     .await
+}
+
+async fn create_project_key(
+    State(app): State<App>,
+    request: Request,
+) -> Result<impl IntoResponse, ApiError> {
+    let token = bearer(request.headers());
+    let key: crate::projects::NewKey =
+        serde_json::from_value(read_json(request, app.max_body_bytes).await?)
+            .map_err(|_| ApiError::bad("Expected name, permission and optional read_only"))?;
+    key.validate().map_err(ApiError::bad)?;
+    let result = project_action(
+        app,
+        token,
+        crate::admin::ProjectAction::Keys(crate::admin::KeyAction::Create(key)),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, result))
 }
 
 async fn rotate_project_key(

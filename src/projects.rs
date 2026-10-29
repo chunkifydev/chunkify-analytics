@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub const MAX_PROJECTS: usize = 1024;
+pub const MAX_KEYS: usize = 64;
 pub const DEFAULT_PROJECT: &str = "default";
 pub fn default_project() -> String {
     DEFAULT_PROJECT.into()
@@ -115,6 +116,12 @@ pub struct Update {
         deserialize_with = "deserialize_present"
     )]
     pub allowed_origins: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_present"
+    )]
+    pub retention_seconds: Option<Option<u64>>,
 }
 
 fn deserialize_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
@@ -127,14 +134,44 @@ where
 
 impl Update {
     pub fn validate(&mut self) -> Result<(), String> {
-        if self.name.is_none() && self.allowed_origins.is_none() {
-            return Err("Provide name or allowed_origins".into());
+        if self.name.is_none() && self.allowed_origins.is_none() && self.retention_seconds.is_none()
+        {
+            return Err("Provide name, allowed_origins or retention_seconds".into());
         }
         if let Some(name) = &self.name {
             validate_name(name)?;
         }
         if let Some(origins) = &mut self.allowed_origins {
             normalize_origins(origins)?;
+        }
+        validate_retention(self.retention_seconds.flatten())?;
+        Ok(())
+    }
+}
+
+pub fn validate_retention(seconds: Option<u64>) -> Result<(), String> {
+    if seconds.is_some_and(|seconds| seconds > crate::retention::MAX_SECONDS) {
+        return Err("Project retention_seconds is too large".into());
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewKey {
+    pub name: String,
+    pub permission: Permission,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+impl NewKey {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() || self.name.len() > 128 {
+            return Err("Key names must have 1..128 UTF-8 bytes and cannot be blank".into());
+        }
+        if self.read_only && self.permission != Permission::Secret {
+            return Err("Only secret keys support read-only access".into());
         }
         Ok(())
     }
@@ -228,7 +265,7 @@ pub fn validate(projects: &[Project]) -> Result<(), String> {
             return Err("Duplicate project ID".into());
         }
         let mut key_ids = HashSet::new();
-        if project.keys.len() > 64 {
+        if project.keys.len() > MAX_KEYS {
             return Err("At most 64 keys per project".into());
         }
         for key in &project.keys {
@@ -250,13 +287,7 @@ pub fn validate(projects: &[Project]) -> Result<(), String> {
                 return Err("Invalid or duplicate project credential".into());
             }
         }
-        if project
-            .settings
-            .retention_seconds
-            .is_some_and(|seconds| seconds > crate::retention::MAX_SECONDS)
-        {
-            return Err("Project retention_seconds is too large".into());
-        }
+        validate_retention(project.settings.retention_seconds)?;
         if project.settings.ingest_per_second == Some(0) {
             return Err("Project ingest rate must be positive".into());
         }
@@ -559,15 +590,19 @@ pub fn apply_command(
                 project.keys.retain(|k| k.id != key.id);
                 project.keys.push(key);
             }
-            ("project-create", [name]) | ("project-create", [name, _]) => {
+            ("project-create", [name]) | ("project-create", [name, _]) | ("project-create", [name, _, _]) => {
                 let id = uuid::Uuid::new_v4().to_string();
                 let (ingest, public_key) = credential("Primary public", Permission::Public);
                 let (project_key, secret_key) = credential("Primary secret", Permission::Secret);
-                output = serde_json::json!({"project_id": id, "name": name, "public_key": public_key, "secret_key": secret_key, "restart_required": true});
                 let mut settings = Settings::default();
                 if let Some(origins) = args.get(1) {
                     settings.allowed_origins = Some(serde_json::from_str(origins)?);
                 }
+                if let Some(seconds) = args.get(2) {
+                    settings.retention_seconds = serde_json::from_str(seconds)?;
+                }
+                output = serde_json::json!({"project_id": id, "name": name, "public_key": public_key, "secret_key": secret_key,
+                    "retention_seconds": settings.retention_seconds, "restart_required": true});
                 list.push(Project { id, name: name.clone(), settings, keys: vec![ingest, project_key], deleted: false });
             }
             ("project-rename", [id, name]) => {
@@ -595,7 +630,9 @@ pub fn apply_command(
                 let project = active_project_mut(&mut list, id)?;
                 if let Some(name) = update.name { project.name = name; }
                 if let Some(origins) = update.allowed_origins { project.settings.allowed_origins = Some(origins); }
-                output = serde_json::json!({"project_id": id, "name": project.name, "allowed_origins": project.settings.allowed_origins.clone().unwrap_or_default(), "restart_required": true});
+                if let Some(seconds) = update.retention_seconds { project.settings.retention_seconds = seconds; }
+                output = serde_json::json!({"project_id": id, "name": project.name, "allowed_origins": project.settings.allowed_origins.clone().unwrap_or_default(),
+                    "retention_seconds": project.settings.retention_seconds, "restart_required": true});
             }
             ("project-configure", [id, file]) => {
                 let project = active_project_mut(&mut list, id)?;

@@ -12,7 +12,7 @@ import test from "node:test";
 import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
-import { component, assertResponse } from "./openapi-support.mjs";
+import { component, assertRequest, assertResponse } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
@@ -1431,7 +1431,8 @@ test("project origins update live, merge shared origins and persist without chan
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("cache-control"), "no-store");
   assert.deepEqual(await response.json(), { project_id: live.project_id, name: "live", allowed_origins: ["https://customer.example"],
-    effective_allowed_origins: ["https://chunkify.dev", "https://customer.example"], restart_required: false });
+    effective_allowed_origins: ["https://chunkify.dev", "https://customer.example"], retention_seconds: 86400,
+    effective_retention_seconds: 86400, restart_required: false });
   assert.equal((await send("https://customer.example")).status, 201);
   assert.equal((await send("https://old.example")).status, 403);
   assert.equal((await send("https://chunkify.dev")).status, 201);
@@ -1820,6 +1821,154 @@ test("DELETE project revokes all keys, preserves retention and isolates other pr
   assert.equal((await server.get("/v1/events")).events.length, 1);
   listing = await projectCommand(server, ["project", "list"]);
   assert.equal(listing.find(p => p.id === customer.project_id).deleted, true);
+});
+
+test("HTTP project retention applies at creation, changes live and survives restart", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "retention.seconds": "0", "retention.interval_seconds": "1" });
+  const body = { name: "Expiring customer", allowed_origins: ["https://customer.example"], retention_seconds: 1 };
+  assertRequest("/v1/projects", "post", body);
+  const project = await assertResponse("/v1/projects", "post", await createProject(server, body, adminKey), 201);
+  assert.equal(project.retention_seconds, 1);
+  assert.equal(project.effective_retention_seconds, 1);
+  const inherited = await assertResponse("/v1/projects", "post", await createProject(server, { name: "Inherited" }, adminKey), 201);
+  assert.equal(inherited.retention_seconds, null);
+  assert.equal(inherited.effective_retention_seconds, 0);
+  const update = async body => {
+    assertRequest("/v1/project", "patch", body);
+    return assertResponse("/v1/project", "patch", await projectApi(server, "", { method: "PATCH", token: project.secret_key, body }), 200);
+  };
+  const event = sdkEvents()[0];
+  await server.send(event);
+  assert.equal((await projectPost(server, project.public_key, event)).status, 201);
+  const deadline = Date.now() + 7000;
+  while ((await server.get("/v1/events", project.secret_key)).events.length && Date.now() < deadline) await delay(100);
+  assert.equal((await server.get("/v1/events", project.secret_key)).events.length, 0);
+  assert.equal((await server.get("/v1/summary", project.secret_key)).views, 0);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+
+  let changed = await update({ name: "Keep history", retention_seconds: 0 });
+  assert.equal(changed.effective_retention_seconds, 0);
+  assert.deepEqual(changed.allowed_origins, body.allowed_origins);
+  assert.equal((await projectPost(server, project.public_key, event)).status, 201);
+  await delay(2200);
+  assert.equal((await server.get("/v1/events", project.secret_key)).events.length, 1);
+  changed = await update({ allowed_origins: [] });
+  assert.equal(changed.retention_seconds, 0, "omission preserves the override");
+  await server.stop("SIGKILL");
+  await server.start(binary, { "retention.seconds": "1" });
+  assert.equal((await server.get("/v1/events", project.secret_key)).events.length, 1, "unlimited override survives replacement");
+  changed = await update({ retention_seconds: null });
+  assert.equal(changed.retention_seconds, null);
+  assert.equal(changed.effective_retention_seconds, 1);
+  const resetDeadline = Date.now() + 7000;
+  while ((await server.get("/v1/events", project.secret_key)).events.length && Date.now() < resetDeadline) await delay(100);
+  assert.equal((await server.get("/v1/events", project.secret_key)).events.length, 0, "null restores the active installation policy");
+  await server.stop();
+  await server.start();
+  const saved = (await projectCommand(server, ["project", "list"])).find(p => p.id === project.project_id);
+  assert.equal(saved.settings.retention_seconds, null);
+  assert.equal(saved.name, "Keep history");
+});
+
+test("HTTP retention rejects invalid changes and keeps active policy when persistence fails", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "retention.seconds": "0", "retention.interval_seconds": "1" });
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  for (const retention_seconds of [-1, 0.5, "60", true, {}, [], 1e16]) {
+    await assertResponse("/v1/projects", "post", await createProject(server, { name: "Invalid", retention_seconds }, adminKey), 400);
+    await assertResponse("/v1/project", "patch", await projectApi(server, "", {
+      method: "PATCH", body: { name: "Must not change", retention_seconds } }), 400);
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+  for (const token of [adminKey, server.keys.public_key, "invalid"]) {
+    await assertResponse("/v1/project", "patch", await projectApi(server, "", {
+      method: "PATCH", token, body: { retention_seconds: 1 } }), 401);
+  }
+  const event = sdkEvents()[0];
+  await server.send(event);
+  await chmod(server.directory, 0o500);
+  try {
+    await assertResponse("/v1/project", "patch", await projectApi(server, "", {
+      method: "PATCH", body: { name: "Unsaved", allowed_origins: [], retention_seconds: 1 } }), 500);
+  } finally { await chmod(server.directory, 0o700); }
+  assert.equal(await readFile(file, "utf8"), before);
+  await delay(2200);
+  assert.equal((await server.get("/v1/events")).events.length, 1);
+});
+
+test("HTTP key creation scopes public, write and read-only keys and returns secrets only once", async t => {
+  const adminKey = `admin-${randomUUID()}`;
+  const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "retention.seconds": "0" });
+  const project = await projectCommand(server, ["project", "create", "API keys"]);
+  const create = (body, token = project.secret_key) => projectApi(server, "/keys", { method: "POST", body, token });
+  const publicBody = { name: "Website", permission: "public" };
+  for (const token of [adminKey, project.public_key, "invalid"]) {
+    await assertResponse("/v1/project/keys", "post", await create(publicBody, token), 401);
+  }
+  const created = [];
+  for (const body of [publicBody, { name: "Backend", permission: "secret" },
+    { name: "Dashboard", permission: "secret", read_only: true }]) {
+    assertRequest("/v1/project/keys", "post", body);
+    const key = await assertResponse("/v1/project/keys", "post", await create(body), 201);
+    assert.equal(key.project_id, project.project_id);
+    assert.equal(key.permission, body.permission);
+    assert.equal(key.read_only, body.read_only ?? false);
+    assert.equal(key.restart_required, false);
+    created.push(key);
+  }
+  const [publicKey, writeKey, readKey] = created;
+  assert.equal((await projectPost(server, publicKey.key, sdkEvents()[0])).status, 201);
+  assert.equal((await server.get("/v1/summary", readKey.key)).views, 1);
+  assert.equal((await server.get("/v1/summary")).views, 0);
+  await assertResponse("/v1/project", "patch", await projectApi(server, "", {
+    method: "PATCH", token: writeKey.key, body: { name: "Managed by API key", retention_seconds: 0 } }), 200);
+  await assertResponse("/v1/project/keys", "post", await create(publicBody, readKey.key), 403);
+  await assertResponse("/v1/project", "patch", await projectApi(server, "", {
+    method: "PATCH", token: readKey.key, body: { retention_seconds: 1 } }), 403);
+  const listing = await server.get("/v1/project/keys", writeKey.key);
+  assert.equal(listing.keys.length, 5);
+  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  for (const key of created) {
+    assert.ok(listing.keys.some(metadata => metadata.id === key.key_id));
+    assert.ok(!JSON.stringify(listing).includes(key.key));
+    assert.ok(!stored.includes(key.key));
+  }
+  const rotated = await assertResponse("/v1/project/keys/{key_id}/rotate", "post", await projectApi(server,
+    `/keys/${readKey.key_id}/rotate`, { method: "POST", token: writeKey.key }), 200);
+  assert.equal(rotated.read_only, true);
+  await server.stop("SIGKILL");
+  await server.start();
+  assert.equal((await server.get("/v1/summary", rotated.key)).views, 1);
+  assert.equal((await projectPost(server, publicKey.key, sdkEvents()[0])).status, 201);
+  assert.equal((await server.get("/v1/project/keys", writeKey.key)).keys.length, 5);
+  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${readKey.key}` } })).status, 401);
+});
+
+test("HTTP key creation validates before saving and enforces the key limit under concurrent requests", async t => {
+  const server = await collector(t);
+  const create = body => projectApi(server, "/keys", { method: "POST", body });
+  const file = join(server.directory, "keys.json");
+  const before = await readFile(file, "utf8");
+  for (const body of [{}, { name: "Missing permission" }, { permission: "public" },
+    { name: "", permission: "public" }, { name: "  ", permission: "secret" }, { name: "x".repeat(129), permission: "secret" },
+    { name: "é".repeat(65), permission: "secret" }, { name: "Invalid", permission: "admin" },
+    { name: "Invalid", permission: "public", read_only: true }, { name: "Invalid", permission: "secret", read_only: "true" },
+    { name: "Invalid", permission: "secret", read_only: null }, { name: "Foreign", permission: "public", project_id: "other" }]) {
+    await assertResponse("/v1/project/keys", "post", await create(body), 400);
+    assert.equal(await readFile(file, "utf8"), before);
+  }
+  await chmod(server.directory, 0o500);
+  try { await assertResponse("/v1/project/keys", "post", await create({ name: "Unsaved", permission: "secret" }), 500); }
+  finally { await chmod(server.directory, 0o700); }
+  assert.equal(await readFile(file, "utf8"), before);
+  assert.equal((await server.get("/v1/project/keys")).keys.length, 2);
+  const results = await Promise.all(Array.from({ length: 64 }, (_, index) => create({ name: `Key ${index}`, permission: "secret" })));
+  assert.equal(results.filter(r => r.status === 201).length, 62);
+  assert.equal(results.filter(r => r.status === 409).length, 2);
+  for (const response of results) await assertResponse("/v1/project/keys", "post", response, response.status);
+  assert.equal((await server.get("/v1/project/keys")).keys.length, 64);
 });
 
 test("read-only private keys read analytics live and cannot manage projects or keys", async t => {

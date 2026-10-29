@@ -55,7 +55,10 @@ fn execute(
                 .into();
         }
     }
-    if request.command == "project-retention" {
+    if matches!(
+        request.command.as_str(),
+        "project-retention" | "project-create" | "project-update"
+    ) {
         output["effective_retention_seconds"] = output["retention_seconds"]
             .as_u64()
             .unwrap_or(config.retention_seconds)
@@ -69,7 +72,10 @@ fn execute(
         ));
     }
     if request.command != "project-list" {
-        let mut retention = if request.command == "project-retention" {
+        let mut retention = if matches!(
+            request.command.as_str(),
+            "project-retention" | "project-create" | "project-update"
+        ) {
             registry
                 .map(|registry| {
                     registry
@@ -120,6 +126,7 @@ pub enum ProjectAction {
 pub enum KeyAction {
     List,
     Rotate(String),
+    Create(projects::NewKey),
 }
 
 impl Controller {
@@ -145,9 +152,11 @@ impl Controller {
         secret: &str,
         name: String,
         origins: Vec<String>,
+        retention_seconds: Option<u64>,
     ) -> std::result::Result<Value, crate::api::ApiError> {
         use crate::api::ApiError;
         self.authorize_admin(secret)?;
+        projects::validate_retention(retention_seconds).map_err(ApiError::bad)?;
         let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
         if projects::projects(&keys)
             .iter()
@@ -165,6 +174,7 @@ impl Controller {
             args: vec![
                 name,
                 serde_json::to_string(&origins).map_err(|_| ApiError::internal())?,
+                serde_json::to_string(&retention_seconds).map_err(|_| ApiError::internal())?,
             ],
         };
         execute(&self.config, &mut keys, Some(&self.registry), &request)
@@ -231,6 +241,30 @@ impl Controller {
                 return Ok(
                     serde_json::json!({"project_id": id, "keys": project.keys.iter().map(projects::Credential::metadata).collect::<Vec<_>>() }),
                 );
+            }
+            ProjectAction::Keys(KeyAction::Create(key)) => {
+                key.validate().map_err(ApiError::bad)?;
+                if project.keys.len() >= projects::MAX_KEYS {
+                    return Err(ApiError::new(
+                        axum::http::StatusCode::CONFLICT,
+                        "Project key limit reached".into(),
+                    ));
+                }
+                let mut args = vec![
+                    id.into(),
+                    match key.permission {
+                        projects::Permission::Public => "public".into(),
+                        projects::Permission::Secret => "secret".into(),
+                    },
+                    key.name,
+                ];
+                if key.read_only {
+                    args.push("read-only".into());
+                }
+                Request {
+                    command: "key-create".into(),
+                    args,
+                }
             }
             ProjectAction::Delete => Request {
                 command: "project-delete".into(),

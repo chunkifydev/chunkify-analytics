@@ -39,7 +39,7 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
         ]),
     ];
     assert_eq!(
-        write_batch(&mut c, &batch, true, &mut profile).unwrap_or_else(|e| panic!("{}", e.message)),
+        write_batch(&mut c, &batch, true, &mut profile).unwrap(),
         vec![1, 2]
     );
     let replay = vec![
@@ -51,8 +51,7 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
         request(vec![row("a", "new", "new", true)]),
     ];
     assert_eq!(
-        write_batch(&mut c, &replay, true, &mut profile)
-            .unwrap_or_else(|e| panic!("{}", e.message)),
+        write_batch(&mut c, &replay, true, &mut profile).unwrap(),
         vec![0, 1]
     );
     let values = c
@@ -110,8 +109,7 @@ fn bulk_lookup_preserves_first_delivery_projects_and_parameterized_ids() {
             .any(|r| r.0 == "b" && r.1 == id && r.2 == other_project_payload)
     );
     assert_eq!(
-        write_batch(&mut c, &[request(vec![])], true, &mut profile)
-            .unwrap_or_else(|e| panic!("{}", e.message)),
+        write_batch(&mut c, &[request(vec![])], true, &mut profile).unwrap(),
         vec![0]
     );
 }
@@ -148,7 +146,112 @@ fn bulk_lookup_rolls_back_failed_batches_and_reuses_the_stage() {
             true,
             &mut profile
         )
-        .unwrap_or_else(|e| panic!("{}", e.message)),
+        .unwrap(),
         vec![1]
     );
+}
+
+#[test]
+fn batch_logs_report_committed_counts_and_failures_without_event_values() {
+    use std::io::Write;
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    for bulk in [true, false] {
+        let output = Capture::default();
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let mut c = Connection::open_in_memory().unwrap();
+        crate::storage::initialize(&mut c).unwrap();
+        crate::storage::create_stage(&c).unwrap();
+        let mut profile = Profile::new(false, &c, "test").unwrap();
+        let batch = vec![
+            request(vec![row(
+                "private-project",
+                "private-id",
+                "private-payload",
+                true,
+            )]),
+            request(vec![row(
+                "private-project",
+                "private-id",
+                "private-payload",
+                true,
+            )]),
+            request(vec![row(
+                "private-project",
+                "private-id-2",
+                "private-payload",
+                true,
+            )]),
+        ];
+        flush(&mut c, batch, 3, 3, bulk, None, &mut profile);
+        let mut invalid = row(
+            "private-project",
+            "private-invalid",
+            "private-payload",
+            true,
+        );
+        invalid.values[11] = Value::BigInt(2);
+        flush(
+            &mut c,
+            vec![request(vec![invalid])],
+            1,
+            1,
+            bulk,
+            None,
+            &mut profile,
+        );
+
+        let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<_> = logs.lines().collect();
+        assert_eq!(lines.len(), 2, "{logs}");
+        for field in [
+            "INFO",
+            "batch_saved",
+            "backend=\"duckdb\"",
+            "requests=3",
+            "received=3",
+            "inserted=2",
+            "duplicates=1",
+            "queue_ms=",
+            "duration_ms=",
+        ] {
+            assert!(lines[0].contains(field), "missing {field}: {logs}");
+        }
+        for field in [
+            "ERROR",
+            "batch_failed",
+            "received=1",
+            "stage=\"insert_events\"",
+        ] {
+            assert!(lines[1].contains(field), "missing {field}: {logs}");
+        }
+        assert!(!lines[1].contains("inserted="));
+        assert!(
+            !logs.contains("private-") && !logs.contains("test-key"),
+            "{logs}"
+        );
+        assert_eq!(
+            c.query_row("SELECT COUNT(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
 }

@@ -235,6 +235,32 @@ fn application_settings_are_toml_only_except_deployment_overrides() {
 }
 
 #[test]
+fn logging_levels_are_validated_without_echoing_invalid_values() {
+    let fixture = Fixture::new();
+    for level in ["off", "error", "warn", "info", "debug", "trace"] {
+        std::fs::write(
+            fixture.0.join("config.toml"),
+            format!("[logging]\nlevel = '{level}'\n"),
+        )
+        .unwrap();
+        assert!(fixture.run(&["config", "check"]).status.success());
+    }
+    for level in ["", "3", "private-test-secret"] {
+        std::fs::write(
+            fixture.0.join("config.toml"),
+            format!("[logging]\nlevel = '{level}'\n"),
+        )
+        .unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("logging.level must be"));
+        assert!(!error.contains("private-test-secret"));
+    }
+    assert!(!fixture.0.join("data").exists());
+}
+
+#[test]
 fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
     let fixture = Fixture::new();
     for source in [

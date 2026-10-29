@@ -114,15 +114,20 @@ An unset or empty value disables this endpoint with a 404 response.
 curl -X POST http://127.0.0.1:4174/v1/projects \
   -H "Authorization: Bearer $CHUNKIFY_ADMIN_KEY" \
   -H 'Content-Type: application/json' \
-  -d '{"name":"Customer website","allowed_origins":["https://customer.example"]}'
+  -d '{"name":"Customer website","allowed_origins":["https://customer.example"],"retention_seconds":2592000}'
 ```
 
-The response is 201 with `project_id`, `name`, `public_key` and `secret_key`.
+The response is 201 with `project_id`, `name`, `public_key`, `secret_key`,
+`retention_seconds` and `effective_retention_seconds`.
 The ID is generated automatically. Save the keys when returned and store the
 project ID alongside your customer record. The project is ready immediately.
 
 `name` is required, with 1 to 128 characters. Names can repeat. `allowed_origins`
-is optional and adds to the shared TOML origins. Supplying an ID is rejected.
+is optional and adds to the shared TOML origins. Optional `retention_seconds`
+sets the project's receipt-time retention in seconds. Omit it or send `null` to
+inherit the installation default; `0` disables expiration. The project and its
+retention are saved together and take effect before the response. The response's
+`effective_retention_seconds` resolves the inherited default. Supplying an ID is rejected.
 Project secret keys cannot create projects. The admin key does not grant access
 to project analytics or MCP directly. It can list and rotate keys for any active
 project through the recovery routes below. The installation supports up to 1024
@@ -135,9 +140,10 @@ It can manage only that project. Read-only private keys cannot use these routes.
 
 | Endpoint | Use |
 | --- | --- |
-| `PATCH /v1/project` | Update the name or additional origins without restarting. |
+| `PATCH /v1/project` | Update the name, additional origins or retention without restarting. |
 | `DELETE /v1/project` | Delete this project and revoke all its keys. |
 | `GET /v1/project/keys` | List key IDs, names and types. |
+| `POST /v1/project/keys` | Create a named public or secret key. |
 | `POST /v1/project/keys/{key_id}/rotate` | Replace a key and return its new value. |
 
 For example, keep `https://chunkify.dev` in TOML and add a customer's website:
@@ -150,9 +156,40 @@ curl --request PATCH http://127.0.0.1:4174/v1/project \
 ```
 
 Both origins then work for this project. Other projects keep their own lists.
-Supply `name` to rename the project. Omitted fields stay unchanged; send
-`allowed_origins: []` to clear additions. Empty requests and null fields are
-rejected. Changes are saved together before they take effect.
+Supply `name` to rename the project or `retention_seconds` to change retention.
+Omitted fields stay unchanged; send `allowed_origins: []` to clear additions.
+Empty requests and null names or origins are rejected. A null
+`retention_seconds` restores the installation default. Changes are saved together
+before they take effect. The response includes both `retention_seconds` and
+`effective_retention_seconds`.
+
+### Create a key through the API
+
+Use the project's full-access secret key to create additional keys:
+
+```sh
+curl --request POST http://127.0.0.1:4174/v1/project/keys \
+  -H "Authorization: Bearer $SECRET_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"name":"Dashboard","permission":"secret","read_only":true}'
+```
+
+Set `permission` to `public` for ingestion or `secret` for analytics access.
+Secret keys default to full project access. Set `read_only: true` for dashboard
+and MCP clients. Public keys cannot be read-only. Names must be nonblank and
+at most 128 UTF-8 bytes.
+
+The 201 response contains `project_id`, `key_id`, `key`, `permission`,
+`read_only` and `restart_required: false`. The key works immediately. Save its
+value now; later listings expose only metadata. Creating a key does not replace
+existing keys. Each project supports 64 active keys, including its initial two;
+creating another at the limit returns 409. Invalid requests return 400.
+
+The installation admin key and public keys cannot call this project-scoped
+endpoint; read-only secret keys receive 403. The project's full-access key
+also authorizes retention changes and the other management routes above.
+
+### Rotate a key
 
 Rotation invalidates the old key immediately. Save the returned `key` value;
 key listings never reveal it. Rotating the secret key used by the request means
@@ -233,6 +270,22 @@ eligible for cleanup; extending it cannot recover removed data. Changing the
 installation default or cleanup interval in TOML requires a restart.
 A failed scheduled cleanup retries at the next interval; a failed startup cleanup
 prevents startup. See [storage](storage.md) for S3 file expiration.
+
+Your backend can change retention through the API with the project's full-access
+secret key:
+
+```sh
+curl --request PATCH http://127.0.0.1:4174/v1/project \
+  -H "Authorization: Bearer $SECRET_KEY" \
+  -H 'Content-Type: application/json' \
+  --data '{"retention_seconds":604800}'
+```
+
+Use `0` for unlimited retention or `null` to inherit the installation default.
+Omitting `retention_seconds` leaves it unchanged. The response reports the
+configured and effective durations. Values must be whole non-negative seconds
+no larger than `9223372036854775`. Read-only, public and installation admin keys
+cannot change retention through this endpoint.
 
 ## Backup and restore
 

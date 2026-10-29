@@ -187,6 +187,48 @@ test("S3 stores repeated events, isolates projects and survives task replacement
   await assert.rejects(stat(join(app.directory(), "state/analytics.duckdb")), { code: "ENOENT" });
 });
 
+test("S3 HTTP retention and newly created keys remain active across task replacement", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const adminKey = `s3-admin-${randomUUID()}`;
+  const app = await installation(t, s3Settings(), 0, { CHUNKIFY_ADMIN_KEY: adminKey });
+  await app.command(["init"]);
+  await app.start();
+  const response = await fetch(`${app.url}/v1/projects`, { method: "POST", headers: {
+    authorization: `Bearer ${adminKey}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Retained customer", retention_seconds: 1 }) });
+  assert.equal(response.status, 201, await response.clone().text());
+  const project = await response.json();
+  assert.equal(project.effective_retention_seconds, 1);
+  const created = await fetch(`${app.url}/v1/project/keys`, { method: "POST", headers: {
+    authorization: `Bearer ${project.secret_key}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: "Dashboard", permission: "secret", read_only: true }) });
+  assert.equal(created.status, 201, await created.clone().text());
+  const dashboard = await created.json();
+  const event = events()[0];
+  await app.send(event, project.public_key);
+  await app.send(event);
+  await delay(1200);
+  assert.equal((await app.get("/v1/events", dashboard.key)).events.length, 0, "creation policy filters reads before a sweep");
+  assert.equal((await app.get("/v1/events")).events.length, 1);
+  const unlimited = await app.manage("", "PATCH", { retention_seconds: 0 }, project.secret_key);
+  assert.equal(unlimited.effective_retention_seconds, 0);
+  assert.equal((await app.get("/v1/events", dashboard.key)).events.length, 1, "the unswept file is still retained");
+  await app.replaceTask();
+  assert.equal((await app.get("/v1/events", dashboard.key)).events.length, 1);
+  const keys = await app.get("/v1/project/keys", project.secret_key);
+  assert.equal(keys.keys.find(key => key.id === dashboard.key_id).read_only, true);
+  assert.ok(!JSON.stringify(keys).includes(dashboard.key));
+  await app.manage("", "PATCH", { retention_seconds: 1 }, project.secret_key);
+  assert.equal((await app.get("/v1/events", dashboard.key)).events.length, 0);
+  await app.replaceTask();
+  const inherited = await app.manage("", "PATCH", { retention_seconds: null }, project.secret_key);
+  assert.equal(inherited.retention_seconds, null);
+  assert.equal(inherited.effective_retention_seconds, 0);
+  assert.equal((await app.get("/v1/events", dashboard.key)).events.length, 0, "startup cleanup removed the expired file");
+  assert.equal((await app.get("/v1/events")).events.length, 1);
+});
+
 test("S3 uses the AWS credential chain when explicit storage keys are omitted", {
   skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
 }, async t => {

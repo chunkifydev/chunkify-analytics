@@ -84,6 +84,8 @@ impl Store {
             || query.continent.is_some()
             || query.country.is_some()
             || query.city.is_some()
+            || query.page_origin.is_some()
+            || query.page_path.is_some()
             || query.order.is_some()
         {
             return Err(ApiError::bad("View detail accepts only limit and cursor"));

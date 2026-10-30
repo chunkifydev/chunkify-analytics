@@ -151,6 +151,12 @@
             "$ref": "#/components/parameters/city"
           },
           {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
             "$ref": "#/components/parameters/event_name"
           },
           {
@@ -755,6 +761,12 @@
             "$ref": "#/components/parameters/city"
           },
           {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
             "$ref": "#/components/parameters/group_by"
           },
           {
@@ -952,6 +964,12 @@
           },
           {
             "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -1152,6 +1170,12 @@
           },
           {
             "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
           },
           {
             "$ref": "#/components/parameters/view_id"
@@ -1361,6 +1385,12 @@
           },
           {
             "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -1592,6 +1622,12 @@
           },
           {
             "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -2901,6 +2937,12 @@
             "$ref": "#/components/parameters/city"
           },
           {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3285,6 +3327,12 @@
             "$ref": "#/components/parameters/city"
           },
           {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3470,6 +3518,12 @@
           },
           {
             "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -3982,6 +4036,12 @@
             "$ref": "#/components/parameters/city"
           },
           {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -4372,10 +4432,12 @@
             "device_type",
             "continent",
             "country",
-            "city"
+            "city",
+            "page_origin",
+            "page_path"
           ]
         },
-        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries."
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites."
       },
       "view_id": {
         "name": "view_id",
@@ -4414,7 +4476,9 @@
             "viewer_id",
             "continent",
             "country",
-            "city"
+            "city",
+            "page_origin",
+            "page_path"
           ]
         }
       },
@@ -4491,6 +4555,26 @@
           "maxLength": 256
         },
         "description": "Exact, case-sensitive city name from the local lookup, with 1 to 256 Unicode characters. Use country alongside city to distinguish places with the same name. Missing locations do not match."
+      },
+      "page_origin": {
+        "name": "page_origin",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "description": "Exact, case-sensitive page origin captured by the player, such as https://example.com. Metrics use the first retained view start; raw events use each event context. Missing values do not match."
+      },
+      "page_path": {
+        "name": "page_path",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "description": "Exact, case-sensitive page path captured by the player, such as /watch/video. Filter by page_origin as well to distinguish identical paths on different sites. Metrics use the first retained view start; raw events use each event context. Missing values do not match."
       }
     },
     "schemas": {
@@ -7179,7 +7263,9 @@
               "device_type",
               "continent",
               "country",
-              "city"
+              "city",
+              "page_origin",
+              "page_path"
             ]
           },
           "groups": {
@@ -7230,7 +7316,9 @@
               "device_type",
               "continent",
               "country",
-              "city"
+              "city",
+              "page_origin",
+              "page_path"
             ]
           },
           "groups": {
@@ -7281,7 +7369,9 @@
               "device_type",
               "continent",
               "country",
-              "city"
+              "city",
+              "page_origin",
+              "page_path"
             ]
           },
           "groups": {
@@ -7837,7 +7927,9 @@
               "viewer_id",
               "continent",
               "country",
-              "city"
+              "city",
+              "page_origin",
+              "page_path"
             ]
           },
           "values": {
@@ -7944,7 +8036,9 @@
               "device_type",
               "continent",
               "country",
-              "city"
+              "city",
+              "page_origin",
+              "page_path"
             ]
           },
           "sort_by": {
@@ -7985,7 +8079,9 @@
               "viewer_id",
               "continent",
               "country",
-              "city"
+              "city",
+              "page_origin",
+              "page_path"
             ]
           },
           "continent": {
@@ -8010,6 +8106,18 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 256
+          },
+          "page_origin": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Exact, case-sensitive page_origin from the first retained view start, or each event for raw-event exports."
+          },
+          "page_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Exact, case-sensitive page_path from the first retained view start, or each event for raw-event exports."
           }
         }
       },

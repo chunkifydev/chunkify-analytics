@@ -174,7 +174,7 @@ unchanged with each cursor. Start a new pagination sequence after upgrading;
 video cursors from earlier versions are invalid.
 
 `get_metrics` also accepts `group_by` with `browser_name`, `os_name`,
-`device_type`, `continent`, `country` or `city` for summary, quality and
+`device_type`, `continent`, `country`, `city`, `page_origin` or `page_path` for summary, quality and
 engagement. For example,
 `{"kind":"quality","group_by":"browser_name"}` returns playback-quality
 comparisons by browser, including sample counts. Each group has a `value` and
@@ -195,10 +195,15 @@ playback outside that time bucket. See [metric definitions](api.md#metric-defini
 Location queries use the same filters and pagination:
 
 ```json
+{"kind":"summary","group_by":"page_origin"}
+{"kind":"summary","group_by":"page_path","page_origin":"https://example.com"}
 {"kind":"summary","group_by":"country"}
 {"kind":"summary","group_by":"city","country":"GB"}
 {"kind":"quality","group_by":"continent"}
 ```
+
+Page groups use the first retained start, even after navigation. Page filters
+are exact and case-sensitive; use origin alongside path to distinguish sites.
 
 Use `list_dimension_values` with `{"dimension":"city","country":"GB"}` to
 list cities observed in that country, with view counts. Location follows the
@@ -256,7 +261,7 @@ For error trends, call `get_timeseries` with `kind=quality`, date bounds and an
 interval. `kind=engagement` returns watch-time and reached-end metrics per bucket.
 For actual filter values, use `list_dimension_values` with
 `{"dimension":"browser_name"}`. Supported dimensions are `browser_name`,
-`os_name`, `device_type`, `continent`, `country`, `city`, `video_id` and `viewer_id`.
+`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `video_id` and `viewer_id`.
 Values come from first retained starts, with null context separate from literal `unknown`.
 
 ## Export CSV

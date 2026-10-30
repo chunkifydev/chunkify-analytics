@@ -127,7 +127,7 @@ Pages displaying or using bundled DB-IP location results must include an
 ### Filters and pagination
 
 Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `view_id`,
-`browser_name`, `os_name`, `device_type`, `continent`, `country`, and `city`. View detail accepts only timeline
+`browser_name`, `os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, and `page_path`. View detail accepts only timeline
 pagination; export downloads use their saved query. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
@@ -202,7 +202,7 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
 ### Breakdowns by browser, OS, device and location
 
 Add `group_by` with `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, or `city` to
+`country`, `city`, `page_origin`, or `page_path` to
 `GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
 `get_metrics` accepts the same argument, with `kind` selecting `summary`,
 `quality` or `engagement`. Without `group_by`, each route returns its
@@ -241,10 +241,19 @@ Examples:
 GET /v1/summary?group_by=device_type
 GET /v1/quality?group_by=browser_name&video_id=video-123
 GET /v1/engagement?group_by=os_name&browser_name=Chrome
+GET /v1/summary?group_by=page_origin
+GET /v1/summary?group_by=page_path&page_origin=https%3A%2F%2Fexample.com
 GET /v1/summary?group_by=country
 GET /v1/summary?group_by=city&country=GB
 GET /v1/quality?group_by=continent
 ```
+
+Page filters are exact and case-sensitive, with 1 to 4096 Unicode characters.
+Page grouping and view reports use the first retained start, even if the player
+navigates during playback. Raw-event filters use each event's page context.
+Missing page context forms a null group. Combine `page_path` with `page_origin`
+to distinguish identical paths on different sites. The player captures origin
+and path without URL credentials, query strings or fragments.
 
 ### Hourly and daily charts
 
@@ -566,7 +575,7 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 
 `GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
 Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `video_id` and `viewer_id`. Each value has `value` and `views`;
+`country`, `city`, `page_origin`, `page_path`, `video_id` and `viewer_id`. Each value has `value` and `views`;
 values and counts come from first retained starts after applying the usual date, identity and context filters.
 Values sort ascending with null first. Literal `unknown` remains distinct from
 missing context. HTTP page sizes are 1 to 1000, default 100. Cursors bind the

@@ -1356,15 +1356,15 @@ for (const separateReads of [false, true]) test(`location reports use first star
   ]) {
     const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
       video_id: video, viewer_id: viewer, occurred_at: "2026-10-19T12:00:00Z",
-      browser_context: { schema_version: 1, browser_name: "Chrome", country: "US", city: "Forged" } };
+      browser_context: { schema_version: 1, browser_name: "Chrome", country: "US", city: "Forged", ...(video !== "d" && { page_origin: video === "c" ? "https://other.example" : "https://example.com", page_path: video === "c" ? "/other" : "/watch/é" }) } };
     starts.push(start);
     // A later-sequence start arrives first from another country. It must not select the view's location.
-    if (video === "a") await send({ ...start, event_id: randomUUID(), sequence: 2 }, "2001:218::1");
+    if (video === "a") await send({ ...start, event_id: randomUUID(), sequence: 2, browser_context: { schema_version: 1, page_origin: "https://later.example", page_path: "/later" } }, "2001:218::1");
     await send(start, ip);
     if (video === "d") continue;
     const end = { ...start, event_id: randomUUID(), sequence: 4, event_name: "chunkify.video.view_ended",
       occurred_at: "2026-10-20T12:00:00Z", playing_time_ms: playing, reason: "ended",
-      startup_time_ms: 200, rebuffer_duration_ms: 100,
+      startup_time_ms: 200, rebuffer_duration_ms: 100, browser_context: { schema_version: 1, page_origin: "https://navigated.example", page_path: "/after-navigation" },
       rendition_playing_time: [{ width: 640, height: 360, codec: "avc1", bitrate_bps: 500000, frame_rate: 30, playing_time_ms: playing }] };
     await send(end, video === "a" ? "2001:218::1" : ip);
     if (video === "a") await send({ ...end, event_id: randomUUID(), sequence: 3,
@@ -1375,6 +1375,8 @@ for (const separateReads of [false, true]) test(`location reports use first star
     country: [[null, 1, 0, 0], ["GB", 2, 1, 4000], ["JP", 1, 1, 2000]],
     continent: [[null, 1, 0, 0], ["AS", 1, 1, 2000], ["EU", 2, 1, 4000]],
     city: [[null, 2, 1, 2000], ["London", 2, 1, 4000]],
+    page_origin: [[null, 1, 0, 0], ["https://example.com", 2, 1, 4000], ["https://other.example", 1, 1, 2000]],
+    page_path: [[null, 1, 0, 0], ["/other", 1, 1, 2000], ["/watch/é", 2, 1, 4000]],
   };
   for (const [group_by, groups] of Object.entries(expected)) {
     const summary = await query("summary", { group_by });
@@ -1397,7 +1399,7 @@ for (const separateReads of [false, true]) test(`location reports use first star
       await fetch(`${server.url}/v1/dimensions/${group_by}`, { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 200);
     assert.deepEqual(dimensions.values, groups.map(([value, views]) => ({ value, views })));
   }
-  const filters = { continent: "EU", country: "GB", city: "London", browser_name: "Chrome" };
+  const filters = { continent: "EU", country: "GB", city: "London", browser_name: "Chrome", page_origin: "https://example.com", page_path: "/watch/é" };
   assert.deepEqual(await query("summary", filters), { views: 2, unique_viewers: 1, total_playing_time_ms: 4000 });
   assert.equal((await query("quality", filters)).fatal_errors.affected_views, 1);
   assert.equal((await query("engagement", filters)).views, 2);
@@ -1418,18 +1420,22 @@ for (const separateReads of [false, true]) test(`location reports use first star
   assert.equal((await query("summary", { city: "london" })).views, 0);
   assert.equal((await query("summary", { city: "London' OR TRUE --" })).views, 0);
   for (const route of ["summary", "events", "timeseries"]) for (const invalid of [
-    { country: "gb" }, { country: "GBR" }, { country: "éé" }, { continent: "XX" }, { continent: "eu" }, { city: "" }, { city: "a".repeat(257) },
+    { page_origin: "" }, { page_path: "" }, { page_origin: "x".repeat(4097) }, { page_path: "é".repeat(4097) }, { country: "gb" }, { country: "GBR" }, { country: "éé" }, { continent: "XX" }, { continent: "eu" }, { city: "" }, { city: "a".repeat(257) },
   ]) await server.get(`/v1/${route}?${new URLSearchParams({ ...(route === "timeseries" && dates), ...invalid })}`, 400);
+  assert.equal((await query("summary", { page_path: "/watch/É" })).views, 0);
+  assert.equal((await query("summary", { page_path: "' OR TRUE --" })).views, 0);
+  assert.equal((await query("summary", { page_origin: "https://navigated.example" })).views, 0);
+  assert.equal((await query("events", { page_path: "/after-navigation" })).events.length, 4);
   const first = await query("summary", { group_by: "country", limit: "1" });
-  for (const changed of [{ country: "GB" }, { city: "London" }, { continent: "EU" }, { group_by: "city" }]) {
+  for (const changed of [{ page_origin: "https://example.com" }, { page_path: "/watch/é" }, { country: "GB" }, { city: "London" }, { continent: "EU" }, { group_by: "city" }]) {
     await server.get(`/v1/summary?${new URLSearchParams({ group_by: "country", cursor: first.next_cursor, ...changed })}`, 400);
   }
-  for (const field of ["country", "continent", "city"]) {
+  for (const field of ["country", "continent", "city", "page_origin", "page_path"]) {
     await assertResponse("/v1/views/{view_id}", "get", await fetch(`${server.url}/v1/views/${starts[0].view_id}?${field}=GB`,
       { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 400);
   }
   for (const [resource, params, contains] of [
-    ["summary", { group_by: "country" }, "GB"], ["quality", { group_by: "continent" }, "EU"],
+    ["summary", { group_by: "page_origin" }, "https://example.com"], ["engagement", { group_by: "page_path", page_origin: "https://example.com" }, "/watch/é"], ["dimensions", { dimension: "page_path" }, "/watch/é"], ["summary", { group_by: "country" }, "GB"], ["quality", { group_by: "continent" }, "EU"],
     ["engagement", { group_by: "city", country: "GB" }, "London"],
     ["dimensions", { dimension: "city", country: "GB" }, "London"], ["events", { country: "GB" }, "London"],
   ]) {

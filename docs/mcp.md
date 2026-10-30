@@ -173,8 +173,9 @@ ties use video ID ascending in either direction. Keep sorting and filters
 unchanged with each cursor. Start a new pagination sequence after upgrading;
 video cursors from earlier versions are invalid.
 
-`get_metrics` also accepts `group_by` with `browser_name`, `os_name` or
-`device_type` for summary, quality and engagement. For example,
+`get_metrics` also accepts `group_by` with `browser_name`, `os_name`,
+`device_type`, `continent`, `country` or `city` for summary, quality and
+engagement. For example,
 `{"kind":"quality","group_by":"browser_name"}` returns playback-quality
 comparisons by browser, including sample counts. Each group has a `value` and
 `data` containing the selected metrics. Without `group_by`, it returns filtered
@@ -184,12 +185,28 @@ Grouped results use page coverage and `data.next_cursor`. Keep `kind`,
 `group_by` and filters unchanged with each cursor. Groups use the first retained
 start's context and sort by value ascending, with missing context in a `null`
 group first. The literal device type `unknown` stays separate. Unique-viewer
-counts must not be summed across groups. See [breakdown semantics](api.md#breakdowns-by-browser-os-and-device).
+counts must not be summed across groups. See [breakdown semantics](api.md#breakdowns-by-browser-os-device-and-location).
 
 Use summary totals rather than adding unique viewers across videos or days.
 Null measurements mean unavailable. Ratios are fractions; multiply by 100 for
 percentages. Timeseries attributes playing time to the view's start, including
 playback outside that time bucket. See [metric definitions](api.md#metric-definitions).
+
+Location queries use the same filters and pagination:
+
+```json
+{"kind":"summary","group_by":"country"}
+{"kind":"summary","group_by":"city","country":"GB"}
+{"kind":"quality","group_by":"continent"}
+```
+
+Use `list_dimension_values` with `{"dimension":"city","country":"GB"}` to
+list cities observed in that country, with view counts. Location follows the
+first retained start; an IP change during playback does not move the view.
+Unknown locations form a null group. City groups use the stored name, so add a
+country filter to avoid combining names shared by different countries. CSV
+exports accept the same location filters and grouping. Pages using these results
+must include the [DB-IP attribution](geolocation.md#data-and-attribution).
 
 ## Limits
 
@@ -239,8 +256,8 @@ For error trends, call `get_timeseries` with `kind=quality`, date bounds and an
 interval. `kind=engagement` returns watch-time and reached-end metrics per bucket.
 For actual filter values, use `list_dimension_values` with
 `{"dimension":"browser_name"}`. Supported dimensions are `browser_name`,
-`os_name`, `device_type`, `video_id` and `viewer_id`. Values come from first
-retained starts, with null context separate from literal `unknown`.
+`os_name`, `device_type`, `continent`, `country`, `city`, `video_id` and `viewer_id`.
+Values come from first retained starts, with null context separate from literal `unknown`.
 
 ## Export CSV
 

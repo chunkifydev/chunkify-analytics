@@ -124,7 +124,9 @@ export async function verify(server, sent, acknowledged, preloadIds, workload, o
         for (const [key, value] of Object.entries(expected.event.browser_context)) {
           assert.deepEqual(record.event_context[key], value, "flat browser context must survive restart");
         }
-        assert.ok(record.event_context.client_ip, "request IP must remain alongside browser context");
+        assert.ok(Object.hasOwn(record.event_context, "country"));
+        assert.ok(Object.hasOwn(record.event_context, "city"));
+        assert.equal(record.event_context.client_ip, undefined);
       }
       assert.equal(record.otlp, undefined);
       assert.ok(Number.isFinite(Date.parse(record.received_at)));

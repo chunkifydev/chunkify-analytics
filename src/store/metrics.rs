@@ -708,7 +708,8 @@ pub(super) fn view_cohort(
                 occurred_at_ms := occurred_at_ms,
                 context_browser_name := context_browser_name,
                 context_os_name := context_os_name,
-                context_device_type := context_device_type
+                context_device_type := context_device_type,
+                context_remainder := context_remainder
             ), (sequence, occurred_at_ms, ingest_id))
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS first_start,
             min((sequence, occurred_at_ms, ingest_id))
@@ -727,11 +728,12 @@ pub(super) fn view_cohort(
             first_start.context_browser_name AS context_browser_name,
             first_start.context_os_name AS context_os_name,
             first_start.context_device_type AS context_device_type,
+            first_start.context_remainder AS context_remainder,
             COALESCE(measurement.playing_time_ms, 0) AS playing_time_ms{measurement_projection}
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT view_id, occurred_at_ms, video_id, viewer_id, context_browser_name, context_os_name, context_device_type, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, context_browser_name, context_os_name, context_device_type, context_remainder, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

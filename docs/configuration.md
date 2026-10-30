@@ -22,6 +22,7 @@ for deployment overrides, or set these variables directly in your container:
 | --- | --- | --- |
 | `CHUNKIFY_ADMIN_KEY` | Environment only | Enables project creation and key recovery through the API. Unset or empty disables these admin routes. |
 | `CHUNKIFY_DATA_DIR` | `data_dir` | Container state directory. |
+| `CHUNKIFY_GEOIP_DATABASE` | `server.geoip_database` | Replace the bundled City MMDB with a local file. |
 | `CHUNKIFY_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
 | `CHUNKIFY_STORAGE_BACKEND` | `storage.backend` | Select `local` or `s3` storage. |
 | `CHUNKIFY_S3_URL`, `CHUNKIFY_S3_ENDPOINT`, `CHUNKIFY_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
@@ -73,7 +74,7 @@ See [storage](storage.md) for local and S3/R2 examples.
 | `server.allowed_origins` | Empty | Shared website origins, without paths or trailing slashes. Each project can allow additional origins. Server requests without Origin still require the public key. |
 | `retention.seconds` | `2592000` | Default retention by server receipt time, in seconds. Default is 30 days. Projects may override it; `0` disables expiration for inheriting projects. Must be a non-negative whole number no larger than `9223372036854775`. |
 | `retention.interval_seconds` | `3600` | Seconds between completed retention sweeps while serving. Whole number from 1 to 86400. The timer stays active for live project changes; disabled policies delete nothing. |
-| `server.store_ip` | `true` | Store request IP context supplied by the analytics server. Accepts only `true` or `false`. Disabling applies to new events and does not erase existing data or sanitize arbitrary fields in the original payload. |
+| `server.geoip_database` | `../share/chunkify-analytics/dbip-city-lite.mmdb` relative to the executable | Local City MMDB loaded at startup. Continent, country and city lookup is always enabled; request IPs are discarded. See [geolocation](geolocation.md). |
 | `server.trusted_proxies` | Empty | Array of literal IPv4/IPv6 addresses or CIDRs allowed to supply `X-Forwarded-For`. Empty trusts no proxies. No hostnames, ports, or wildcards. Use IPv4 CIDRs for IPv4-mapped addresses. |
 
 ### Admission limits

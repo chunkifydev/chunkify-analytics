@@ -49,6 +49,8 @@ jobs:
         with:
           key: linked-duckdb-ci-ubuntu22-v1
           cache-on-failure: true
+      - name: Install local geolocation database for the native demo
+        run: sh scripts/install-geolocation.sh
       - name: Install prebuilt DuckDB
         run: sh scripts/install-duckdb.sh
       # cargo test also builds the real executable for integration tests. Build

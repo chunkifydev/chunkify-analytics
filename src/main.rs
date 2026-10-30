@@ -10,6 +10,7 @@ use tracing_subscriber::prelude::*;
 mod context;
 mod event;
 mod exports;
+mod geolocation;
 mod limits;
 mod mcp;
 mod profile;
@@ -60,6 +61,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .try_init()
                 .map_err(|_| "Cannot initialize server logging")?;
+            let geolocation =
+                std::sync::Arc::new(geolocation::Database::open(&config.geoip_database)?);
             let _lock = config.lock()?;
             let keys = config.keys()?;
             let config = std::sync::Arc::new(config);
@@ -116,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Listening on http://{}", listener.local_addr()?);
             let result = axum::serve(
                 listener,
-                api::router(store.clone(), projects, &config, controller)
+                api::router(store.clone(), projects, &config, controller, geolocation)
                     .into_make_service_with_connect_info::<std::net::SocketAddr>(),
             )
             .with_graceful_shutdown(shutdown)

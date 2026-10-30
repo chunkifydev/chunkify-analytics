@@ -477,3 +477,28 @@ fn rate_limit_overrides_validate_without_starting_storage() {
     }
     assert!(!fixture.0.join("data").exists());
 }
+
+#[test]
+fn geolocation_path_is_relative_to_toml_and_environment_can_override_it() {
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.0.join("settings")).unwrap();
+    std::fs::write(
+        fixture.0.join("settings/server.toml"),
+        "[server]\ngeoip_database = 'missing-city.mmdb'\n",
+    )
+    .unwrap();
+    let output = fixture.run(&["--config", "settings/server.toml", "serve"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("settings/missing-city.mmdb"));
+    let output = fixture
+        .command()
+        .args(["--config", "settings/server.toml", "serve"])
+        .env("CHUNKIFY_GEOIP_DATABASE", "override-city.mmdb")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("override-city.mmdb"));
+    assert!(!stderr.contains("settings/missing-city.mmdb"));
+    assert!(!fixture.0.join("data").exists());
+}

@@ -2,7 +2,10 @@
 
 Use Rust 1.99.0, your platform's C build tools, and Node.js 24. Install the
 prebuilt DuckDB library once with `sh scripts/install-duckdb.sh`. The lockfiles
-pin Rust and JavaScript dependencies.
+pin Rust and JavaScript dependencies. For a local server, also run
+`sh scripts/install-geolocation.sh` to install the bundled City MMDB in
+`target/share/chunkify-analytics`. Automated ingestion tests use small synthetic
+MMDB fixtures.
 
 ## Run the checks
 
@@ -82,7 +85,8 @@ cd chunkify-analytics
 docker build -t chunkify-analytics:local .
 ```
 
-The build downloads the pinned DuckDB library and compiles the analytics server.
+The build downloads the pinned DuckDB library and DB-IP City Lite MMDB, then
+compiles the analytics server.
 On a small build machine, add `--build-arg BUILD_JOBS=1` to reduce simultaneous
 compilation work. Follow the [Docker installation guide](../README.md#install-with-docker)
 with `chunkify-analytics:local` in place of

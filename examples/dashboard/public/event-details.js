@@ -122,11 +122,16 @@ function openEvent(record, row, trigger) {
       ['Language', context.language], ['Time zone', context.timezone],
       ['Screen', dimensions(context.screen_width_px, context.screen_height_px)],
       ['Viewport', dimensions(context.viewport_width_px, context.viewport_height_px)],
-      ['Client IP', context.client_ip], ['IP source', context.client_ip_source],
+      ['Continent', context.continent], ['Country', context.country], ['City', context.city],
+      ['Page origin', context.page_origin], ['Page path', context.page_path],
       ['SDK', version(e.sdk_name, e.sdk_version)], ['Connector', version(e.connector_name, e.connector_version)],
       ['Player', version(e.player_name, e.player_version)],
     ]),
   );
+  const attribution = document.createElement('a');
+  attribution.href = 'https://db-ip.com';
+  attribution.textContent = 'IP Geolocation by DB-IP';
+  $('detail-fields').append(attribution);
   $('event-json').textContent = JSON.stringify(record, null, 2);
   $('copy-status').textContent = ''; $('raw-detail').open = false;
   if (!$('event-detail').open) $('event-detail').showModal();

@@ -53,6 +53,9 @@ pub struct Query {
     pub browser_name: Option<String>,
     pub os_name: Option<String>,
     pub device_type: Option<String>,
+    pub continent: Option<String>,
+    pub country: Option<String>,
+    pub city: Option<String>,
     #[serde(default, deserialize_with = "optional_limit")]
     pub limit: Option<usize>,
     pub cursor: Option<String>,
@@ -117,6 +120,9 @@ pub enum Dimension {
     BrowserName,
     OsName,
     DeviceType,
+    Continent,
+    Country,
+    City,
     VideoId,
     ViewerId,
 }
@@ -127,6 +133,15 @@ impl Dimension {
             Self::BrowserName => "context_browser_name",
             Self::OsName => "context_os_name",
             Self::DeviceType => "context_device_type",
+            Self::Continent => {
+                "CASE WHEN json_type(context_remainder, '$.continent') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.continent') END"
+            }
+            Self::Country => {
+                "CASE WHEN json_type(context_remainder, '$.country') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.country') END"
+            }
+            Self::City => {
+                "CASE WHEN json_type(context_remainder, '$.city') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.city') END"
+            }
             Self::VideoId => "video_id",
             Self::ViewerId => "viewer_id",
         }
@@ -151,6 +166,9 @@ pub enum BreakdownBy {
     BrowserName,
     OsName,
     DeviceType,
+    Continent,
+    Country,
+    City,
 }
 
 impl BreakdownBy {
@@ -159,6 +177,9 @@ impl BreakdownBy {
             Self::BrowserName => "context_browser_name",
             Self::OsName => "context_os_name",
             Self::DeviceType => "context_device_type",
+            Self::Continent => Dimension::Continent.column(),
+            Self::Country => Dimension::Country.column(),
+            Self::City => Dimension::City.column(),
         }
     }
 }
@@ -195,6 +216,9 @@ pub struct TimeseriesQuery {
     pub browser_name: Option<String>,
     pub os_name: Option<String>,
     pub device_type: Option<String>,
+    pub continent: Option<String>,
+    pub country: Option<String>,
+    pub city: Option<String>,
 }
 
 pub struct TimeseriesWindow {
@@ -223,6 +247,9 @@ impl TimeseriesQuery {
             browser_name: self.browser_name,
             os_name: self.os_name,
             device_type: self.device_type,
+            continent: self.continent,
+            country: self.country,
+            city: self.city,
             ..Query::default()
         }
         .filters()?;
@@ -259,6 +286,9 @@ pub struct Filters {
     browser_name: Option<String>,
     os_name: Option<String>,
     device_type: Option<String>,
+    continent: Option<String>,
+    country: Option<String>,
+    city: Option<String>,
 }
 
 impl Query {
@@ -296,6 +326,29 @@ impl Query {
             return Err(ApiError::bad("Unsupported device_type filter"));
         }
         if self
+            .continent
+            .as_deref()
+            .is_some_and(|value| !["AF", "AN", "AS", "EU", "NA", "OC", "SA"].contains(&value))
+        {
+            return Err(ApiError::bad("Unsupported continent filter"));
+        }
+        if self.country.as_deref().is_some_and(|value| {
+            value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_uppercase())
+        }) {
+            return Err(ApiError::bad(
+                "country must be a two-letter uppercase country code",
+            ));
+        }
+        if self
+            .city
+            .as_deref()
+            .is_some_and(|value| !(1..=256).contains(&value.chars().count()))
+        {
+            return Err(ApiError::bad(
+                "city must contain between 1 and 256 characters",
+            ));
+        }
+        if self
             .view_id
             .as_ref()
             .is_some_and(|value| !(1..=4096).contains(&value.chars().count()))
@@ -314,6 +367,9 @@ impl Query {
             browser_name: self.browser_name.clone(),
             os_name: self.os_name.clone(),
             device_type: self.device_type.clone(),
+            continent: self.continent.clone(),
+            country: self.country.clone(),
+            city: self.city.clone(),
         })
     }
 
@@ -331,41 +387,44 @@ impl Query {
 
 impl Filters {
     pub fn sql(&self) -> (String, Vec<SqlValue>) {
-        let mut conditions = vec!["TRUE"];
+        let mut conditions = vec!["TRUE".to_owned()];
         let mut values = Vec::new();
         if let Some(value) = self.from_ms {
-            conditions.push("occurred_at_ms >= ?");
+            conditions.push("occurred_at_ms >= ?".into());
             values.push(SqlValue::BigInt(value));
         }
         if let Some(value) = self.to_ms {
-            conditions.push("occurred_at_ms < ?");
+            conditions.push("occurred_at_ms < ?".into());
             values.push(SqlValue::BigInt(value));
         }
         if let Some(value) = &self.video_id {
-            conditions.push("video_id = ?");
+            conditions.push("video_id = ?".into());
             values.push(SqlValue::Text(value.clone()));
         }
         if let Some(value) = &self.viewer_id {
-            conditions.push("viewer_id = ?");
+            conditions.push("viewer_id = ?".into());
             values.push(SqlValue::Text(value.clone()));
         }
         if let Some(value) = &self.view_id {
-            conditions.push("view_id = ?");
+            conditions.push("view_id = ?".into());
             values.push(SqlValue::Text(value.clone()));
         }
         if let Some(value) = &self.event_name {
-            conditions.push("event_name = ?");
+            conditions.push("event_name = ?".into());
             values.push(SqlValue::Text(value.clone()));
         }
         // Compare only strings. Missing/null fields and other JSON primitives
-        // are not normalized browser names or device categories.
-        for (value, condition) in [
-            (&self.browser_name, "context_browser_name = ?"),
-            (&self.os_name, "context_os_name = ?"),
-            (&self.device_type, "context_device_type = ?"),
+        // are not normalized browser, device or location values.
+        for (value, column) in [
+            (&self.browser_name, Dimension::BrowserName.column()),
+            (&self.os_name, Dimension::OsName.column()),
+            (&self.device_type, Dimension::DeviceType.column()),
+            (&self.continent, Dimension::Continent.column()),
+            (&self.country, Dimension::Country.column()),
+            (&self.city, Dimension::City.column()),
         ] {
             if let Some(value) = value {
-                conditions.push(condition);
+                conditions.push(format!("{column} = ?"));
                 values.push(SqlValue::Text(value.clone()));
             }
         }

@@ -129,6 +129,8 @@ jobs:
           cache-on-failure: true
       - name: Install prebuilt DuckDB
         run: sh scripts/install-duckdb.sh
+      - name: Install local geolocation database
+        run: sh scripts/install-geolocation.sh
       - name: Build release executable
         run: cargo build --locked --release --target "$TARGET"
       - name: Test release CLI

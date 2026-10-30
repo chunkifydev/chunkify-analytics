@@ -1,0 +1,14 @@
+IP Geolocation by DB-IP
+https://db-ip.com
+
+DB-IP City Lite, October 2026, unmodified MMDB database.
+Source: https://db-ip.com/db/download/ip-to-city-lite
+Copyright DB-IP.com. Licensed under Creative Commons Attribution 4.0
+International (CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+
+Web applications must link to https://db-ip.com on pages displaying or using
+results from this database. Suggested attribution: IP Geolocation by DB-IP.
+
+This database is a separate data component; the application's MIT license does
+not replace its license. DB-IP does not endorse Chunkify Analytics. Country and
+city estimates can be inaccurate or unavailable.

@@ -7,9 +7,11 @@
 !docs/
 !docs/licenses/
 !docs/licenses/duckdb.txt
+!docs/licenses/db-ip.txt
 !src/
 !src/**
 !.cargo/
 !.cargo/config.toml
 !scripts/
 !scripts/install-duckdb.sh
+!scripts/install-geolocation.sh

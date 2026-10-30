@@ -1,10 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { isIP } from "node:net";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
 import { containerCollector, docker } from "./support.mjs";
+
+test("the bundled City MMDB locates forwarded public addresses without storing them", { timeout: 120000 }, async t => {
+  const server = await containerCollector({ settings: {
+    "server.trusted_proxies": "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",
+  } });
+  t.after(() => server.close());
+  const media = Object.assign(new EventTarget(), { duration: 120, currentTime: 0, src: "", currentSrc: "",
+    ownerDocument: { defaultView: null } });
+  const events = [];
+  const session = attachAnalytics(media, { videoId: "geolocation", destinations: [{ send(event) { events.push(event); } }] });
+  session.startAttempt(); session.destroy();
+  const response = await fetch(`${server.url}/v1/events`, { method: "POST", headers: {
+    "content-type": "application/json", "x-chunkify-ingest-key": server.keys.public_key,
+    "x-forwarded-for": "8.8.8.8",
+  }, body: JSON.stringify(events[0]) });
+  assert.equal(response.status, 201, await response.text());
+  const records = await server.get("/v1/events");
+  const context = records.events[0].event_context;
+  assert.equal(context.country, "US");
+  assert.equal(context.continent, "NA");
+  assert.equal(typeof context.city, "string");
+  assert.ok(context.city.length > 0);
+  assert.deepEqual((await server.get("/v1/summary?group_by=country")).groups,
+    [{ value: "US", data: { views: 1, unique_viewers: 0, total_playing_time_ms: 0 } }]);
+  assert.deepEqual((await server.get("/v1/dimensions/city?country=US")).values,
+    [{ value: context.city, views: 1 }]);
+  assert.ok(!JSON.stringify(records).includes("8.8.8.8"));
+  assert.ok(!(await docker(["logs", server.name])).includes("8.8.8.8"));
+});
 
 test("the admin environment key provisions a project that survives container replacement", { timeout: 120000 }, async t => {
   const adminKey = `admin-${randomUUID()}`;
@@ -61,9 +89,7 @@ test("a non-root container keeps SDK events and keys when replaced, and stops gr
   assert.deepEqual(stored.events.map(({ event }) => event), events);
   assert.ok(stored.events.every(record => record.otlp === undefined));
   for (const record of stored.events) {
-    assert.ok(isIP(record.event_context.peer_ip));
-    assert.equal(record.event_context.client_ip, record.event_context.peer_ip);
-    assert.equal(record.event_context.client_ip_source, "connection");
+    assert.deepEqual(record.event_context, { schema_version: 1, continent: null, country: null, city: null });
   }
 
   const stopped = await server.stop();

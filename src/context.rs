@@ -1,6 +1,5 @@
 use axum::http::HeaderMap;
 use ipnet::IpNet;
-use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::net::IpAddr;
 
@@ -29,38 +28,42 @@ pub fn trusted_proxies(value: &str) -> Result<Vec<IpNet>, &'static str> {
         .collect()
 }
 
-/// Metadata about the sender of the HTTP request, never inferred viewer identity.
-#[derive(Serialize)]
-pub struct RequestContext {
-    peer_ip: IpAddr,
-    client_ip: Option<IpAddr>,
-    client_ip_source: Option<&'static str>,
-}
-
-impl RequestContext {
-    pub fn capture(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Self {
-        let peer = peer.to_canonical();
-        let is_trusted = |ip: &IpAddr| trusted.iter().any(|network| network.contains(ip));
-        let (client_ip, client_ip_source) = if is_trusted(&peer) {
-            // Missing or invalid forwarding data must not label a proxy as a viewer.
-            let client = forwarded_chain(headers)
-                .and_then(|chain| chain.into_iter().rev().find(|ip| !is_trusted(ip)));
-            (client, client.map(|_| "x_forwarded_for"))
-        } else {
-            (Some(peer), Some("connection"))
-        };
-        Self {
-            peer_ip: peer,
-            client_ip,
-            client_ip_source,
-        }
+/// Resolve the viewer address only for the in-memory geolocation lookup.
+/// Never pass IP addresses to the writer or attach them to event metadata.
+pub fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> Option<IpAddr> {
+    let peer = peer.to_canonical();
+    let is_trusted = |ip: &IpAddr| trusted.iter().any(|network| network.contains(ip));
+    if is_trusted(&peer) {
+        // Missing or invalid forwarding data must not label a proxy as a viewer.
+        forwarded_chain(headers)
+            .and_then(|chain| chain.into_iter().rev().find(|ip| !is_trusted(ip)))
+    } else {
+        Some(peer)
     }
 }
 
 /// Copy only the supported browser fields. Request fields can only come from
 /// the collector; the original event still preserves all caller-supplied data.
 pub fn event_context(event: &Value, request: Option<&Value>) -> Option<Value> {
-    event_context_v1(event, request)
+    let mut context = event_context_v1(event, request)
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(browser) = event.get("browser_context").and_then(Value::as_object)
+        && browser.get("schema_version") == Some(&json!(1))
+    {
+        for key in ["page_origin", "page_path"] {
+            if let Some(value) = browser.get(key)
+                && (value.is_string() || value.is_null())
+            {
+                context.insert(key.into(), value.clone());
+            }
+        }
+    }
+    if context.is_empty() {
+        return None;
+    }
+    context.insert("schema_version".into(), json!(1));
+    Some(Value::Object(context))
 }
 
 // Frozen for schema-v4 reconstruction. Introduce a new storage context format

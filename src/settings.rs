@@ -8,6 +8,7 @@ const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
     ("CHUNKIFY_ADMIN_KEY", "admin_key"),
     ("CHUNKIFY_DATA_DIR", "data_dir"),
     ("CHUNKIFY_BIND", "server.bind"),
+    ("CHUNKIFY_GEOIP_DATABASE", "server.geoip_database"),
     ("CHUNKIFY_STORAGE_BACKEND", "storage.backend"),
     ("CHUNKIFY_S3_URL", "storage.url"),
     ("CHUNKIFY_S3_ENDPOINT", "storage.endpoint"),

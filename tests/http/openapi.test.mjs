@@ -159,7 +159,10 @@ test("documented native requests, read responses, filters and pagination match t
   for (const route of ['summary', 'quality', 'engagement']) await server.get(`/v1/${route}?order=desc`, 400);
 
   assert.equal(received[0].event_context.browser_name, "Chrome");
-  assert.equal(received[0].event_context.client_ip, "127.0.0.1");
+  assert.equal(received[0].event_context.continent, null);
+  assert.equal(received[0].event_context.country, null);
+  assert.equal(received[0].event_context.city, null);
+  assert.equal(received[0].event_context.client_ip, undefined);
   await server.get(`/v1/events?${filters.replace("Chrome", "Firefox")}&cursor=${encodeURIComponent(firstCursor)}`, 400);
   const summary = await server.get(`/v1/summary?${filters}`);
   assert.deepEqual(summary, { views: 1, unique_viewers: 1, total_playing_time_ms: events.at(-1).playing_time_ms });
@@ -665,7 +668,7 @@ for (const separateReads of [false, true]) test(`metric breakdowns preserve star
     await server.get(`/v1/${route}?${new URLSearchParams({ ...params, cursor: first.next_cursor })}`, 400);
   }
   for (const route of ["summary", "quality", "engagement"]) {
-    for (const query of ["group_by=country", "group_by=", "group_by=browser_name&group_by=os_name", "group_by=browser_name&limit=0",
+    for (const query of ["group_by=unsupported", "group_by=", "group_by=browser_name&group_by=os_name", "group_by=browser_name&limit=0",
       "group_by=browser_name&limit=1001", "group_by=browser_name&sort_by=views", "group_by=browser_name&order=desc",
       "group_by=browser_name&event_name=chunkify.video.view_started", "limit=1", "cursor=bad"]) {
       await server.get(`/v1/${route}?${query}`, 400);
@@ -986,7 +989,7 @@ for (const separateReads of [false, true])
       { resource: "events", query: { project_id: "other" } },
       { resource: "views", query: { has_fatal_error: "true" } },
       { resource: "timeseries", query: {} },
-      { resource: "dimensions", query: { dimension: "country" } },
+      { resource: "dimensions", query: { dimension: "unsupported" } },
       { resource: "summary", query: { sort_by: "views" } },
     ])
       await create(body, 400);
@@ -1340,4 +1343,100 @@ test("renditions report weights bitrate by watch time and exports every row with
   const csv = await (await fetch(link.download_url)).text();
   assert.equal(csv.trim().split(/\r?\n/).length,3);
   assert.ok(csv.startsWith("width,height,codec,bitrate_bps,frame_rate,views,playing_time_ms,playing_time_ratio"));
+});
+
+for (const separateReads of [false, true]) test(`location reports use first starts, filter consistently and export all groups (separate reads: ${separateReads})`, async t => {
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1", "experimental.read_worker": String(separateReads) });
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const send = (event, ip) => server.post("/v1/events", JSON.stringify(event), 201, { "x-forwarded-for": ip });
+  const starts = [];
+  for (const [video, ip, viewer, playing] of [
+    ["a", "81.2.69.160", "shared", 1000], ["b", "81.2.69.160", "shared", 3000],
+    ["c", "2001:218::1", "other", 2000], ["d", "127.0.0.1", null, 0],
+  ]) {
+    const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
+      video_id: video, viewer_id: viewer, occurred_at: "2026-10-19T12:00:00Z",
+      browser_context: { schema_version: 1, browser_name: "Chrome", country: "US", city: "Forged" } };
+    starts.push(start);
+    // A later-sequence start arrives first from another country. It must not select the view's location.
+    if (video === "a") await send({ ...start, event_id: randomUUID(), sequence: 2 }, "2001:218::1");
+    await send(start, ip);
+    if (video === "d") continue;
+    const end = { ...start, event_id: randomUUID(), sequence: 4, event_name: "chunkify.video.view_ended",
+      occurred_at: "2026-10-20T12:00:00Z", playing_time_ms: playing, reason: "ended",
+      startup_time_ms: 200, rebuffer_duration_ms: 100,
+      rendition_playing_time: [{ width: 640, height: 360, codec: "avc1", bitrate_bps: 500000, frame_rate: 30, playing_time_ms: playing }] };
+    await send(end, video === "a" ? "2001:218::1" : ip);
+    if (video === "a") await send({ ...end, event_id: randomUUID(), sequence: 3,
+      event_name: "chunkify.video.playback_error", error_fatal: true, error_code: "network", error_category: "network" }, "2001:218::1");
+  }
+  const query = (route, args = {}) => server.get(`/v1/${route}?${new URLSearchParams(args)}`);
+  const expected = {
+    country: [[null, 1, 0, 0], ["GB", 2, 1, 4000], ["JP", 1, 1, 2000]],
+    continent: [[null, 1, 0, 0], ["AS", 1, 1, 2000], ["EU", 2, 1, 4000]],
+    city: [[null, 2, 1, 2000], ["London", 2, 1, 4000]],
+  };
+  for (const [group_by, groups] of Object.entries(expected)) {
+    const summary = await query("summary", { group_by });
+    assert.deepEqual(summary.groups, groups.map(([value, views, unique_viewers, total_playing_time_ms]) =>
+      ({ value, data: { views, unique_viewers, total_playing_time_ms } })));
+    for (const route of ["summary", "quality", "engagement"]) {
+      const full = await query(route, { group_by });
+      const paged = [];
+      let cursor;
+      do {
+        const page = await query(route, { group_by, limit: "1", ...(cursor && { cursor }) });
+        paged.push(...page.groups); cursor = page.next_cursor;
+      } while (cursor);
+      assert.deepEqual(paged, full.groups);
+      for (const group of full.groups.filter(group => group.value !== null)) {
+        assert.deepEqual(group.data, await query(route, { [group_by]: group.value }));
+      }
+    }
+    const dimensions = await assertResponse("/v1/dimensions/{dimension}", "get",
+      await fetch(`${server.url}/v1/dimensions/${group_by}`, { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 200);
+    assert.deepEqual(dimensions.values, groups.map(([value, views]) => ({ value, views })));
+  }
+  const filters = { continent: "EU", country: "GB", city: "London", browser_name: "Chrome" };
+  assert.deepEqual(await query("summary", filters), { views: 2, unique_viewers: 1, total_playing_time_ms: 4000 });
+  assert.equal((await query("quality", filters)).fatal_errors.affected_views, 1);
+  assert.equal((await query("engagement", filters)).views, 2);
+  assert.deepEqual((await query("summary", { group_by: "city", country: "GB" })).groups,
+    [{ value: "London", data: { views: 2, unique_viewers: 1, total_playing_time_ms: 4000 } }]);
+  assert.deepEqual((await query("videos", filters)).videos.map(video => video.video_id), ["a", "b"]);
+  assert.equal((await query("views", filters)).views.length, 2);
+  assert.equal((await query("errors", filters)).errors[0].affected_views, 1);
+  assert.equal((await query("renditions", filters)).renditions[0].playing_time_ms, 4000);
+  const dates = { from: "2026-10-19T00:00:00Z", to: "2026-10-20T00:00:00Z", interval: "day" };
+  const series = await query("timeseries", { ...dates, ...filters });
+  assert.equal(series.buckets[0].views, 2);
+  assert.equal(series.buckets[0].total_playing_time_ms, 4000);
+  const jpEvents = (await query("events", { country: "JP" })).events;
+  assert.ok(jpEvents.every(event => event.event_context.country === "JP"));
+  assert.ok(jpEvents.some(event => event.event.video_id === "a" && event.event.event_name === "chunkify.video.view_ended"));
+  assert.equal((await query("summary", { country: "US" })).views, 0);
+  assert.equal((await query("summary", { city: "london" })).views, 0);
+  assert.equal((await query("summary", { city: "London' OR TRUE --" })).views, 0);
+  for (const route of ["summary", "events", "timeseries"]) for (const invalid of [
+    { country: "gb" }, { country: "GBR" }, { country: "éé" }, { continent: "XX" }, { continent: "eu" }, { city: "" }, { city: "a".repeat(257) },
+  ]) await server.get(`/v1/${route}?${new URLSearchParams({ ...(route === "timeseries" && dates), ...invalid })}`, 400);
+  const first = await query("summary", { group_by: "country", limit: "1" });
+  for (const changed of [{ country: "GB" }, { city: "London" }, { continent: "EU" }, { group_by: "city" }]) {
+    await server.get(`/v1/summary?${new URLSearchParams({ group_by: "country", cursor: first.next_cursor, ...changed })}`, 400);
+  }
+  for (const field of ["country", "continent", "city"]) {
+    await assertResponse("/v1/views/{view_id}", "get", await fetch(`${server.url}/v1/views/${starts[0].view_id}?${field}=GB`,
+      { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 400);
+  }
+  for (const [resource, params, contains] of [
+    ["summary", { group_by: "country" }, "GB"], ["quality", { group_by: "continent" }, "EU"],
+    ["engagement", { group_by: "city", country: "GB" }, "London"],
+    ["dimensions", { dimension: "city", country: "GB" }, "London"], ["events", { country: "GB" }, "London"],
+  ]) {
+    const link = await server.post("/v1/exports", JSON.stringify({ resource, query: params }), 201,
+      { Authorization: `Bearer ${server.keys.secret_key}` });
+    const csv = await fetch(link.download_url);
+    assert.equal(csv.status, 200);
+    assert.ok((await csv.text()).includes(contains));
+  }
 });

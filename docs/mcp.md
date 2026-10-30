@@ -138,7 +138,7 @@ Set those variables before starting Codex. See the
 | `get_timeseries` | Hourly or daily summary, quality or engagement metrics, selected by optional `kind`. |
 | `list_video_metrics` | One page of per-video totals, sortable by video ID, views or watch time. |
 | `list_events` | One page of original events and context; supports `view_id`. |
-| `list_views` | Playback attempts with context and measurements; optionally filter by `has_fatal_error`. |
+| `list_views` | Playback attempts, newest first, with context and measurements; use `order=asc` for oldest first or filter by `has_fatal_error`. |
 | `get_view` | One attempt's metrics and paginated retained event history, selected by `view_id`. |
 | `list_dimension_values` | Values present in the project, with view counts, selected by `dimension`. |
 | `export_data` | A scoped, expiring link that downloads all matching rows as CSV. |

@@ -543,7 +543,8 @@ an attempt is ongoing, and a missing error does not prove successful playback.
 
 The usual identity, date and context filters apply, including `view_id`.
 `has_fatal_error=true|false` filters on observed fatal errors. Pages sort by
-`view_id`, ascending by default or descending with `order=desc`; HTTP page sizes
+`started_at`, newest first by default or oldest first with `order=asc`. Equal
+start times use `view_id` in the same direction. HTTP page sizes
 are 1 to 1000, default 100. Cursors bind filters, order, fatal-error selection,
 project and the initial ingestion watermark.
 

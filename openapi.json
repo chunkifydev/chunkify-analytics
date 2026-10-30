@@ -3996,6 +3996,217 @@
         }
       }
     },
+    "/v1/retention": {
+      "get": {
+        "operationId": "retention",
+        "summary": "Read video retention",
+        "description": "Count views along the video using recorded played ranges. Requires video_id. Uses the final measurement, or the latest snapshot without an end event, for each retained start matching the date and audience filters. Each attempt counts once in each section it overlapped, including replays. Skipped sections do not count. Older events without played ranges and attempts without a finite positive duration are excluded from sample_views. Returns at most 200 consecutive buckets, including zero counts, at a width of at least one second. This is media position, not wall-clock time.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/retention_video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete engagement curve for the matching measured attempts.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionReport"
+                },
+                "example": {
+                  "views": 2,
+                  "sample_views": 1,
+                  "duration_seconds": 2,
+                  "interval_seconds": 1,
+                  "buckets": [
+                    {
+                      "start_seconds": 0,
+                      "end_seconds": 1,
+                      "views": 1,
+                      "ratio": 1
+                    },
+                    {
+                      "start_seconds": 1,
+                      "end_seconds": 2,
+                      "views": 0,
+                      "ratio": 0
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, limit, or unsupported query parameters.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/renditions": {
       "get": {
         "operationId": "getRenditions",
@@ -4258,6 +4469,15 @@
           "format": "date-time"
         },
         "description": "Exclusive RFC3339 occurrence-time upper bound, with timezone. Summary/video queries apply it to the selected view_started event."
+      },
+      "retention_video_id": {
+        "name": "video_id",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        },
+        "description": "Video to report. Retention measures one video at a time.",
+        "required": true
       },
       "video_id": {
         "name": "video_id",
@@ -4933,6 +5153,25 @@
       "ViewMetrics": {
         "type": "object",
         "properties": {
+          "played_ranges": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "maxItems": 128,
+            "items": {
+              "$ref": "#/components/schemas/PlayedRange"
+            },
+            "description": "Cumulative played media ranges for this attempt, sorted and merged without overlaps. Seeking, pauses and buffering are excluded. Missing or null means unavailable; an empty array means measured but no section played. Replaying a section does not add another range."
+          },
+          "playhead_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Current media position at this event, not the maximum reached."
+          },
           "playing_time_ms": {
             "type": "number",
             "minimum": 0
@@ -8140,7 +8379,8 @@
               "views",
               "errors",
               "dimensions",
-              "renditions"
+              "renditions",
+              "retention"
             ]
           },
           "query": {
@@ -8375,6 +8615,102 @@
       "CreatedProjectKey": {
         "$ref": "#/components/schemas/RotatedProjectKey",
         "description": "A newly created key. Save the key value now; later key listings contain only metadata."
+      },
+      "PlayedRange": {
+        "type": "object",
+        "required": [
+          "start_seconds",
+          "end_seconds"
+        ],
+        "properties": {
+          "start_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Inclusive media position in seconds."
+          },
+          "end_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Exclusive media position in seconds, greater than start_seconds."
+          }
+        }
+      },
+      "RetentionReport": {
+        "type": "object",
+        "required": [
+          "views",
+          "sample_views",
+          "duration_seconds",
+          "interval_seconds",
+          "buckets"
+        ],
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "All matching attempts with a retained start."
+          },
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Attempts whose selected final or latest snapshot contains played ranges and a finite positive media duration. Includes measured empty ranges."
+          },
+          "duration_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Longest measured duration in this selection. Null when there are no measured attempts."
+          },
+          "interval_seconds": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "description": "Bucket width, ceil(duration_seconds / 200), with a minimum of one second. Null without measurements."
+          },
+          "buckets": {
+            "type": "array",
+            "maxItems": 200,
+            "items": {
+              "$ref": "#/components/schemas/RetentionBucket"
+            }
+          }
+        }
+      },
+      "RetentionBucket": {
+        "type": "object",
+        "required": [
+          "start_seconds",
+          "end_seconds",
+          "views",
+          "ratio"
+        ],
+        "properties": {
+          "start_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Inclusive start of the video section."
+          },
+          "end_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Exclusive end of the section, capped at the reported duration."
+          },
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct attempts that played any part of this section. Each attempt counts at most once."
+          },
+          "ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "views divided by sample_views."
+          }
+        }
       },
       "RenditionReport": {
         "type": "object",

@@ -114,6 +114,12 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
 
     let name = event["event_name"].as_str().unwrap();
     let full_metrics = EVENT_NAMES[..4].contains(&name);
+    if object.contains_key("played_ranges") {
+        field(object, "played_ranges", valid_played_ranges)?;
+    }
+    if object.contains_key("playhead_seconds") {
+        field(object, "playhead_seconds", nullable_number)?;
+    }
     for key in [
         "playing_time_ms",
         "rebuffer_count",
@@ -220,4 +226,35 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
         _ => {}
     }
     Ok(())
+}
+
+pub(crate) fn valid_played_ranges(value: &Value) -> bool {
+    if value.is_null() {
+        return true;
+    }
+    let Some(ranges) = value.as_array() else {
+        return false;
+    };
+    if ranges.len() > 128 {
+        return false;
+    }
+    let mut previous_end = -1.0;
+    for range in ranges {
+        let (Some(start), Some(end)) = (
+            range["start_seconds"].as_f64(),
+            range["end_seconds"].as_f64(),
+        ) else {
+            return false;
+        };
+        if !start.is_finite()
+            || !end.is_finite()
+            || start < 0.0
+            || end <= start
+            || start <= previous_end
+        {
+            return false;
+        }
+        previous_end = end;
+    }
+    true
 }

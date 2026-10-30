@@ -462,3 +462,5 @@ mod limits_tests;
 mod exploration;
 mod metrics;
 mod renditions;
+mod retention;
+pub(crate) use retention::validate_query as validate_retention_query;

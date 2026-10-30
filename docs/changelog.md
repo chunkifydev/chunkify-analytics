@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.6.0...v0.7.0) (2026-10-30)
+
+
+### Features
+
+* **analytics:** add page origin and path reports ([#45](https://github.com/chunkifydev/chunkify-analytics/issues/45)) ([c9054e1](https://github.com/chunkifydev/chunkify-analytics/commit/c9054e1d1523a3198e79a9c38fada34af030a8bf))
+* **analytics:** report watched sections along a video ([#47](https://github.com/chunkifydev/chunkify-analytics/issues/47)) ([9b7d9a2](https://github.com/chunkifydev/chunkify-analytics/commit/9b7d9a228174b94bd0840d8354c07e4aaf81d904))
+
 ## [0.6.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.5.0...v0.6.0) (2026-10-30)
 
 

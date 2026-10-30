@@ -488,6 +488,7 @@ test("S3 video reports match local storage after repeated delivery and replaceme
       occurred_at: "2026-10-19T12:00:00Z" }));
     Object.assign(attempt.at(-1), { playing_time_ms: playing, furthest_progress_ratio: progress,
       media_duration_seconds: 600, startup_outcome: outcome,
+      played_ranges: index === 0 ? [] : [{ start_seconds: 0, end_seconds: 10 }, { start_seconds: 20, end_seconds: 30 }],
       rendition_playing_time: [{ width: 1280, height: 720, codec: "avc1", bitrate_bps: 2000000,
         frame_rate: 30, playing_time_ms: playing }] });
     records.push(...attempt);
@@ -508,6 +509,7 @@ test("S3 video reports match local storage after repeated delivery and replaceme
       responses.push(await app.get(`/v1/timeseries?kind=${kind}&video_id=s3-video&from=2026-10-19T00:00:00Z&to=2026-10-21T00:00:00Z&interval=day`));
     }
     responses.push(await app.get("/v1/renditions?video_id=s3-video"));
+    responses.push(await app.get("/v1/retention?video_id=s3-video"));
     snapshots.push(responses);
   }
   assert.deepEqual(snapshots[1], snapshots[0]);
@@ -517,10 +519,14 @@ test("S3 video reports match local storage after repeated delivery and replaceme
   assert.equal(snapshots[1][6].average_bitrate_bps, 2000000);
   assert.equal(snapshots[1][6].total_playing_time_ms, 310000);
   assert.equal(snapshots[1][6].sample_views, 2);
+  assert.equal(snapshots[1][7].sample_views, 3);
+  assert.equal(snapshots[1][7].buckets[0].views, 2);
+  assert.equal(snapshots[1][7].buckets[4].views, 0);
   await remote.replaceTask();
   assert.deepEqual(await remote.get("/v1/engagement?video_id=s3-video"), snapshots[0][0]);
   assert.deepEqual(await remote.get("/v1/quality?video_id=s3-video"), snapshots[0][3]);
   assert.deepEqual(await remote.get("/v1/renditions?video_id=s3-video"), snapshots[0][6]);
+  assert.deepEqual(await remote.get("/v1/retention?video_id=s3-video"), snapshots[0][7]);
 });
 
 

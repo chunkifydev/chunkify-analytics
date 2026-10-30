@@ -27,6 +27,8 @@ pub enum VideoSort {
     VideoId,
     Views,
     TotalPlayingTimeMs,
+    UniqueViewers,
+    PlaybackScore,
 }
 
 impl VideoSort {
@@ -35,6 +37,8 @@ impl VideoSort {
             Self::VideoId => "video_id",
             Self::Views => "views",
             Self::TotalPlayingTimeMs => "total_playing_time_ms",
+            Self::UniqueViewers => "unique_viewers",
+            Self::PlaybackScore => "score",
         }
     }
 }
@@ -90,7 +94,39 @@ pub enum MetricKind {
     Engagement,
 }
 
+#[derive(Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewSort {
+    #[default]
+    StartedAt,
+    VideoId,
+    ViewId,
+    DeviceType,
+    PlayingTimeMs,
+    StartupTimeMs,
+    RebufferDurationMs,
+    PlaybackScore,
+}
+impl ViewSort {
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::StartedAt => "occurred_at_ms",
+            Self::VideoId => "video_id",
+            Self::ViewId => "view_id",
+            Self::DeviceType => "context_device_type",
+            Self::PlayingTimeMs => "playing_time_ms",
+            Self::StartupTimeMs => "measurement.startup_time_ms",
+            Self::RebufferDurationMs => "measurement.rebuffer_duration_ms",
+            Self::PlaybackScore => "playback_score",
+        }
+    }
+    pub fn is_text(self) -> bool {
+        matches!(self, Self::VideoId | Self::ViewId | Self::DeviceType)
+    }
+}
+
 pub struct ViewsQuery {
+    pub sort_by: ViewSort,
     pub has_fatal_error: Option<bool>,
     pub query: Query,
 }
@@ -107,9 +143,16 @@ impl<'de> Deserialize<'de> for ViewsQuery {
                     })
             })
             .transpose()?;
+        let sort_by = fields
+            .remove("sort_by")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
         let query = serde_json::from_value(serde_json::Value::Object(fields))
             .map_err(serde::de::Error::custom)?;
         Ok(Self {
+            sort_by,
             has_fatal_error,
             query,
         })

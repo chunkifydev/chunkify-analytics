@@ -9,6 +9,8 @@ struct VideoPosition {
     video_id: String,
     views: i64,
     total_playing_time_ms: f64,
+    unique_viewers: i64,
+    score: Option<f64>,
 }
 
 impl Store {
@@ -141,6 +143,11 @@ impl Store {
             cursor.after.views < 1
                 || !cursor.after.total_playing_time_ms.is_finite()
                 || cursor.after.total_playing_time_ms < 0.0
+                || cursor.after.unique_viewers < 0
+                || cursor
+                    .after
+                    .score
+                    .is_some_and(|v| !v.is_finite() || !(0.0..=100.0).contains(&v))
         }) {
             return Err(ApiError::bad("Invalid video cursor position"));
         }
@@ -168,12 +175,21 @@ impl Store {
                 if matches!(sort, VideoSort::VideoId) {
                     continuation = format!("video_id {comparison} ?");
                     values.push(SqlValue::Text(after.video_id));
+                } else if matches!(sort, VideoSort::PlaybackScore) {
+                    if let Some(score) = after.score {
+                        continuation = format!("(score {comparison} ? OR (score = ? AND video_id > ?) OR score IS NULL)");
+                        values.extend([SqlValue::Double(score), SqlValue::Double(score), SqlValue::Text(after.video_id)]);
+                    } else {
+                        continuation = "(score IS NULL AND video_id > ?)".into();
+                        values.push(SqlValue::Text(after.video_id));
+                    }
                 } else {
                     continuation = format!("({column} {comparison} ? OR ({column} = ? AND video_id > ?))");
                     let metric = match sort {
                         VideoSort::Views => SqlValue::BigInt(after.views),
                         VideoSort::TotalPlayingTimeMs => SqlValue::Double(after.total_playing_time_ms),
-                        VideoSort::VideoId => unreachable!(),
+                        VideoSort::UniqueViewers => SqlValue::BigInt(after.unique_viewers),
+                        VideoSort::VideoId | VideoSort::PlaybackScore => unreachable!(),
                     };
                     values.extend([metric.clone(), metric, SqlValue::Text(after.video_id)]);
                 }
@@ -190,9 +206,9 @@ impl Store {
                         AVG(playback_score ORDER BY view_id) AS score, COUNT(playback_score) AS score_samples FROM view_metrics GROUP BY video_id
                 )
                 SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples FROM video_metrics
-                WHERE {continuation} ORDER BY {column} {direction}{tie_breaker} LIMIT ?"))?;
+                WHERE {continuation} ORDER BY {column} {direction} NULLS LAST{tie_breaker} LIMIT ?"))?;
             let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|row| Ok((VideoPosition {
-                video_id: row.get(0)?, views: row.get(1)?, total_playing_time_ms: row.get(3)?,
+                video_id: row.get(0)?, views: row.get(1)?, total_playing_time_ms: row.get(3)?, unique_viewers: row.get(2)?, score: row.get(4)?,
             }, json!({
                 "video_id": row.get::<_, String>(0)?, "views": row.get::<_, i64>(1)?,
                 "unique_viewers": row.get::<_, i64>(2)?, "total_playing_time_ms": row.get::<_, f64>(3)?,

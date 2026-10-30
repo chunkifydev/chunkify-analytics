@@ -153,7 +153,7 @@ pub fn router(
         .route("/v1/views/{view_id}", get(view))
         .route("/v1/errors", get(errors))
         .route("/v1/dimensions/{dimension}", get(dimension))
-        .route("/v1/exports", post(create_export))
+        .route("/v1/exports", get(export_columns).post(create_export))
         .route(
             "/v1/exports/{token}",
             get(download_export).head(export_head),
@@ -217,6 +217,7 @@ async fn access(
                     | "/v1/engagement"
                     | "/v1/views"
                     | "/v1/errors"
+                    | "/v1/exports"
             )
             || matches!(*request.method(), Method::GET | Method::HEAD)
                 && ["/v1/views/", "/v1/dimensions/"]
@@ -720,6 +721,12 @@ async fn errors(
     Ok(Json(
         app.store.errors(resolved.project.id.clone(), query).await?,
     ))
+}
+
+async fn export_columns(
+    axum::extract::Query(query): axum::extract::Query<crate::exports::ColumnsQuery>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(query.report()?))
 }
 
 async fn create_export(

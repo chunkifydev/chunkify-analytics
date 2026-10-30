@@ -1484,3 +1484,94 @@ test("playback scores match JSON reports and CSV, including missing samples", as
     else { assert.notEqual(value, ""); assert.equal(Number(value), Number(score)); }
   }
 });
+
+
+test("CSV column selection is discovered, validated and streamed in requested order", async t => {
+  const server = await collector(t);
+  const key = await server.admin(["key", "create", "default", "secret", "Export columns", "--read-only"]);
+  const headers = { Authorization: `Bearer ${key.key}` };
+  const catalog = async params => server.get(`/v1/exports?${new URLSearchParams(params)}`, 200, headers);
+  const create = async (body, status = 201) => server.post("/v1/exports", JSON.stringify(body), status, headers);
+  for (const resource of ["summary", "quality", "engagement", "videos", "views", "errors", "events", "renditions", "retention", "dimensions"]) {
+    const { columns } = await catalog({ resource });
+    assert.ok(columns.length > 0);
+    assert.equal(new Set(columns).size, columns.length);
+  }
+  assert.ok((await catalog({ resource: "timeseries", kind: "quality" })).columns.includes("playback_score/value"));
+  assert.ok((await catalog({ resource: "quality", group_by: "country" })).columns.includes("data/playback_score/value"));
+  await server.get("/v1/exports?resource=views", 401, {});
+  await server.get("/v1/exports?resource=views", 401, { Authorization: `Bearer ${server.keys.public_key}` });
+  for (const params of [{ resource: "unknown" }, { resource: "views", group_by: "country" }, { resource: "views", kind: "quality" }, { resource: "summary", group_by: "unknown" }, { resource: "events", unknown: "x" }]) {
+    await server.get(`/v1/exports?${new URLSearchParams(params)}`, 400, headers);
+  }
+  for (const columns of [[], ["views", "views"], ["event_id"], ["views", "no_such_column"], [1], "views"]) {
+    await create({ resource: "summary", columns }, 400);
+  }
+  await create({ resource: "quality", query: { group_by: "country" }, columns: ["views"] }, 400);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  for (let i = 0; i < 105; i++) await server.post("/v1/events", JSON.stringify({ ...structuredClone(example),
+    event_id: randomUUID(), view_id: randomUUID(), video_id: `video-${i}` }), 201);
+  const { columns } = await catalog({ resource: "videos" });
+  const all = await create({ resource: "videos" });
+  const [allHeaders, ...allRows] = csvRecords(await (await fetch(all.download_url)).text());
+  assert.deepEqual(allHeaders, columns);
+  const selected = ["views", "video_id"];
+  const link = await create({ resource: "videos", columns: selected });
+  const [selectedHeaders, ...selectedRows] = csvRecords(await (await fetch(link.download_url)).text());
+  assert.deepEqual(selectedHeaders, selected);
+  assert.equal(selectedRows.length, 105);
+  assert.deepEqual(selectedRows, allRows.map(row => selected.map(name => row[allHeaders.indexOf(name)])));
+  const empty = await create({ resource: "views", query: { video_id: "absent" }, columns: ["view_id"] });
+  assert.deepEqual(csvRecords(await (await fetch(empty.download_url)).text()), [["view_id"]]);
+});
+
+test("session and video column sorts cover the full cohort across pages with nulls last", async t => {
+  const server = await collector(t, {"rate_limits.export_links_per_minute":"1000"});
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  // Deliberately ingest in an order unrelated to any requested metric.
+  for (const [i, video, startup, playing, rebuffer, device] of [
+    [0,"b",200,3000,0,"mobile"], [1,"a",500,5000,500,"desktop"],
+    [2,"c",null,0,0,null], [3,"b",200,3000,0,"mobile"],
+    [4,"d",10000,1000,100,"tablet"], [5,"e",null,0,0,null],
+  ]) {
+    const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(),
+      video_id:video, viewer_id:`viewer-${i%3}`, sequence:1, occurred_at:`2026-10-19T12:00:0${5-i}Z`,
+      ...(device ? {context:{device_type:device}} : {}) };
+    const end = { ...start, event_id:randomUUID(), event_name:"chunkify.video.view_ended", sequence:2,
+      occurred_at:"2026-10-19T12:01:00Z", reason:"destroyed", startup_time_ms:startup,
+      playing_time_ms:playing, rebuffer_duration_ms:rebuffer, startup_outcome:playing ? "started" : "ended_before_start" };
+    for (const event of [start,end]) await server.post("/v1/events",JSON.stringify(event),201);
+  }
+  const cmp = (a,b) => a < b ? -1 : a > b ? 1 : 0;
+  for (const [resource, fields, identity] of [
+    ["views",["started_at","video_id","view_id","device_type","playing_time_ms","startup_time_ms","rebuffer_duration_ms","playback_score"],"view_id"],
+    ["videos",["video_id","views","unique_viewers","total_playing_time_ms","playback_score"],"video_id"],
+  ]) {
+    const all = (await server.get(`/v1/${resource}?limit=100`))[resource];
+    for (const sort_by of fields) for (const order of ["asc","desc"]) {
+      const value = row => sort_by === "playback_score" ? row.playback_score.value : row[sort_by];
+      const sign = order === "asc" ? 1 : -1;
+      const expected = all.toSorted((a,b) => {
+        const av=value(a), bv=value(b);
+        const comparison=av==null ? (bv==null ? 0 : 1) : bv==null ? -1 : sign*cmp(av,bv);
+        return comparison || cmp(a[identity],b[identity])*(resource==="views" ? sign : 1);
+      });
+      let cursor, actual=[];
+      do {
+        const query={sort_by,order,limit:"2",...(cursor && {cursor})};
+        const page=await server.get(`/v1/${resource}?${new URLSearchParams(query)}`);
+        actual.push(...page[resource]); cursor=page.next_cursor;
+        if (cursor) {
+          await server.get(`/v1/${resource}?${new URLSearchParams({...query,cursor,order:order==="asc" ? "desc":"asc"})}`,400);
+          await server.get(`/v1/${resource}?${new URLSearchParams({...query,cursor,sort_by:sort_by===fields[0] ? fields[1]:fields[0]})}`,400);
+        }
+      } while (cursor);
+      assert.deepEqual(actual.map(row=>row[identity]),expected.map(row=>row[identity]),`${resource} ${sort_by} ${order}`);
+      const link=await server.post("/v1/exports",JSON.stringify({resource,query:{sort_by,order}}),201,{Authorization:`Bearer ${server.keys.secret_key}`});
+      const [headers, ...rows]=csvRecords(await (await fetch(link.download_url)).text());
+      assert.deepEqual(rows.map(row=>row[headers.indexOf(identity)]),expected.map(row=>row[identity]));
+    }
+  }
+  await server.get("/v1/views?sort_by=views",400);
+  await server.get("/v1/videos?sort_by=started_at",400);
+});

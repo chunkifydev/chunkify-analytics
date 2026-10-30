@@ -154,10 +154,10 @@ Events are ordered by their server ingestion sequence, oldest first by default.
 Use `/v1/events?order=desc&limit=10` for the newest ten received events in one
 request. `order` accepts `asc` or `desc` on events and videos, defaulting to `asc`.
 
-Videos accept `sort_by=video_id`, `sort_by=views`, or
-`sort_by=total_playing_time_ms` for watch time. The default is `video_id`.
+Videos accept `sort_by=video_id`, `views`, `unique_viewers`,
+`total_playing_time_ms` for watch time, or `playback_score`. The default is `video_id`.
 Ranking applies to all matching videos before pagination. Metric ties use
-`video_id` ascending in either direction. For example, the ten most watched videos:
+`video_id` ascending in either direction. Missing scores sort last. For example, the ten most watched videos:
 
 ```text
 GET /v1/videos?sort_by=total_playing_time_ms&order=desc&limit=10
@@ -544,8 +544,12 @@ an attempt is ongoing, and a missing error does not prove successful playback.
 The usual identity, date and context filters apply, including `view_id`.
 `has_fatal_error=true|false` filters on observed fatal errors. Pages sort by
 `started_at`, newest first by default or oldest first with `order=asc`. Equal
-start times use `view_id` in the same direction. HTTP page sizes
-are 1 to 1000, default 100. Cursors bind filters, order, fatal-error selection,
+start times use `view_id` in the same direction. Other supported `sort_by` values
+are `video_id`, `view_id`, `device_type`, `playing_time_ms`, `startup_time_ms`,
+`rebuffer_duration_ms` and `playback_score`. Durations sort numerically in
+milliseconds, and missing values sort last in both directions. Sorting covers
+the full filtered cohort before pagination. HTTP page sizes
+are 1 to 1000, default 100. Cursors bind filters, sort field, order, fatal-error selection,
 project and the initial ingestion watermark.
 
 `GET /v1/views/{view_id}` returns `view`, `events` and `next_cursor`. Only `limit`
@@ -584,6 +588,23 @@ missing context. HTTP page sizes are 1 to 1000, default 100. Cursors bind the
 dimension, project, filters and ingestion watermark.
 
 ### CSV exports
+
+Discover columns through the existing export route:
+
+```text
+GET /v1/exports?resource=views
+GET /v1/exports?resource=quality&group_by=country
+GET /v1/exports?resource=timeseries&kind=quality
+```
+
+These authenticated reads return `{"columns":[...]}` in the default CSV order.
+Use the same resource, breakdown, and metric kind when creating the export.
+Pass an optional `columns` array in the POST body to select fields and their
+order, for example `{"resource":"views","columns":["view_id","startup_time_ms"]}`.
+Omit `columns` to include all fields. Empty selections, duplicates, and names
+that do not belong to the chosen report return 400. Column selection changes
+CSV headers and cells; it does not limit the matching rows. Empty reports still
+include the selected headers.
 
 API and MCP use the same export workflow. Request a download link with a project
 private key; read-only private keys can export:

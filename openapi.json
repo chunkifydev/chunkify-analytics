@@ -930,7 +930,7 @@
       "get": {
         "operationId": "listVideoMetrics",
         "summary": "Read paginated totals by video",
-        "description": "List per-video totals. Sort the entire filtered cohort by video_id, views or total_playing_time_ms before pagination. sort_by defaults to video_id and order defaults to asc. Metric ties use video_id ascending in either direction. Unique viewer counts cannot be added across videos. Keep sort_by, order and filters unchanged with a cursor.",
+        "description": "List per-video totals. Sort the entire filtered cohort by video_id, views, unique_viewers, total_playing_time_ms or playback_score before pagination. Defaults to video_id ascending. Missing scores come last; metric ties use video_id ascending in both directions. Unique viewer counts cannot be added across videos. Keep sort_by, order and filters unchanged with a cursor.",
         "tags": [
           "Queries"
         ],
@@ -2902,7 +2902,7 @@
       "get": {
         "operationId": "listViews",
         "summary": "List playback attempts",
-        "description": "One row per first retained start, using the same final/latest measurement selection as metrics. Filter by identity, context, dates or has_fatal_error. Order by started_at descending by default (newest first), or ascending with order=asc. Equal start times use view_id in the same direction. Cursors bind filters, order, fatal-error selection, project and ingestion watermark. Missing end or error events are not proof of an ongoing or successful playback.",
+        "description": "One row per first retained start, using the same final/latest measurement selection as metrics. Filter by identity, context, dates or has_fatal_error. Order by started_at descending by default (newest first), or ascending with order=asc. Equal start times use view_id in the same direction. Cursors bind filters, order, fatal-error selection, project and ingestion watermark. Missing end or error events are not proof of an ongoing or successful playback. Sort the entire matching cohort by sort_by before pagination, with missing values last.",
         "tags": [
           "Queries"
         ],
@@ -2957,6 +2957,9 @@
           },
           {
             "$ref": "#/components/parameters/has_fatal_error"
+          },
+          {
+            "$ref": "#/components/parameters/view_sort_by"
           }
         ],
         "responses": {
@@ -3679,6 +3682,113 @@
       }
     },
     "/v1/exports": {
+      "get": {
+        "operationId": "listExportColumns",
+        "summary": "List available CSV columns",
+        "description": "Discover column names before creating an export. Requires a project private key; read-only keys are allowed. kind applies only to timeseries. group_by applies to summary, quality and engagement. Date ranges and filters do not change the columns.",
+        "tags": [
+          "Analytics"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/export_resource"
+          },
+          {
+            "$ref": "#/components/parameters/metric_kind"
+          },
+          {
+            "$ref": "#/components/parameters/group_by"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available columns for the requested report shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportColumns"
+                },
+                "example": {
+                  "columns": [
+                    "video_id",
+                    "views",
+                    "unique_viewers",
+                    "total_playing_time_ms",
+                    "playback_score/value",
+                    "playback_score/sample_views"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "operationId": "exportData",
         "summary": "Generate a CSV report on request",
@@ -4464,6 +4574,28 @@
       }
     },
     "parameters": {
+      "export_resource": {
+        "name": "resource",
+        "in": "query",
+        "required": true,
+        "description": "Report whose CSV columns to list.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "quality",
+            "engagement",
+            "timeseries",
+            "videos",
+            "events",
+            "views",
+            "errors",
+            "dimensions",
+            "renditions",
+            "retention"
+          ]
+        }
+      },
       "from": {
         "name": "from",
         "in": "query",
@@ -4637,7 +4769,26 @@
           ],
           "default": "asc"
         },
-        "description": "Sort direction. Events and videos default to asc; views default to desc. Events sort by server ingestion sequence, videos by sort_by, and views by started_at with view_id in the same direction for ties. Video metric ties use video_id ascending in either direction. Keep the same order with each cursor."
+        "description": "Sort direction. Events and videos default to asc; views default to desc. Events sort by ingestion sequence. Videos and views sort by sort_by with missing values last. View ties use view_id in the requested direction; video metric ties use video_id ascending."
+      },
+      "view_sort_by": {
+        "name": "sort_by",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "started_at",
+            "video_id",
+            "view_id",
+            "device_type",
+            "playing_time_ms",
+            "startup_time_ms",
+            "rebuffer_duration_ms",
+            "playback_score"
+          ],
+          "default": "started_at"
+        },
+        "description": "Sort all matching sessions before pagination. Missing values come last in both directions. Ties use view_id in the requested direction. Keep sort_by, order and filters unchanged with a cursor."
       },
       "sort_by": {
         "name": "sort_by",
@@ -4647,11 +4798,13 @@
           "enum": [
             "video_id",
             "views",
-            "total_playing_time_ms"
+            "unique_viewers",
+            "total_playing_time_ms",
+            "playback_score"
           ],
           "default": "video_id"
         },
-        "description": "Videos only. Rank all matching videos by this field before pagination. Watch time is total_playing_time_ms. Metric ties use video_id ascending. Keep the same sort_by with each cursor."
+        "description": "Rank all matching videos before pagination. Missing scores come last in both directions. Metric ties use video_id ascending. Keep sort_by, order and filters unchanged with a cursor."
       },
       "group_by": {
         "name": "group_by",
@@ -8326,9 +8479,17 @@
             "enum": [
               "video_id",
               "views",
-              "total_playing_time_ms"
+              "unique_viewers",
+              "total_playing_time_ms",
+              "playback_score",
+              "started_at",
+              "view_id",
+              "device_type",
+              "playing_time_ms",
+              "startup_time_ms",
+              "rebuffer_duration_ms"
             ],
-            "default": "video_id"
+            "description": "Videos or views only. Use a sort field supported by the selected resource. Defaults to video_id for videos and started_at for views."
           },
           "interval": {
             "type": "string",
@@ -8401,6 +8562,22 @@
           }
         }
       },
+      "ExportColumns": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Available CSV column names in default output order."
+          }
+        }
+      },
       "ExportRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -8426,6 +8603,18 @@
           },
           "query": {
             "$ref": "#/components/schemas/ExportQuery"
+          },
+          "columns": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "CSV column names in output order. Omit for all columns. Get the available names from GET /v1/exports using the same resource, kind and group_by. Unknown names, duplicates and empty selections are rejected."
           }
         }
       },

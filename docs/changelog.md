@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.7.0...v0.8.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **views:** Views default to descending start time instead of ascending view ID. Existing view cursors must be restarted.
+
+### Bug Fixes
+
+* **views:** sort playback attempts newest first ([#48](https://github.com/chunkifydev/chunkify-analytics/issues/48)) ([1b1948c](https://github.com/chunkifydev/chunkify-analytics/commit/1b1948c96ea7784e486073d9821ccb12968da079))
+
 ## [0.7.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.6.0...v0.7.0) (2026-10-30)
 
 

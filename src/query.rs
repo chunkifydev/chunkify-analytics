@@ -56,6 +56,8 @@ pub struct Query {
     pub continent: Option<String>,
     pub country: Option<String>,
     pub city: Option<String>,
+    pub page_origin: Option<String>,
+    pub page_path: Option<String>,
     #[serde(default, deserialize_with = "optional_limit")]
     pub limit: Option<usize>,
     pub cursor: Option<String>,
@@ -123,6 +125,8 @@ pub enum Dimension {
     Continent,
     Country,
     City,
+    PageOrigin,
+    PagePath,
     VideoId,
     ViewerId,
 }
@@ -141,6 +145,12 @@ impl Dimension {
             }
             Self::City => {
                 "CASE WHEN json_type(context_remainder, '$.city') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.city') END"
+            }
+            Self::PageOrigin => {
+                "CASE WHEN json_type(context_remainder, '$.page_origin') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_origin') END"
+            }
+            Self::PagePath => {
+                "CASE WHEN json_type(context_remainder, '$.page_path') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_path') END"
             }
             Self::VideoId => "video_id",
             Self::ViewerId => "viewer_id",
@@ -169,6 +179,8 @@ pub enum BreakdownBy {
     Continent,
     Country,
     City,
+    PageOrigin,
+    PagePath,
 }
 
 impl BreakdownBy {
@@ -180,6 +192,8 @@ impl BreakdownBy {
             Self::Continent => Dimension::Continent.column(),
             Self::Country => Dimension::Country.column(),
             Self::City => Dimension::City.column(),
+            Self::PageOrigin => Dimension::PageOrigin.column(),
+            Self::PagePath => Dimension::PagePath.column(),
         }
     }
 }
@@ -219,6 +233,8 @@ pub struct TimeseriesQuery {
     pub continent: Option<String>,
     pub country: Option<String>,
     pub city: Option<String>,
+    pub page_origin: Option<String>,
+    pub page_path: Option<String>,
 }
 
 pub struct TimeseriesWindow {
@@ -250,6 +266,8 @@ impl TimeseriesQuery {
             continent: self.continent,
             country: self.country,
             city: self.city,
+            page_origin: self.page_origin,
+            page_path: self.page_path,
             ..Query::default()
         }
         .filters()?;
@@ -289,6 +307,8 @@ pub struct Filters {
     continent: Option<String>,
     country: Option<String>,
     city: Option<String>,
+    page_origin: Option<String>,
+    page_path: Option<String>,
 }
 
 impl Query {
@@ -348,6 +368,19 @@ impl Query {
                 "city must contain between 1 and 256 characters",
             ));
         }
+        for (name, value) in [
+            ("page_origin", &self.page_origin),
+            ("page_path", &self.page_path),
+        ] {
+            if value
+                .as_ref()
+                .is_some_and(|value| !(1..=4096).contains(&value.chars().count()))
+            {
+                return Err(ApiError::bad(format!(
+                    "{name} must contain between 1 and 4096 characters"
+                )));
+            }
+        }
         if self
             .view_id
             .as_ref()
@@ -370,6 +403,8 @@ impl Query {
             continent: self.continent.clone(),
             country: self.country.clone(),
             city: self.city.clone(),
+            page_origin: self.page_origin.clone(),
+            page_path: self.page_path.clone(),
         })
     }
 
@@ -422,6 +457,8 @@ impl Filters {
             (&self.continent, Dimension::Continent.column()),
             (&self.country, Dimension::Country.column()),
             (&self.city, Dimension::City.column()),
+            (&self.page_origin, Dimension::PageOrigin.column()),
+            (&self.page_path, Dimension::PagePath.column()),
         ] {
             if let Some(value) = value {
                 conditions.push(format!("{column} = ?"));

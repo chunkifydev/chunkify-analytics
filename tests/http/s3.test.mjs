@@ -544,8 +544,8 @@ test("S3 persists country, city and page context without request addresses acros
   await app.replaceTask();
   const after = (await app.get("/v1/events")).events;
   assert.deepEqual(after, before);
-  for (const [dimension, value] of [["country", "GB"], ["city", "London"], ["continent", "EU"]]) {
-    for (const route of ["summary", "quality", "engagement"]) {
+  for (const [dimension, value] of [["country", "GB"], ["city", "London"], ["continent", "EU"], ["page_origin", "https://example.com"], ["page_path", "/watch/first"]]) {
+    for (const route of dimension.startsWith("page_") ? ["summary"] : ["summary", "quality", "engagement"]) {
       const result = await app.get(`/v1/${route}?group_by=${dimension}&country=GB`);
       assert.equal(result.groups.length, 1);
       assert.equal(result.groups[0].value, value);

@@ -1455,7 +1455,9 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                     "device_type",
                     "continent",
                     "country",
-                    "city"
+                    "city",
+                    "page_origin",
+                    "page_path"
                 ])
             );
             assert_eq!(schema["properties"]["limit"]["maximum"], 100);
@@ -1804,7 +1806,10 @@ async fn read_and_export_rates_are_shared_across_http_and_both_mcp_transports() 
 
 #[tokio::test]
 async fn location_queries_and_exports_match_http_on_both_transports() {
-    let collector = Collector::with_settings(&[("server.trusted_proxies", "127.0.0.1")]);
+    let collector = Collector::with_settings(&[
+        ("server.trusted_proxies", "127.0.0.1"),
+        ("rate_limits.export_downloads_per_minute", "1000"),
+    ]);
     let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
     let example = &contract["paths"]["/v1/events"]["post"]["requestBody"]["content"]["application/json"]
         ["example"];
@@ -1822,6 +1827,9 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
             event["event_name"] = json!(format!("chunkify.video.{name}"));
             event["sequence"] = json!(sequence);
             event["playing_time_ms"] = json!(if sequence == 1 { 0 } else { 1200 });
+            if index < 2 {
+                event["browser_context"] = json!({"schema_version":1,"page_origin":format!("https://site-{index}.example"),"page_path":"/watch/video"});
+            }
             let response = http
                 .post(format!("{}/v1/events", collector.url))
                 .header(
@@ -1848,7 +1856,7 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
     for embedded in [false, true] {
         let client = connect_mode(&collector.url, token, true, embedded).await;
         for kind in ["summary", "quality", "engagement"] {
-            for field in ["continent", "country", "city"] {
+            for field in ["continent", "country", "city", "page_origin", "page_path"] {
                 let mut page =
                     call_metrics(&client, kind, json!({"group_by":field,"limit":1}), false).await;
                 let mut groups = page["data"]["groups"].as_array().unwrap().clone();
@@ -1888,7 +1896,7 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
             );
             assert_eq!(result["data"]["views"], 1);
         }
-        for field in ["continent", "country", "city"] {
+        for field in ["continent", "country", "city", "page_origin", "page_path"] {
             let result = call(
                 &client,
                 "list_dimension_values",
@@ -1906,6 +1914,17 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
                     .await
             );
             assert_eq!(result["data"]["values"].as_array().unwrap().len(), 1);
+        }
+        for kind in ["summary", "quality", "engagement"] {
+            let result = call_metrics(
+                &client,
+                kind,
+                json!({"group_by":"page_path","page_origin":"https://site-0.example"}),
+                false,
+            )
+            .await;
+            assert_eq!(result["data"], collector.get(&format!("/v1/{kind}?group_by=page_path&page_origin=https%3A%2F%2Fsite-0.example&limit=10"), token).await);
+            assert_eq!(result["data"]["groups"][0]["value"], "/watch/video");
         }
         let cities = call_metrics(
             &client,
@@ -1932,6 +1951,8 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
         let series = call(&client, "get_timeseries", dates, false).await;
         assert_eq!(series["data"], collector.get("/v1/timeseries?country=GB&from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z&interval=day", token).await);
         for invalid in [
+            json!({"page_origin":""}),
+            json!({"page_path":"x".repeat(4097)}),
             json!({"country":"gb"}),
             json!({"continent":"XX"}),
             json!({"city":""}),
@@ -1942,6 +1963,14 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
                 "invalid_arguments"
             );
         }
+        let pages_export = call(&client, "export_data", json!({"resource":"summary","query":{"group_by":"page_path","page_origin":"https://site-0.example"}}), false).await;
+        let pages_csv = http
+            .get(pages_export["data"]["download_url"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pages_csv.status(), 200);
+        assert!(pages_csv.text().await.unwrap().contains("/watch/video"));
         let export = call(
             &client,
             "export_data",
@@ -1966,7 +1995,8 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
         )
         .await;
         assert_eq!(
-            call_metrics(&other, "summary", json!({"group_by":"country"}), false).await["data"]["groups"],
+            call_metrics(&other, "summary", json!({"group_by":"page_origin"}), false).await["data"]
+                ["groups"],
             json!([])
         );
         other.cancel().await.unwrap();

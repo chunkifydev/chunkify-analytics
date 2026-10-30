@@ -97,6 +97,7 @@ impl ExportRequest {
             if self.resource == "views" {
                 let _: query::ViewsQuery = parse(args.clone())?;
                 args.remove("has_fatal_error");
+                args.remove("sort_by");
             }
             let q: query::Query = parse(args)?;
             q.filters()?;

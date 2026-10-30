@@ -153,6 +153,10 @@ impl Contract {
                     .filter(|(name, _)| !matches!(name.as_str(), "limit" | "cursor")),
             );
         }
+        export_parameters.insert(
+            "sort_by".into(),
+            self.0["components"]["schemas"]["ExportQuery"]["properties"]["sort_by"].clone(),
+        );
         // Exports share a query object, but ordering defaults depend on the resource.
         let order = export_parameters
             .get_mut("order")
@@ -252,7 +256,11 @@ impl Contract {
                 args.remove("dimension");
             }
             if path == "/v1/views" {
+                let _: crate::query::ViewsQuery =
+                    serde_json::from_value(Value::Object(args.clone()))
+                        .map_err(|_| "Invalid session sort or filters")?;
                 args.remove("has_fatal_error");
+                args.remove("sort_by");
             }
             let query: crate::query::Query = serde_json::from_value(Value::Object(args))
                 .map_err(|_| "Invalid query arguments")?;

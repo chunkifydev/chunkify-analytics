@@ -5158,7 +5158,7 @@
               "array",
               "null"
             ],
-            "maxItems": 1000,
+            "maxItems": 128,
             "items": {
               "$ref": "#/components/schemas/PlayedRange"
             },

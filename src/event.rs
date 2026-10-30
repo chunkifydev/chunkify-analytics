@@ -235,7 +235,7 @@ pub(crate) fn valid_played_ranges(value: &Value) -> bool {
     let Some(ranges) = value.as_array() else {
         return false;
     };
-    if ranges.len() > 1000 {
+    if ranges.len() > 128 {
         return false;
     }
     let mut previous_end = -1.0;

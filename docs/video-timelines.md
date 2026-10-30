@@ -16,7 +16,7 @@ unmeasured gap after the last time-update event.
 Use one final event per attempt, or its latest snapshot when no final exists.
 Never sum cumulative snapshots. A missing or null range array is unmeasured.
 An empty array is a measured attempt with no watched section. The player reports
-null rather than partial coverage after more than 1,000 disjoint ranges.
+null rather than partial coverage after more than 128 disjoint ranges.
 
 The response contains:
 

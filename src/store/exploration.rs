@@ -1,4 +1,4 @@
-use super::metrics::{CohortMetrics, utc_timestamp, view_cohort};
+use super::metrics::{CohortMetrics, score_json, utc_timestamp, view_cohort};
 use super::*;
 use crate::query::{Dimension, ViewsQuery};
 
@@ -6,9 +6,10 @@ const VIEW_COLUMNS: &str = "view_id, video_id, viewer_id, occurred_at_ms,
     context_browser_name, context_os_name, context_device_type, playing_time_ms,
     measurement.startup_time_ms, measurement.rebuffer_duration_ms,
     COALESCE(measurement.reached_end, FALSE), COALESCE(measurement.has_ended_event, FALSE),
-    COALESCE(has_fatal_error, FALSE)";
+    COALESCE(has_fatal_error, FALSE), playback_score";
 
 fn view_row(row: &duckdb::Row<'_>) -> duckdb::Result<Value> {
+    let score: Option<f64> = row.get(13)?;
     Ok(
         json!({"view_id":row.get::<_, String>(0)?, "video_id":row.get::<_, String>(1)?,
         "viewer_id":row.get::<_, Option<String>>(2)?, "started_at":utc_timestamp(row.get(3)?),
@@ -16,7 +17,8 @@ fn view_row(row: &duckdb::Row<'_>) -> duckdb::Result<Value> {
         "device_type":row.get::<_, Option<String>>(6)?, "playing_time_ms":row.get::<_, f64>(7)?,
         "startup_time_ms":row.get::<_, Option<f64>>(8)?, "rebuffer_duration_ms":row.get::<_, Option<f64>>(9)?,
         "reached_end":row.get::<_, bool>(10)?, "has_ended_event":row.get::<_, bool>(11)?,
-        "has_fatal_error":row.get::<_, bool>(12)?}),
+        "has_fatal_error":row.get::<_, bool>(12)?,
+        "playback_score":score_json(score, i64::from(score.is_some()))}),
     )
 }
 

@@ -898,11 +898,11 @@ test("summaries count views and viewers and use final or latest cumulative playt
     { views: 2, unique_viewers: 1, total_playing_time_ms: 2500 });
   assert.deepEqual(await server.get("/v1/summary?video_id=absent"), { views: 0, unique_viewers: 0, total_playing_time_ms: 0 });
   const videos = await server.get("/v1/videos?limit=1");
-  assert.deepEqual(videos.videos, [{ video_id: "video-a", views: 2, unique_viewers: 1, total_playing_time_ms: 6000 }]);
+  assert.deepEqual(videos.videos, [{ video_id: "video-a", views: 2, unique_viewers: 1, total_playing_time_ms: 6000, playback_score: { value: null, sample_views: 0 } }]);
   assert.ok(videos.next_cursor);
   await server.send(at(second.at(-1), "2026-10-15T12:00:03Z", { sequence: 4, playing_time_ms: 2500 }));
   const next = await server.get(`/v1/videos?limit=1&cursor=${encodeURIComponent(videos.next_cursor)}`);
-  assert.deepEqual(next.videos, [{ video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500 }]);
+  assert.deepEqual(next.videos, [{ video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500, playback_score: { value: null, sample_views: 0 } }]);
   assert.equal(next.next_cursor, null);
   assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 7000);
   await server.stop();

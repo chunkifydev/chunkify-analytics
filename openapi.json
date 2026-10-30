@@ -1456,6 +1456,10 @@
                       "views": 2,
                       "ratio": 0.5
                     }
+                  },
+                  "playback_score": {
+                    "value": 85.0,
+                    "sample_views": 4
                   }
                 }
               }
@@ -2986,7 +2990,11 @@
                       "rebuffer_duration_ms": 0,
                       "reached_end": true,
                       "has_ended_event": true,
-                      "has_fatal_error": false
+                      "has_fatal_error": false,
+                      "playback_score": {
+                        "value": 98.8,
+                        "sample_views": 1
+                      }
                     }
                   ],
                   "next_cursor": null
@@ -3148,7 +3156,11 @@
                     "rebuffer_duration_ms": 0,
                     "reached_end": true,
                     "has_ended_event": true,
-                    "has_fatal_error": false
+                    "has_fatal_error": false,
+                    "playback_score": {
+                      "value": 98.8,
+                      "sample_views": 1
+                    }
                   },
                   "events": [],
                   "next_cursor": null
@@ -5898,13 +5910,17 @@
           "total_playing_time_ms": {
             "type": "number",
             "minimum": 0
+          },
+          "playback_score": {
+            "$ref": "#/components/schemas/PlaybackScore"
           }
         },
         "required": [
           "video_id",
           "views",
           "unique_viewers",
-          "total_playing_time_ms"
+          "total_playing_time_ms",
+          "playback_score"
         ],
         "additionalProperties": false
       },
@@ -7043,7 +7059,8 @@
           "startup_time_ms",
           "buffering",
           "fatal_errors",
-          "startup_outcomes"
+          "startup_outcomes",
+          "playback_score"
         ],
         "properties": {
           "views": {
@@ -7148,6 +7165,9 @@
           },
           "startup_outcomes": {
             "$ref": "#/components/schemas/StartupOutcomes"
+          },
+          "playback_score": {
+            "$ref": "#/components/schemas/PlaybackScore"
           }
         },
         "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
@@ -7701,7 +7721,8 @@
           "buffering",
           "fatal_errors",
           "bucket_start",
-          "startup_outcomes"
+          "startup_outcomes",
+          "playback_score"
         ],
         "properties": {
           "views": {
@@ -7810,6 +7831,9 @@
           },
           "startup_outcomes": {
             "$ref": "#/components/schemas/StartupOutcomes"
+          },
+          "playback_score": {
+            "$ref": "#/components/schemas/PlaybackScore"
           }
         },
         "description": "Playback quality for the same start cohort as summary. All rates are fractions. Counts expose measurement coverage."
@@ -8044,6 +8068,9 @@
           },
           "has_fatal_error": {
             "type": "boolean"
+          },
+          "playback_score": {
+            "$ref": "#/components/schemas/PlaybackScore"
           }
         },
         "required": [
@@ -8059,7 +8086,8 @@
           "rebuffer_duration_ms",
           "reached_end",
           "has_ended_event",
-          "has_fatal_error"
+          "has_fatal_error",
+          "playback_score"
         ]
       },
       "ViewPage": {
@@ -8849,6 +8877,30 @@
           "playing_time_ms",
           "playing_time_ratio"
         ]
+      },
+      "PlaybackScore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value",
+          "sample_views"
+        ],
+        "properties": {
+          "value": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Mean of measured per-session playback scores, or null without scored sessions. Each session scores 100 * max(0, 1 - startup_time_ms/10000) * max(0, 1 - buffering_ratio/0.1). A recorded fatal error or failed_before_start outcome scores zero. Other sessions require positive playing time and known startup and rebuffer durations; ended_before_start and unknown outcomes are unscored. Buffering excludes startup, pauses and seeks. This heuristic does not measure picture quality."
+          },
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Sessions contributing a score, including recorded failures. A per-session result is zero or one."
+          }
+        }
       }
     }
   },

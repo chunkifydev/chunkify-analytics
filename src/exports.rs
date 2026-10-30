@@ -481,6 +481,8 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
             "views",
             "unique_viewers",
             "total_playing_time_ms",
+            "playback_score/value",
+            "playback_score/sample_views",
         ],
         "retention" => &["start_seconds", "end_seconds", "views", "ratio"],
         "renditions" => &[
@@ -507,6 +509,8 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
             "reached_end",
             "has_ended_event",
             "has_fatal_error",
+            "playback_score/value",
+            "playback_score/sample_views",
         ],
         "errors" => &["error_code", "fatal", "error_events", "affected_views"],
         "dimensions" => &["value", "views"],
@@ -530,6 +534,8 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
             "startup_outcomes/ended_before_start/ratio",
             "startup_outcomes/unknown/views",
             "startup_outcomes/unknown/ratio",
+            "playback_score/value",
+            "playback_score/sample_views",
         ],
         "engagement" => &[
             "views",

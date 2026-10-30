@@ -1446,3 +1446,41 @@ for (const separateReads of [false, true]) test(`location reports use first star
     assert.ok((await csv.text()).includes(contains));
   }
 });
+
+
+test("playback scores match JSON reports and CSV, including missing samples", async t => {
+  const server = await collector(t);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  for (const [video, startup, playing, rebuffer, outcome, expected] of [
+    ["good", 2000, 9900, 100, "started", 72],
+    ["failed", null, 0, 0, "failed_before_start", 0],
+    ["missing", null, 1000, 0, "started", null],
+  ]) {
+    const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(),
+      video_id: video, sequence: 1, occurred_at: "2026-10-19T12:00:00Z" };
+    const end = { ...start, event_id: randomUUID(), event_name: "chunkify.video.view_ended", sequence: 2,
+      occurred_at: "2026-10-19T12:01:00Z", reason: "destroyed", startup_time_ms: startup,
+      playing_time_ms: playing, rebuffer_duration_ms: rebuffer, startup_outcome: outcome };
+    for (const event of [start, end]) await server.post("/v1/events", JSON.stringify(event), 201);
+    const view = (await server.get(`/v1/views?video_id=${video}`)).views[0];
+    assert.equal(view.playback_score.sample_views, Number(expected !== null));
+    if (expected === null) assert.equal(view.playback_score.value, null);
+    else assert.ok(Math.abs(view.playback_score.value - expected) < 1e-9);
+  }
+  const quality = await server.get("/v1/quality");
+  assert.deepEqual(quality.playback_score, { value: 36, sample_views: 2 });
+  const headers = { Authorization: `Bearer ${server.keys.secret_key}` };
+  for (const [resource, query, count, score] of [
+    ["quality", {}, "2", "36"],
+    ["videos", { video_id: "good" }, "1", "72"],
+    ["views", { video_id: "missing" }, "0", ""],
+    ["quality", { video_id: "absent" }, "0", ""],
+  ]) {
+    const link = await server.post("/v1/exports", JSON.stringify({ resource, query }), 201, headers);
+    const [columns, row] = csvRecords(await (await fetch(link.download_url)).text());
+    assert.equal(row[columns.indexOf("playback_score/sample_views")], count);
+    const value = row[columns.indexOf("playback_score/value")];
+    if (score === "") assert.equal(value, "");
+    else { assert.notEqual(value, ""); assert.equal(Number(value), Number(score)); }
+  }
+});

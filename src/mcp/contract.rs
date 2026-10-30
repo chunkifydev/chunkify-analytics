@@ -110,11 +110,11 @@ impl Contract {
         )];
         let mut parameters = self.parameters("/v1/summary");
         parameters.insert("kind".into(), json!({"type":"string","enum":["summary","quality","engagement","errors","renditions","retention"],
-            "description":"summary returns views, unique viewers and total playing time; quality returns startup, buffering, fatal errors and startup outcomes with sample counts; engagement returns average watch time, observed reached-end rates, furthest-progress milestones and measured watch-time distribution; errors returns paginated error-code and fatal-status groups; retention returns watched media-position buckets for one video; renditions returns time-weighted average bitrate and top renditions by watch time."}));
+            "description":"summary returns views, unique viewers and total playing time; quality returns startup, buffering, fatal errors, startup outcomes and playback scores with sample counts; engagement returns average watch time, observed reached-end rates, furthest-progress milestones and measured watch-time distribution; errors returns paginated error-code and fatal-status groups; retention returns watched media-position buckets for one video; renditions returns time-weighted average bitrate and top renditions by watch time."}));
         let schema = json!({"type":"object","properties":parameters,"required":["kind"],"additionalProperties":false});
         tools.push(Tool::new(
             "get_metrics",
-            "Read one metric set for the authenticated project. Engagement includes progress_reached and watch_time_ms; quality includes startup_outcomes. Progress ratios use measured progress samples, watch-time distributions exclude missing measurements, and startup outcome ratios use all attempts. Progress can include seeking; it is not retention. kind is required: summary, quality, engagement, errors, renditions or retention. Retention requires video_id and returns watched sections with at most 200 buckets; it does not accept pagination or group_by. Renditions returns global totals with the top rows; use limit to select up to 100 rows, or export for every rendition. Renditions does not accept group_by or cursor. Error metrics return paginated code/fatal groups without group_by. Add group_by=browser_name, os_name, device_type, continent, country, city, page_origin or page_path for paginated groups; omit it for filtered totals. Group membership uses the first retained view start. Filter by country when grouping cities to avoid combining names shared by different countries. Location displays using bundled DB-IP data must link to https://db-ip.com. Missing context forms a null group, distinct from the literal device type unknown. Pagination requires group_by for summary, quality and engagement; errors always paginate. Pages default to 10 rows and accept at most 100. Keep kind, group_by and filters unchanged with every cursor. Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON. Each query has a 15-second deadline and a 1 MiB response limit. Results contain the unchanged HTTP body in data and explicit coverage. No automatic pagination. Use describe_api topic=metrics for definitions.",
+            "Read one metric set for the authenticated project. Engagement includes progress_reached and watch_time_ms; quality includes startup_outcomes and playback_score. Playback scores range from 0 to 100, average measured session scores equally, and remain null without eligible measurements. Fatal playback failures score zero. Progress ratios use measured progress samples, watch-time distributions exclude missing measurements, and startup outcome ratios use all attempts. Progress can include seeking; it is not retention. kind is required: summary, quality, engagement, errors, renditions or retention. Retention requires video_id and returns watched sections with at most 200 buckets; it does not accept pagination or group_by. Renditions returns global totals with the top rows; use limit to select up to 100 rows, or export for every rendition. Renditions does not accept group_by or cursor. Error metrics return paginated code/fatal groups without group_by. Add group_by=browser_name, os_name, device_type, continent, country, city, page_origin or page_path for paginated groups; omit it for filtered totals. Group membership uses the first retained view start. Filter by country when grouping cities to avoid combining names shared by different countries. Location displays using bundled DB-IP data must link to https://db-ip.com. Missing context forms a null group, distinct from the literal device type unknown. Pagination requires group_by for summary, quality and engagement; errors always paginate. Pages default to 10 rows and accept at most 100. Keep kind, group_by and filters unchanged with every cursor. Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON. Each query has a 15-second deadline and a 1 MiB response limit. Results contain the unchanged HTTP body in data and explicit coverage. No automatic pagination. Use describe_api topic=metrics for definitions.",
             schema.as_object().unwrap().clone(),
         ));
         for (name, path) in QUERIES {
@@ -572,7 +572,12 @@ impl Contract {
             rows.len() <= max_page_size(path)
                 && rows.iter().all(|row| {
                     if key == "videos" {
-                        row["video_id"].is_string() && metrics(row)
+                        row["video_id"].is_string()
+                            && metrics(row)
+                            && playback_score(
+                                &row["playback_score"],
+                                row["views"].as_u64().unwrap_or(0),
+                            )
                     } else {
                         row["event"].is_object()
                             && row["received_at"].is_string()
@@ -605,6 +610,7 @@ fn view_metrics(v: &Value) -> bool {
         && v["started_at"]
             .as_str()
             .is_some_and(|s| crate::event::timestamp(s).is_ok())
+        && playback_score(&v["playback_score"], 1)
         && nonnegative_number(&v["playing_time_ms"])
         && nullable_number(v.get("startup_time_ms"), f64::MAX)
         && nullable_number(v.get("rebuffer_duration_ms"), f64::MAX)
@@ -734,6 +740,19 @@ fn startup_outcomes(value: &Value, views: u64) -> bool {
             == Some(views - value["unknown"]["views"].as_u64().unwrap())
 }
 
+fn playback_score(value: &Value, views: u64) -> bool {
+    value["sample_views"].as_u64().is_some_and(|samples| {
+        samples <= views
+            && if samples == 0 {
+                value.get("value").is_some_and(Value::is_null)
+            } else {
+                value["value"]
+                    .as_f64()
+                    .is_some_and(|n| n.is_finite() && (0.0..=100.0).contains(&n))
+            }
+    })
+}
+
 fn quality_metrics(value: &Value) -> bool {
     let Some(views) = value["views"].as_u64() else {
         return false;
@@ -742,7 +761,8 @@ fn quality_metrics(value: &Value) -> bool {
     let buffering = &value["buffering"];
     let errors = &value["fatal_errors"];
     let count = |value: &Value| value.as_u64().is_some_and(|v| v <= views);
-    count(&startup["sample_views"])
+    playback_score(&value["playback_score"], views)
+        && count(&startup["sample_views"])
         && nullable_number(startup.get("median"), f64::MAX)
         && nullable_number(startup.get("p95"), f64::MAX)
         && count(&buffering["sample_views"])
@@ -883,6 +903,8 @@ mod tests {
         assert!(contract.valid_response("/v1/quality", &good));
         for (pointer, replacement) in [
             ("/startup_time_ms/median", json!(-1)),
+            ("/playback_score/value", json!(101)),
+            ("/playback_score/sample_views", json!(5)),
             ("/buffering/ratio", json!(1.1)),
             ("/fatal_errors/affected_views", json!(5)),
             ("/startup_time_ms/sample_views", Value::Null),

@@ -266,11 +266,17 @@ Values come from first retained starts, with null context separate from literal 
 
 ## Export CSV
 
+Use `list_export_columns` with `resource` and optional `kind` or `group_by` to
+get the available CSV fields. Pass `columns` to `export_data` in the desired
+order, or omit it for all fields. Empty, duplicate, and unknown selections are
+rejected.
+
 Ask for an export, or call `export_data` with:
 
 ```json
 {
   "resource": "videos",
+  "columns": ["video_id", "views", "total_playing_time_ms"],
   "query": {"from": "2026-10-01T00:00:00Z", "to": "2026-11-01T00:00:00Z", "sort_by": "views", "order": "desc"}
 }
 ```

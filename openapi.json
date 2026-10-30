@@ -3682,6 +3682,113 @@
       }
     },
     "/v1/exports": {
+      "get": {
+        "operationId": "listExportColumns",
+        "summary": "List available CSV columns",
+        "description": "Discover column names before creating an export. Requires a project private key; read-only keys are allowed. kind applies only to timeseries. group_by applies to summary, quality and engagement. Date ranges and filters do not change the columns.",
+        "tags": [
+          "Analytics"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/export_resource"
+          },
+          {
+            "$ref": "#/components/parameters/metric_kind"
+          },
+          {
+            "$ref": "#/components/parameters/group_by"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Available columns for the requested report shape.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportColumns"
+                },
+                "example": {
+                  "columns": [
+                    "video_id",
+                    "views",
+                    "unique_viewers",
+                    "total_playing_time_ms",
+                    "playback_score/value",
+                    "playback_score/sample_views"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, or pagination cursor.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "operationId": "exportData",
         "summary": "Generate a CSV report on request",
@@ -4467,6 +4574,28 @@
       }
     },
     "parameters": {
+      "export_resource": {
+        "name": "resource",
+        "in": "query",
+        "required": true,
+        "description": "Report whose CSV columns to list.",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "summary",
+            "quality",
+            "engagement",
+            "timeseries",
+            "videos",
+            "events",
+            "views",
+            "errors",
+            "dimensions",
+            "renditions",
+            "retention"
+          ]
+        }
+      },
       "from": {
         "name": "from",
         "in": "query",
@@ -8433,6 +8562,22 @@
           }
         }
       },
+      "ExportColumns": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "columns"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Available CSV column names in default output order."
+          }
+        }
+      },
       "ExportRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -8458,6 +8603,18 @@
           },
           "query": {
             "$ref": "#/components/schemas/ExportQuery"
+          },
+          "columns": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "description": "CSV column names in output order. Omit for all columns. Get the available names from GET /v1/exports using the same resource, kind and group_by. Unknown names, duplicates and empty selections are rejected."
           }
         }
       },

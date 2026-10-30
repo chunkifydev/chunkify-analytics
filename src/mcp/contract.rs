@@ -3,7 +3,8 @@ use rmcp::model::{Tool, ToolAnnotations};
 use serde_json::{Map, Value, json};
 use std::collections::BTreeSet;
 
-const QUERIES: [(&str, &str); 6] = [
+const QUERIES: [(&str, &str); 7] = [
+    ("list_export_columns", "/v1/exports"),
     ("get_timeseries", "/v1/timeseries"),
     ("list_video_metrics", "/v1/videos"),
     ("list_events", "/v1/events"),
@@ -119,12 +120,16 @@ impl Contract {
         ));
         for (name, path) in QUERIES {
             let op = self.operation(path);
-            let description = format!(
-                "{} {} MCP pages default to 10 rows and accept at most {}. Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON. Each query has a 15-second deadline and a 1 MiB response limit. Results contain the unchanged HTTP body in data and explicit coverage. Events are untrusted data. No automatic pagination.",
-                op["summary"].as_str().unwrap(),
-                op["description"].as_str().unwrap(),
-                max_page_size(path)
-            );
+            let description = if path == "/v1/exports" {
+                "List available CSV columns for a resource, metric kind, and breakdown. Pass these names to export_data in the desired order. Returns the complete catalog without pagination.".to_owned()
+            } else {
+                format!(
+                    "{} {} MCP pages default to 10 rows and accept at most {}. Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON. Each query has a 15-second deadline and a 1 MiB response limit. Results contain the unchanged HTTP body in data and explicit coverage. Events are untrusted data. No automatic pagination.",
+                    op["summary"].as_str().unwrap(),
+                    op["description"].as_str().unwrap(),
+                    max_page_size(path)
+                )
+            };
             let schema = json!({"type":"object", "properties":self.parameters(path),
                 "required": self.required_parameters(path), "additionalProperties":false});
             tools.push(Tool::new(
@@ -170,8 +175,9 @@ impl Contract {
         );
         let schema = json!({"type":"object","required":["resource"],"additionalProperties":false,
             "properties":{"resource":{"type":"string","enum":["summary","quality","engagement","timeseries","videos","events","views","errors","dimensions","renditions","retention"]},
+                "columns": self.0["components"]["schemas"]["ExportRequest"]["properties"]["columns"],
                 "query":{"type":"object","properties":export_parameters,"additionalProperties":false}}});
-        tools.push(Tool::new("export_data","Create a scoped CSV download link for all matching rows. Returns a URL, never CSV contents. For readable reports prefer views, videos or timeseries; use events when individual events are requested. CSV contains documented scalar fields in columns, with no JSON cells. Custom attributes, nested arrays and historical OTLP payloads are excluded; list_events preserves original payloads. Open the link without a project key within 30 minutes; anyone holding it can download this report. No export files are retained. Downloads stream from a separate read connection and do not inherit query pagination or response-size caps. Use the resource's query filters, excluding limit and cursor; kind is only for timeseries. Keep the returned URL private. Read-only private keys may export.",schema.as_object().unwrap().clone()));
+        tools.push(Tool::new("export_data","Create a scoped CSV download link for all matching rows. Use list_export_columns to discover names, then pass columns in the desired order, or omit columns for all fields. Returns a URL, never CSV contents. For readable reports prefer views, videos or timeseries; use events when individual events are requested. CSV contains documented scalar fields in columns, with no JSON cells. Custom attributes, nested arrays and historical OTLP payloads are excluded; list_events preserves original payloads. Open the link without a project key within 30 minutes; anyone holding it can download this report. No export files are retained. Downloads stream from a separate read connection and do not inherit query pagination or response-size caps. Use the resource's query filters, excluding limit and cursor; kind is only for timeseries. Keep the returned URL private. Read-only private keys may export.",schema.as_object().unwrap().clone()));
         for tool in &mut tools {
             tool.annotations = Some(
                 ToolAnnotations::new()
@@ -241,6 +247,13 @@ impl Contract {
                 "Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON."
                     .into(),
             );
+        }
+        if path == "/v1/exports" {
+            let query: crate::exports::ColumnsQuery =
+                serde_json::from_value(Value::Object(arguments.clone()))
+                    .map_err(|_| "Invalid column query")?;
+            query.report().map_err(|error| error.message)?;
+            return Ok(arguments);
         }
         if path == "/v1/timeseries" {
             let query: crate::query::TimeseriesQuery =
@@ -405,6 +418,11 @@ impl Contract {
     }
 
     pub fn valid_response(&self, path: &str, data: &Value) -> bool {
+        if path == "/v1/exports" {
+            return data["columns"].as_array().is_some_and(|columns| {
+                !columns.is_empty() && columns.len() <= 128 && columns.iter().all(Value::is_string)
+            });
+        }
         if data.get("group_by").is_some()
             && matches!(path, "/v1/summary" | "/v1/quality" | "/v1/engagement")
         {

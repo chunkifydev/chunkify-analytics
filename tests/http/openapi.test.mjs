@@ -1486,6 +1486,45 @@ test("playback scores match JSON reports and CSV, including missing samples", as
 });
 
 
+test("CSV column selection is discovered, validated and streamed in requested order", async t => {
+  const server = await collector(t);
+  const key = await server.admin(["key", "create", "default", "secret", "Export columns", "--read-only"]);
+  const headers = { Authorization: `Bearer ${key.key}` };
+  const catalog = async params => server.get(`/v1/exports?${new URLSearchParams(params)}`, 200, headers);
+  const create = async (body, status = 201) => server.post("/v1/exports", JSON.stringify(body), status, headers);
+  for (const resource of ["summary", "quality", "engagement", "videos", "views", "errors", "events", "renditions", "retention", "dimensions"]) {
+    const { columns } = await catalog({ resource });
+    assert.ok(columns.length > 0);
+    assert.equal(new Set(columns).size, columns.length);
+  }
+  assert.ok((await catalog({ resource: "timeseries", kind: "quality" })).columns.includes("playback_score/value"));
+  assert.ok((await catalog({ resource: "quality", group_by: "country" })).columns.includes("data/playback_score/value"));
+  await server.get("/v1/exports?resource=views", 401, {});
+  await server.get("/v1/exports?resource=views", 401, { Authorization: `Bearer ${server.keys.public_key}` });
+  for (const params of [{ resource: "unknown" }, { resource: "views", group_by: "country" }, { resource: "views", kind: "quality" }, { resource: "summary", group_by: "unknown" }, { resource: "events", unknown: "x" }]) {
+    await server.get(`/v1/exports?${new URLSearchParams(params)}`, 400, headers);
+  }
+  for (const columns of [[], ["views", "views"], ["event_id"], ["views", "no_such_column"], [1], "views"]) {
+    await create({ resource: "summary", columns }, 400);
+  }
+  await create({ resource: "quality", query: { group_by: "country" }, columns: ["views"] }, 400);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  for (let i = 0; i < 105; i++) await server.post("/v1/events", JSON.stringify({ ...structuredClone(example),
+    event_id: randomUUID(), view_id: randomUUID(), video_id: `video-${i}` }), 201);
+  const { columns } = await catalog({ resource: "videos" });
+  const all = await create({ resource: "videos" });
+  const [allHeaders, ...allRows] = csvRecords(await (await fetch(all.download_url)).text());
+  assert.deepEqual(allHeaders, columns);
+  const selected = ["views", "video_id"];
+  const link = await create({ resource: "videos", columns: selected });
+  const [selectedHeaders, ...selectedRows] = csvRecords(await (await fetch(link.download_url)).text());
+  assert.deepEqual(selectedHeaders, selected);
+  assert.equal(selectedRows.length, 105);
+  assert.deepEqual(selectedRows, allRows.map(row => selected.map(name => row[allHeaders.indexOf(name)])));
+  const empty = await create({ resource: "views", query: { video_id: "absent" }, columns: ["view_id"] });
+  assert.deepEqual(csvRecords(await (await fetch(empty.download_url)).text()), [["view_id"]]);
+});
+
 test("session and video column sorts cover the full cohort across pages with nulls last", async t => {
   const server = await collector(t, {"rate_limits.export_links_per_minute":"1000"});
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;

@@ -31,6 +31,7 @@ pub struct ExportRequest {
     pub resource: String,
     #[serde(default)]
     pub query: Map<String, Value>,
+    pub columns: Option<Vec<String>>,
 }
 
 impl ExportRequest {
@@ -110,7 +111,67 @@ impl ExportRequest {
                 return Err(ApiError::bad("Unsupported group_by"));
             }
         }
+        self.selected_columns()?;
         Ok(())
+    }
+
+    fn selected_columns(&self) -> Result<Vec<Column>, ApiError> {
+        let available = columns(&self.resource, &self.query);
+        let Some(selected) = &self.columns else {
+            return Ok(available);
+        };
+        if selected.is_empty() || selected.len() > available.len() {
+            return Err(ApiError::bad("Choose at least one available export column"));
+        }
+        let mut seen = BTreeSet::new();
+        selected
+            .iter()
+            .map(|name| {
+                if !seen.insert(name) {
+                    return Err(ApiError::bad("Duplicate export column"));
+                }
+                available
+                    .iter()
+                    .find(|column| column.name == *name)
+                    .cloned()
+                    .ok_or_else(|| ApiError::bad("Unknown export column for this report"))
+            })
+            .collect()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ColumnsQuery {
+    resource: String,
+    kind: Option<query::MetricKind>,
+    group_by: Option<query::BreakdownBy>,
+}
+
+impl ColumnsQuery {
+    pub fn report(&self) -> Result<Value, ApiError> {
+        let mut args = Map::new();
+        if let Some(kind) = self.kind {
+            if self.resource != "timeseries" {
+                return Err(ApiError::bad("kind requires timeseries"));
+            }
+            args.insert("kind".into(), json!(kind));
+        }
+        if let Some(group) = self.group_by {
+            if !matches!(self.resource.as_str(), "summary" | "quality" | "engagement") {
+                return Err(ApiError::bad("Unsupported group_by"));
+            }
+            args.insert("group_by".into(), json!(group));
+        }
+        ExportRequest {
+            resource: self.resource.clone(),
+            query: args.clone(),
+            columns: None,
+        }
+        .path()?;
+        Ok(
+            json!({"columns":columns(&self.resource, &args).iter().map(|column| &column.name).collect::<Vec<_>>()}),
+        )
     }
 }
 fn parse<T: serde::de::DeserializeOwned>(args: Map<String, Value>) -> Result<T, ApiError> {
@@ -229,7 +290,7 @@ impl Exports {
         let (sender, chunks) = mpsc::channel(2);
         let filename = format!("chunkify-{}.csv", grant.request.resource);
         let sink = Arc::new(Sink {
-            columns: columns(&grant.request.resource, &grant.request.query),
+            columns: grant.request.selected_columns()?,
             sender: sender.clone(),
             buffer: Mutex::new(Vec::new()),
         });
@@ -665,6 +726,7 @@ mod tests {
                     ExportRequest {
                         resource: "events".into(),
                         query: Map::new(),
+                        columns: None,
                     },
                     &base,
                 )

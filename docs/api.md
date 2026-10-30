@@ -589,6 +589,23 @@ dimension, project, filters and ingestion watermark.
 
 ### CSV exports
 
+Discover columns through the existing export route:
+
+```text
+GET /v1/exports?resource=views
+GET /v1/exports?resource=quality&group_by=country
+GET /v1/exports?resource=timeseries&kind=quality
+```
+
+These authenticated reads return `{"columns":[...]}` in the default CSV order.
+Use the same resource, breakdown, and metric kind when creating the export.
+Pass an optional `columns` array in the POST body to select fields and their
+order, for example `{"resource":"views","columns":["view_id","startup_time_ms"]}`.
+Omit `columns` to include all fields. Empty selections, duplicates, and names
+that do not belong to the chosen report return 400. Column selection changes
+CSV headers and cells; it does not limit the matching rows. Empty reports still
+include the selected headers.
+
 API and MCP use the same export workflow. Request a download link with a project
 private key; read-only private keys can export:
 

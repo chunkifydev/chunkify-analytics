@@ -237,6 +237,12 @@ impl Companion {
         match &self.backend {
             Backend::Local { store, .. } => {
                 let project = project.ok_or_else(|| status_failure(401))?;
+                if path == "/v1/exports" {
+                    let query: crate::exports::ColumnsQuery =
+                        serde_json::from_value(Value::Object(arguments.clone()))
+                            .map_err(|_| status_failure(400))?;
+                    return query.report().map_err(api_failure);
+                }
                 let mut args = arguments.clone();
                 let view_id = if path == "/v1/views/{view_id}" {
                     args.remove("view_id")
@@ -341,7 +347,9 @@ impl Companion {
     }
 
     fn response(&self, path: &str, arguments: Map<String, Value>, data: Value) -> CallToolResult {
-        let coverage = if matches!(path, "/v1/summary" | "/v1/quality" | "/v1/engagement")
+        let coverage = if path == "/v1/exports" {
+            json!({"kind":"column_catalog", "has_more":false})
+        } else if matches!(path, "/v1/summary" | "/v1/quality" | "/v1/engagement")
             && !arguments.contains_key("group_by")
         {
             json!({"kind": "filtered_totals"})

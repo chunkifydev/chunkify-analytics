@@ -297,6 +297,7 @@ curl --fail http://127.0.0.1:4174/v1/summary \
 | `GET /v1/views/{view_id}` | One attempt's metrics and retained event history. |
 | `GET /v1/errors` | Error codes and fatal status, with affected-view counts. |
 | `GET /v1/dimensions/{dimension}` | Available filter values and view counts. |
+| `GET /v1/exports` | Available CSV columns for a report. |
 | `POST /v1/exports` | A scoped download link for a complete CSV report. |
 
 Secret keys grant access to one project. Keep them out of browser code. Build

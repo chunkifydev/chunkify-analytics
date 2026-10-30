@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.8.0...v0.9.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **analytics:** Existing session and video pagination cursors are invalid. Start a new pagination sequence after upgrading.
+
+### Features
+
+* **analytics:** add CSV column selection and report sorting ([#52](https://github.com/chunkifydev/chunkify-analytics/issues/52)) ([a093f5b](https://github.com/chunkifydev/chunkify-analytics/commit/a093f5ba6fb9bb51065cc70e3c705d707bd6a4a4))
+* **metrics:** add playback scores across analytics reports ([#50](https://github.com/chunkifydev/chunkify-analytics/issues/50)) ([7233767](https://github.com/chunkifydev/chunkify-analytics/commit/72337676842a19bea815568290cdbf6ed0982fc0))
+
 ## [0.8.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.7.0...v0.8.0) (2026-10-30)
 
 

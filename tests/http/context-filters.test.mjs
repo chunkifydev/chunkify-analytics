@@ -164,7 +164,7 @@ for (const separateReads of [false, true]) {
       from: "2026-10-15T00:00:00Z", to: "2026-10-16T00:00:00Z" }), totals(1, 1000));
     const videos = await server.get("/v1/videos", params);
     assert.deepEqual(videos, { videos: [
-      { video_id: "video-a", ...totals(1, 1000) }, { video_id: "video-c", ...totals(1, 3000) },
+      { video_id: "video-a", ...totals(1, 1000), playback_score: { value: null, sample_views: 0 } }, { video_id: "video-c", ...totals(1, 3000), playback_score: { value: null, sample_views: 0 } },
     ], next_cursor: null });
     await server.stop();
     await server.start();
@@ -224,7 +224,7 @@ for (const separateReads of [false, true]) {
       const result = await server.get(path, { browser_name: literal, os_name: "é".repeat(64) });
       if (path === "/v1/events") assert.deepEqual(result.events.map(({ event }) => event.event_id), [literalEvent.event_id]);
       else if (path === "/v1/summary") assert.deepEqual(result, totals(1, 0));
-      else assert.deepEqual(result.videos, [{ video_id: "quoted", ...totals(1, 0) }]);
+      else assert.deepEqual(result.videos, [{ video_id: "quoted", ...totals(1, 0), playback_score: { value: null, sample_views: 0 } }]);
       await server.get(path, { browser_name: "x".repeat(64) });
     }
   });

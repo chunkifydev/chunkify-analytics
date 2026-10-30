@@ -146,7 +146,7 @@ impl Store {
         }
         self.read(if per_video { "videos" } else { "summary" }, project.clone(), move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
-            let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
+            let (sql, mut values) = view_cohort(project.clone(), through, &filters, if per_video { CohortMetrics::Quality } else { CohortMetrics::Basic });
             if !per_video {
                 let result = connection.query_row(&format!("{sql}
                     SELECT COUNT(*), COUNT(DISTINCT viewer_id), COALESCE(SUM(playing_time_ms), 0) FROM view_metrics"),
@@ -186,15 +186,17 @@ impl Store {
             let mut statement = connection.prepare(&format!("{sql}
                 , video_metrics AS (
                     SELECT video_id, COUNT(*) AS views, COUNT(DISTINCT viewer_id) AS unique_viewers,
-                        SUM(playing_time_ms ORDER BY view_id) AS total_playing_time_ms FROM view_metrics GROUP BY video_id
+                        SUM(playing_time_ms ORDER BY view_id) AS total_playing_time_ms,
+                        AVG(playback_score ORDER BY view_id) AS score, COUNT(playback_score) AS score_samples FROM view_metrics GROUP BY video_id
                 )
-                SELECT video_id, views, unique_viewers, total_playing_time_ms FROM video_metrics
+                SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples FROM video_metrics
                 WHERE {continuation} ORDER BY {column} {direction}{tie_breaker} LIMIT ?"))?;
             let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|row| Ok((VideoPosition {
                 video_id: row.get(0)?, views: row.get(1)?, total_playing_time_ms: row.get(3)?,
             }, json!({
                 "video_id": row.get::<_, String>(0)?, "views": row.get::<_, i64>(1)?,
-                "unique_viewers": row.get::<_, i64>(2)?, "total_playing_time_ms": row.get::<_, f64>(3)?
+                "unique_viewers": row.get::<_, i64>(2)?, "total_playing_time_ms": row.get::<_, f64>(3)?,
+                "playback_score":score_json(row.get(4)?, row.get(5)?)
             }))));
             let mut videos = Vec::new();
             let mut last = None;
@@ -333,6 +335,8 @@ impl Store {
                     buffering: 0.0,
                     affected: 0,
                     outcomes: StartupOutcomes::default(),
+                    score: None,
+                    score_samples: 0,
                 },
             })?;
             if let Some(export) = &export {
@@ -428,7 +432,8 @@ fn metric_columns(metrics: MetricSet) -> &'static str {
             COUNT(*) FILTER (WHERE startup_outcome = 'started'),
             COUNT(*) FILTER (WHERE startup_outcome = 'failed_before_start'),
             COUNT(*) FILTER (WHERE startup_outcome = 'ended_before_start'),
-            COUNT(*) FILTER (WHERE startup_outcome = 'unknown')",
+            COUNT(*) FILTER (WHERE startup_outcome = 'unknown'),
+            AVG(playback_score ORDER BY view_id), COUNT(playback_score)",
     }
 }
 
@@ -535,6 +540,8 @@ enum MetricValues {
         buffering: f64,
         affected: i64,
         outcomes: StartupOutcomes,
+        score: Option<f64>,
+        score_samples: i64,
     },
 }
 
@@ -590,6 +597,8 @@ fn read_metrics(
                 exited: row.get(offset + 10)?,
                 unknown: row.get(offset + 11)?,
             },
+            score: row.get(offset + 12)?,
+            score_samples: row.get(offset + 13)?,
         },
     })
 }
@@ -631,6 +640,8 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
             buffering,
             affected,
             outcomes,
+            score,
+            score_samples,
         } => {
             if !playing.is_finite()
                 || !buffering.is_finite()
@@ -648,9 +659,30 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
                 "buffering":{"sample_views":buffering_samples,"total_playing_time_ms":playing,
                     "total_rebuffer_duration_ms":buffering,"ratio":ratio},
                 "fatal_errors":{"affected_views":affected,"ratio":(views > 0).then(|| affected as f64 / views as f64)},
-                "startup_outcomes":outcomes.json(views)}))
+                "startup_outcomes":outcomes.json(views),
+                "playback_score":score_json(score, score_samples)}))
         }
     }
+}
+
+// A bounded playback heuristic, not a perceptual picture-quality metric.
+// Startup loses all credit at 10 seconds, buffering at 10% of active time.
+// Missing inputs remain NULL; observed failures are measured zero scores.
+const PLAYBACK_SCORE: &str = ", CASE
+    WHEN COALESCE(has_fatal_error, FALSE) OR measurement.startup_outcome = 'failed_before_start' THEN 0.0
+    WHEN measurement.playing_time_ms > 0
+        AND measurement.startup_time_ms IS NOT NULL
+        AND measurement.rebuffer_duration_ms IS NOT NULL
+        AND COALESCE(measurement.startup_outcome, 'started') = 'started'
+    THEN 100.0 * GREATEST(0.0, 1.0 - measurement.startup_time_ms / 10000.0)
+        * GREATEST(0.0, 1.0 - 10.0 *
+            (measurement.rebuffer_duration_ms / GREATEST(measurement.playing_time_ms, measurement.rebuffer_duration_ms)) /
+            (measurement.playing_time_ms / GREATEST(measurement.playing_time_ms, measurement.rebuffer_duration_ms)
+                + measurement.rebuffer_duration_ms / GREATEST(measurement.playing_time_ms, measurement.rebuffer_duration_ms)))
+    END AS playback_score";
+
+pub(super) fn score_json(value: Option<f64>, sample_views: i64) -> Value {
+    json!({"value":value,"sample_views":sample_views})
 }
 
 pub(super) enum CohortMetrics {
@@ -677,6 +709,11 @@ pub(super) fn view_cohort(
     // earliest start across identities, before applying any cohort filters.
     // Selecting a struct keeps all measurements from the same winning event,
     // including NULL values. Basic metrics avoid reading extra quality columns.
+    let score_projection = if matches!(metrics, CohortMetrics::Quality | CohortMetrics::Complete) {
+        PLAYBACK_SCORE
+    } else {
+        ""
+    };
     let (measurement_fields, error_aggregate, measurement_projection, error_events) = match metrics
     {
         CohortMetrics::Basic => (String::new(), "", "", ""),
@@ -738,7 +775,7 @@ pub(super) fn view_cohort(
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT view_id, occurred_at_ms, video_id, viewer_id, context_browser_name, context_os_name, context_device_type, context_remainder, playing_time_ms{measurement_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, context_browser_name, context_os_name, context_device_type, context_remainder, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }
@@ -751,4 +788,40 @@ fn stored_number(field: &str) -> String {
         WHEN json_type(event_remainder, '$.{field}') IN ('BIGINT', 'UBIGINT', 'DOUBLE')
         THEN TRY_CAST(json_extract(event_remainder, '$.{field}') AS DOUBLE) END)"
     )
+}
+
+#[cfg(test)]
+mod score_tests {
+    use super::*;
+
+    #[test]
+    fn playback_score_preserves_missing_data_and_bounds_extreme_inputs() {
+        let db = Connection::open_in_memory().unwrap();
+        let cases = [
+            ("10000, 0, 0, 'started', FALSE", Some(100.0)),
+            ("10000, 10000, 0, 'started', FALSE", Some(0.0)),
+            ("10000, 20000, 0, 'started', FALSE", Some(0.0)),
+            ("9000, 0, 1000, 'started', FALSE", Some(0.0)),
+            ("8000, 0, 2000, 'started', FALSE", Some(0.0)),
+            ("1e308, 0, 1e308, 'started', FALSE", Some(0.0)),
+            ("10000, 0, 0, NULL, FALSE", Some(100.0)),
+            ("NULL, NULL, NULL, 'failed_before_start', FALSE", Some(0.0)),
+            ("NULL, NULL, NULL, NULL, TRUE", Some(0.0)),
+            ("0, 0, 0, 'started', FALSE", None),
+            ("10000, NULL, 0, 'started', FALSE", None),
+            ("10000, 0, NULL, 'started', FALSE", None),
+            ("10000, 0, 0, 'unknown', FALSE", None),
+            ("10000, 0, 0, 'ended_before_start', FALSE", None),
+        ];
+        for (values, expected) in cases {
+            let actual: Option<f64> = db.query_row(&format!(
+                "SELECT playback_score FROM (SELECT 1 {PLAYBACK_SCORE} FROM (
+                    SELECT struct_pack(playing_time_ms := playing::DOUBLE, startup_time_ms := startup::DOUBLE,
+                        rebuffer_duration_ms := rebuffer::DOUBLE, startup_outcome := outcome::VARCHAR) AS measurement,
+                        fatal AS has_fatal_error
+                    FROM (VALUES ({values})) AS v(playing, startup, rebuffer, outcome, fatal)))"
+            ), [], |row| row.get(0)).unwrap();
+            assert_eq!(actual, expected, "{values}");
+        }
+    }
 }

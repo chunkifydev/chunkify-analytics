@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    context::RequestContext,
+    context::client_ip,
     event,
     projects::{Permission, RateLimit, Registry, Resolved},
     store::Store,
@@ -28,7 +28,7 @@ struct App {
     projects: Arc<Registry>,
     admin: Arc<crate::admin::Controller>,
     max_body_bytes: usize,
-    store_ip: bool,
+    geolocation: Arc<crate::geolocation::Database>,
     trusted_proxies: Vec<ipnet::IpNet>,
     mcp_enabled: bool,
     public_url: Option<reqwest::Url>,
@@ -104,6 +104,7 @@ pub fn router(
     projects: Arc<Registry>,
     config: &Config,
     admin: Arc<crate::admin::Controller>,
+    geolocation: Arc<crate::geolocation::Database>,
 ) -> Router {
     let app = App {
         exports: crate::exports::Exports::new(store.clone(), projects.clone(), &config.rate_limits),
@@ -111,7 +112,7 @@ pub fn router(
         projects,
         admin,
         max_body_bytes: config.max_body_bytes,
-        store_ip: config.store_ip,
+        geolocation,
         trusted_proxies: config.trusted_proxies.clone(),
         mcp_enabled: config.mcp_enabled,
         public_url: config.public_url.clone(),
@@ -330,14 +331,16 @@ async fn ingest(
         .get::<Resolved>()
         .cloned()
         .ok_or_else(ApiError::internal)?;
-    let context = app
-        .store_ip
-        .then(|| RequestContext::capture(peer.ip(), request.headers(), &app.trusted_proxies));
+    let context = app.geolocation.lookup(client_ip(
+        peer.ip(),
+        request.headers(),
+        &app.trusted_proxies,
+    ));
     let event = read_json(request, app.max_body_bytes).await?;
     event::validate(&event)?;
     let inserted = app
         .store
-        .insert(&resolved.project, &resolved.key_id, event, context)
+        .insert(&resolved.project, &resolved.key_id, event, Some(context))
         .await?
         > 0;
     Ok((

@@ -72,7 +72,7 @@ an optional `otlp` object on events stored by earlier analytics server versions.
 object preserves the original `log_record`, `resource_logs`, and `scope_logs`.
 The SDK's OTLP adapter can still send to other telemetry systems.
 
-### Flat event context and request IP
+### Flat event context and location
 
 `GET /v1/events` returns a flat `event_context` alongside the original `event` and
 optional legacy `otlp` context. For example:
@@ -84,50 +84,62 @@ optional legacy `otlp` context. For example:
   "os_name": "Linux",
   "device_type": "desktop",
   "language": "fr-FR",
-  "peer_ip": "10.20.1.2",
-  "client_ip": "198.51.100.8",
-  "client_ip_source": "x_forwarded_for"
+  "page_origin": "https://example.com",
+  "page_path": "/watch/episode",
+  "continent": "EU",
+  "country": "GB",
+  "city": "London"
 }
 ```
 
-The analytics server copies the supported scalar or null fields from schema version 1
-`event.browser_context` into this object. Unsupported fields and nested values
-remain only in the original payload. Browser values are client-reported, not
-verified identity. Only the analytics server supplies `peer_ip`, `client_ip`, and
-`client_ip_source`. When IP collection is disabled, these fields are absent and
-browser context is still available. Without either source, `event_context` is
-omitted. This context schema has its own `schema_version: 1`.
+The analytics server copies supported scalar or null fields from schema version 1
+`event.browser_context`. Browser values are client-reported. Only the collector
+supplies `continent`, `country`, and `city`, from a local City MMDB lookup. Country is an ISO
+3166-1 alpha-2 code; city is an approximate English name. Each field is null
+when unavailable, including local/private addresses. Request IP addresses are
+used only during lookup and are never added to events, stored context, or logs.
+The Chunkify player adapter also sends `page_origin` and `page_path`, without URL
+credentials, query parameters, or fragments. These describe the current document
+at each event, including iframe documents and single-page navigation. Retries
+keep the original values.
+This context schema has its own `schema_version: 1`.
 
-`peer_ip` identifies the HTTP sender. Without a trusted proxy, `client_ip` is the
-same address. With a proxy, configure its addresses under `[server]`:
+Behind a reverse proxy, configure every trusted hop under `[server]`:
 
 ```toml
 trusted_proxies = ["10.20.1.2", "2001:db8:abcd::/48"]
 ```
 
 Trusted proxies must supply the actual client through `X-Forwarded-For`.
-The analytics server selects the first untrusted address from the right. Missing or
-invalid forwarding information leaves `client_ip` unavailable; the event is
-still accepted. Other forwarding headers are ignored.
+The collector selects the first untrusted address from the right. Missing or
+invalid forwarding information produces unknown continent, country and city; the event is
+still accepted. Other forwarding headers are ignored. A gateway that batches
+multiple viewers' events will have one request location.
 
-IP context describes the request sender, including gateways that batch events.
-It does not identify individual viewers. Set `store_ip = false` under `[server]`
-and restart to omit it from new events. This does not erase existing context or
-IP values supplied inside event payloads.
+Local storage keeps the first delivery's location. S3 keeps each delivery's
+location separately. Expiration removes location with its event. Arbitrary
+caller-supplied event properties remain unchanged; do not send IPs in them.
+Previously stored IP context is not retroactively deleted by this change.
 
-Local storage keeps the first delivery's context. S3 keeps each delivery's
-context separately. Expiration removes context with its event.
+Pages displaying or using bundled DB-IP location results must include an
+[IP Geolocation by DB-IP](https://db-ip.com) link. See [geolocation](geolocation.md).
 
 ### Filters and pagination
 
 Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `view_id`,
-`browser_name`, `os_name`, and `device_type`. View detail accepts only timeline
+`browser_name`, `os_name`, `device_type`, `continent`, `country`, and `city`. View detail accepts only timeline
 pagination; export downloads use their saved query. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
 
 Browser and OS names use exact, case-sensitive matching and accept 1 to 64 Unicode
 characters. Device type accepts `desktop`, `mobile`, `tablet`, or `unknown`.
+Continent accepts `AF`, `AN`, `AS`, `EU`, `NA`, `OC`, or `SA`. Country accepts a
+two-letter uppercase code such as `GB`. City accepts an exact, case-sensitive
+name of 1 to 256 Unicode characters. Use `country` with `city` to distinguish
+names shared by different countries. Location filters use each event's location
+on `/v1/events` and the first retained start's location on metric, view,
+dimension, rendition, and time-series queries.
 Multiple filters combine with AND. Missing, null, and nonstring context values
 do not match an explicit filter. `device_type=unknown` matches only a stored
 `unknown` value; it does not include events with no device information.
@@ -187,9 +199,10 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
 
-### Breakdowns by browser, OS and device
+### Breakdowns by browser, OS, device and location
 
-Add `group_by=browser_name`, `group_by=os_name`, or `group_by=device_type` to
+Add `group_by` with `browser_name`, `os_name`, `device_type`, `continent`,
+`country`, or `city` to
 `GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
 `get_metrics` accepts the same argument, with `kind` selecting `summary`,
 `quality` or `engagement`. Without `group_by`, each route returns its
@@ -209,7 +222,7 @@ schema, calculations and sample counts as the route's totals response:
 ```
 
 Group membership uses the first retained view start's context. A later snapshot,
-error or end with a different browser or device does not move the view. Missing,
+error or end with a different browser, device or location does not move the view. Missing,
 null and nonstring context forms a `null` group. The literal device type
 `unknown` is a separate group. Empty results contain an empty `groups` array.
 Filters apply to the start cohort before grouping. Unique viewers can appear
@@ -228,6 +241,9 @@ Examples:
 GET /v1/summary?group_by=device_type
 GET /v1/quality?group_by=browser_name&video_id=video-123
 GET /v1/engagement?group_by=os_name&browser_name=Chrome
+GET /v1/summary?group_by=country
+GET /v1/summary?group_by=city&country=GB
+GET /v1/quality?group_by=continent
 ```
 
 ### Hourly and daily charts
@@ -549,9 +565,9 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 ### Available filter values
 
 `GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
-Supported dimensions are `browser_name`, `os_name`, `device_type`, `video_id` and
-`viewer_id`. Each value has `value` and `views`; values and counts come from first
-retained starts after applying the usual date, identity and context filters.
+Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
+`country`, `city`, `video_id` and `viewer_id`. Each value has `value` and `views`;
+values and counts come from first retained starts after applying the usual date, identity and context filters.
 Values sort ascending with null first. Literal `unknown` remains distinct from
 missing context. HTTP page sizes are 1 to 1000, default 100. Cursors bind the
 dimension, project, filters and ingestion watermark.
@@ -614,7 +630,7 @@ use paths such as `startup_time_ms/median`; grouped metrics use `data/...` colum
 Event exports have one column for each documented scalar event field, such as
 `event_name`, `view_id`, `playing_time_ms`, `rebuffer_duration_ms` and `error_code`.
 Flat context columns use a `context.` prefix, such as `context.browser_name` and
-`context.client_ip`. Metadata columns include `received_at`, `project_id` and
+`context.continent`, `context.country` and `context.city`. Metadata columns include `received_at`, `project_id` and
 `ingest_key_id`. CSV cells never contain serialized JSON objects or arrays.
 Custom attributes, nested rendition arrays and historical OTLP payloads are
 excluded; use `GET /v1/events` for original payloads. Null values become empty

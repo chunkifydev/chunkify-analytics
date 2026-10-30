@@ -31,6 +31,13 @@ impl Fixture {
             .arg("serve")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            .env(
+                "CHUNKIFY_GEOIP_DATABASE",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/GeoIP2-City-Test.mmdb"
+                ),
+            )
             .spawn()
             .unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());

@@ -20,6 +20,8 @@ test('shared archive excludes data and credentials even when stored under the ex
     const { stdout } = await exec('tar', ['-tzf', archive]);
     assert.ok(stdout.includes(prefix + '/bin/chunkify-analytics'));
     assert.ok(stdout.includes(prefix + '/examples/demo/public/player.js'));
+    assert.ok(stdout.includes(prefix + '/share/chunkify-analytics/dbip-city-lite.mmdb'));
+    assert.ok(stdout.includes(prefix + '/docs/licenses/db-ip.txt'));
     assert.equal(stdout.includes(path.basename(canary)), false);
     assert.equal(stdout.includes(path.basename(dependencyCanary)), false);
     assert.equal(/(?:demo\.json|keys\.json|\.duckdb|\.env|demo-data)/.test(stdout), false);

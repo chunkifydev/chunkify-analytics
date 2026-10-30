@@ -12,11 +12,12 @@ From the repository root:
 ```sh
 npm ci
 sh scripts/install-duckdb.sh
+sh scripts/install-geolocation.sh
 cargo build --locked
 npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
-The setup script downloads and verifies prebuilt DuckDB 2.0.0. The launcher creates
+The setup scripts download and verify prebuilt DuckDB 2.0.0 and DB-IP City Lite. The launcher creates
 separate Demo data and Player test projects, loads 816 synthetic events for 268
 views, and opens the dashboard at `http://127.0.0.1:8787`.
 

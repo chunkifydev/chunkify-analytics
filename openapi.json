@@ -142,6 +142,15 @@
             "$ref": "#/components/parameters/device_type"
           },
           {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
             "$ref": "#/components/parameters/event_name"
           },
           {
@@ -710,7 +719,7 @@
       "get": {
         "operationId": "getSummary",
         "summary": "Read totals for a view cohort",
-        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
+        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
         "tags": [
           "Queries"
         ],
@@ -735,6 +744,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -925,6 +943,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -1118,6 +1145,15 @@
             "$ref": "#/components/parameters/device_type"
           },
           {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
             "$ref": "#/components/parameters/view_id"
           },
           {
@@ -1291,7 +1327,7 @@
       "get": {
         "operationId": "getQuality",
         "summary": "Read playback quality for a view cohort",
-        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes mutually exclusive startup outcomes; unknown outcomes remain explicit.",
+        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes mutually exclusive startup outcomes; unknown outcomes remain explicit.",
         "tags": [
           "Queries"
         ],
@@ -1316,6 +1352,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -1513,7 +1558,7 @@
       "get": {
         "operationId": "getEngagement",
         "summary": "Read average watch time and reached-end rate",
-        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name or device_type. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes furthest-progress milestones and measured watch-time distribution. Progress can include seeking and is not retention.",
+        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes furthest-progress milestones and measured watch-time distribution. Progress can include seeking and is not retention.",
         "tags": [
           "Queries"
         ],
@@ -1538,6 +1583,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -2838,6 +2892,15 @@
             "$ref": "#/components/parameters/device_type"
           },
           {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3213,6 +3276,15 @@
             "$ref": "#/components/parameters/device_type"
           },
           {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3389,6 +3461,15 @@
           },
           {
             "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -3892,6 +3973,15 @@
             "$ref": "#/components/parameters/device_type"
           },
           {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -4279,10 +4369,13 @@
           "enum": [
             "browser_name",
             "os_name",
-            "device_type"
+            "device_type",
+            "continent",
+            "country",
+            "city"
           ]
         },
-        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by."
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries."
       },
       "view_id": {
         "name": "view_id",
@@ -4318,7 +4411,10 @@
             "os_name",
             "device_type",
             "video_id",
-            "viewer_id"
+            "viewer_id",
+            "continent",
+            "country",
+            "city"
           ]
         }
       },
@@ -4357,6 +4453,44 @@
           "maxLength": 43,
           "pattern": "^[A-Za-z0-9_-]{43}$"
         }
+      },
+      "continent": {
+        "name": "continent",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "AF",
+            "AN",
+            "AS",
+            "EU",
+            "NA",
+            "OC",
+            "SA"
+          ]
+        },
+        "description": "Exact continent code from the local lookup. Missing locations do not match."
+      },
+      "country": {
+        "name": "country",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "pattern": "^[A-Z]{2}$",
+          "minLength": 2,
+          "maxLength": 2
+        },
+        "description": "Exact uppercase ISO 3166-1 alpha-2 country code, such as GB. Missing locations do not match."
+      },
+      "city": {
+        "name": "city",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "description": "Exact, case-sensitive city name from the local lookup, with 1 to 256 Unicode characters. Use country alongside city to distinguish places with the same name. Missing locations do not match."
       }
     },
     "schemas": {
@@ -5085,6 +5219,22 @@
             ],
             "exclusiveMinimum": 0,
             "maximum": 100
+          },
+          "page_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2048,
+            "description": "Current document HTTP(S) origin, without credentials. Null when unavailable or longer than 2048 characters."
+          },
+          "page_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2048,
+            "description": "Current document pathname, without query parameters or fragment. Null when unavailable or longer than 2048 characters. Paths may contain application-defined identifiers."
           }
         },
         "required": [
@@ -5258,30 +5408,59 @@
             ],
             "description": "Copied from browser_context.pixel_ratio when primitive. See BrowserContext for the SDK type; the collector currently accepts any primitive here."
           },
-          "peer_ip": {
-            "type": "string",
-            "description": "Direct TCP peer IP, canonical IPv4 or IPv6."
-          },
-          "client_ip": {
+          "country": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Request sender IP, using trusted proxy information when available. May identify a gateway."
+            "description": "Country ISO 3166-1 alpha-2 code from the local City MMDB lookup. Null when unknown. The request IP is discarded."
           },
-          "client_ip_source": {
+          "city": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Approximate city name in English from the local City MMDB lookup. Null when unknown. Location displays using the bundled DB-IP data must link to https://db-ip.com."
+          },
+          "page_origin": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2048,
+            "description": "Current document HTTP(S) origin, without credentials. Null when unavailable or longer than 2048 characters."
+          },
+          "page_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2048,
+            "description": "Current document pathname, without query parameters or fragment. Null when unavailable or longer than 2048 characters. Paths may contain application-defined identifiers."
+          },
+          "continent": {
+            "type": [
+              "string",
+              "null"
+            ],
             "enum": [
-              "connection",
-              "x_forwarded_for",
+              "AF",
+              "AN",
+              "AS",
+              "EU",
+              "NA",
+              "OC",
+              "SA",
               null
-            ]
+            ],
+            "description": "Continent code from the local City MMDB lookup: Africa, Antarctica, Asia, Europe, North America, Oceania or South America. Null when unknown."
           }
         },
         "required": [
           "schema_version"
         ],
         "additionalProperties": false,
-        "description": "Browser and request context for the event. Fields can be absent or null."
+        "description": "Browser context and locally derived continent/country/city. Request IP addresses are never added to events or stored context."
       },
       "StoredEvent": {
         "type": "object",
@@ -6997,7 +7176,10 @@
             "enum": [
               "browser_name",
               "os_name",
-              "device_type"
+              "device_type",
+              "continent",
+              "country",
+              "city"
             ]
           },
           "groups": {
@@ -7045,7 +7227,10 @@
             "enum": [
               "browser_name",
               "os_name",
-              "device_type"
+              "device_type",
+              "continent",
+              "country",
+              "city"
             ]
           },
           "groups": {
@@ -7093,7 +7278,10 @@
             "enum": [
               "browser_name",
               "os_name",
-              "device_type"
+              "device_type",
+              "continent",
+              "country",
+              "city"
             ]
           },
           "groups": {
@@ -7646,7 +7834,10 @@
               "os_name",
               "device_type",
               "video_id",
-              "viewer_id"
+              "viewer_id",
+              "continent",
+              "country",
+              "city"
             ]
           },
           "values": {
@@ -7750,7 +7941,10 @@
             "enum": [
               "browser_name",
               "os_name",
-              "device_type"
+              "device_type",
+              "continent",
+              "country",
+              "city"
             ]
           },
           "sort_by": {
@@ -7788,8 +7982,34 @@
               "os_name",
               "device_type",
               "video_id",
-              "viewer_id"
+              "viewer_id",
+              "continent",
+              "country",
+              "city"
             ]
+          },
+          "continent": {
+            "type": "string",
+            "enum": [
+              "AF",
+              "AN",
+              "AS",
+              "EU",
+              "NA",
+              "OC",
+              "SA"
+            ]
+          },
+          "country": {
+            "type": "string",
+            "pattern": "^[A-Z]{2}$",
+            "minLength": 2,
+            "maxLength": 2
+          },
+          "city": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
           }
         }
       },

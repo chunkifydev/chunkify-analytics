@@ -1,7 +1,7 @@
 use crate::{
     api::ApiError,
-    context::RequestContext,
     event::IncomingEvent,
+    geolocation::Location,
     query::{Cursor, Query, SortOrder},
     reader::Reader,
     writer::{BatchConfig, Writer},
@@ -152,7 +152,7 @@ impl Store {
         project: &crate::projects::Access,
         key_id: &str,
         event: Value,
-        request_context: Option<RequestContext>,
+        request_context: Option<Location>,
     ) -> Result<usize, ApiError> {
         self.insert_batch(
             project,
@@ -260,7 +260,7 @@ impl Store {
         project: &crate::projects::Access,
         key_id: &str,
         events: Vec<IncomingEvent>,
-        request_context: Option<RequestContext>,
+        request_context: Option<Location>,
     ) -> Result<usize, ApiError> {
         self.writer
             .insert(project, key_id, events, request_context)

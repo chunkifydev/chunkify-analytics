@@ -34,7 +34,7 @@ struct Server {
     public_url: Option<String>,
     allowed_origins: Option<Vec<String>>,
     trusted_proxies: Option<Vec<String>>,
-    store_ip: Option<bool>,
+    geoip_database: Option<PathBuf>,
     max_body_bytes: Option<usize>,
     ingest_per_second: Option<u32>,
 }
@@ -190,10 +190,15 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             .values
             .insert("server.trusted_proxies".into(), value.join(",").into());
     }
-    if let Some(value) = config.server.store_ip {
+    if let Some(path) = config.server.geoip_database {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            file.parent().unwrap_or_else(|| Path::new(".")).join(path)
+        };
         settings
             .values
-            .insert("server.store_ip".into(), value.to_string().into());
+            .insert("server.geoip_database".into(), path.into_os_string());
     }
     if let Some(value) = config.server.max_body_bytes {
         settings

@@ -647,7 +647,7 @@ mod tests {
                     2 => Some(json!({"schema_version": 1, "browser_name": "historical override"})),
                     _ => event_context_v1(
                         &e,
-                        Some(&json!({"client_ip": "192.0.2.1", "schema_version": 1})),
+                        Some(&json!({"country": "GB", "city": "London", "schema_version": 1})),
                     ),
                 };
                 let values = encode(&e, context.as_ref(), 123456789, "default", None)
@@ -701,7 +701,8 @@ mod tests {
             let mut connection = Connection::open_in_memory().unwrap();
             legacy(&connection, version);
             let e = event(1);
-            let context = event_context_v1(&e, Some(&json!({"client_ip": "192.0.2.1"}))).unwrap();
+            let context =
+                event_context_v1(&e, Some(&json!({"country": "GB", "city": "London"}))).unwrap();
             connection.execute(&format!("INSERT INTO events VALUES(3, 'event-1', 'view', 'video', NULL, 'chunkify.video.view_started', 1, ?, 123, 123456789, ?{})", if version == 3 {", ?"} else {""}),
                 params_from_iter([SqlValue::BigInt(event::timestamp(e["occurred_at"].as_str().unwrap()).map_err(|e| e.message).unwrap()), SqlValue::Text(e.to_string())].into_iter()
                     .chain((version == 3).then(|| SqlValue::Text(context.to_string()))))).unwrap();

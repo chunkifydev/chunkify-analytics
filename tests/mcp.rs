@@ -171,7 +171,7 @@ impl Collector {
         }
         for (field, value) in settings {
             let value = match *field {
-                "server.allowed_origins" | "mcp.allowed_hosts" => {
+                "server.allowed_origins" | "mcp.allowed_hosts" | "server.trusted_proxies" => {
                     serde_json::to_string(&value.split(',').collect::<Vec<_>>()).unwrap()
                 }
                 "mcp.enabled" => value.to_string(),
@@ -186,6 +186,13 @@ impl Collector {
             .arg("--config")
             .arg(config_file)
             .arg("serve")
+            .env(
+                "CHUNKIFY_GEOIP_DATABASE",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/fixtures/GeoIP2-City-Test.mmdb"
+                ),
+            )
             .env("CHUNKIFY_DATA_DIR", &directory)
             .env("CHUNKIFY_BIND", "127.0.0.1:0")
             .stdout(Stdio::piped())
@@ -1442,7 +1449,14 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                 .input_schema;
             assert_eq!(
                 schema["properties"]["group_by"]["enum"],
-                json!(["browser_name", "os_name", "device_type"])
+                json!([
+                    "browser_name",
+                    "os_name",
+                    "device_type",
+                    "continent",
+                    "country",
+                    "city"
+                ])
             );
             assert_eq!(schema["properties"]["limit"]["maximum"], 100);
             let default =
@@ -1486,7 +1500,7 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                 assert_eq!(empty["coverage"]["has_more"], false);
             }
             for invalid in [
-                json!({"group_by":"country"}),
+                json!({"group_by":"unsupported"}),
                 json!({"group_by":"browser_name","limit":101}),
                 json!({"group_by":"browser_name","sort_by":"views"}),
                 json!({"limit":1}),
@@ -1668,7 +1682,7 @@ async fn exploration_tools_and_export_links_match_http_on_both_transports() {
             call(
                 &client,
                 "list_dimension_values",
-                json!({"dimension":"country"}),
+                json!({"dimension":"unsupported"}),
                 true
             )
             .await["error"]["code"],
@@ -1783,6 +1797,178 @@ async fn read_and_export_rates_are_shared_across_http_and_both_mcp_transports() 
         )
         .await;
         call_metrics(&other, "summary", json!({}), false).await;
+        other.cancel().await.unwrap();
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn location_queries_and_exports_match_http_on_both_transports() {
+    let collector = Collector::with_settings(&[("server.trusted_proxies", "127.0.0.1")]);
+    let contract: Value = serde_json::from_str(include_str!("../openapi.json")).unwrap();
+    let example = &contract["paths"]["/v1/events"]["post"]["requestBody"]["content"]["application/json"]
+        ["example"];
+    let http = reqwest::Client::new();
+    for (index, ip) in ["81.2.69.160", "2001:218::1", "127.0.0.1"]
+        .into_iter()
+        .enumerate()
+    {
+        let view = uuid::Uuid::new_v4().to_string();
+        for (sequence, name) in [(1, "view_started"), (2, "view_ended")] {
+            let mut event = example.clone();
+            event["event_id"] = json!(uuid::Uuid::new_v4().to_string());
+            event["view_id"] = json!(view);
+            event["video_id"] = json!(format!("location-{index}"));
+            event["event_name"] = json!(format!("chunkify.video.{name}"));
+            event["sequence"] = json!(sequence);
+            event["playing_time_ms"] = json!(if sequence == 1 { 0 } else { 1200 });
+            let response = http
+                .post(format!("{}/v1/events", collector.url))
+                .header(
+                    "X-Chunkify-Ingest-Key",
+                    collector.keys["public_key"].as_str().unwrap(),
+                )
+                .header("X-Forwarded-For", ip)
+                .json(&event)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 201);
+        }
+    }
+    let key = collector.admin(&[
+        "key",
+        "create",
+        "default",
+        "secret",
+        "Locations",
+        "--read-only",
+    ]);
+    let token = key["key"].as_str().unwrap();
+    for embedded in [false, true] {
+        let client = connect_mode(&collector.url, token, true, embedded).await;
+        for kind in ["summary", "quality", "engagement"] {
+            for field in ["continent", "country", "city"] {
+                let mut page =
+                    call_metrics(&client, kind, json!({"group_by":field,"limit":1}), false).await;
+                let mut groups = page["data"]["groups"].as_array().unwrap().clone();
+                assert_eq!(groups[0]["value"], Value::Null);
+                while page["coverage"]["has_more"] == true {
+                    page = call_metrics(
+                        &client,
+                        kind,
+                        json!({"group_by":field,"limit":1,"cursor":page["data"]["next_cursor"]}),
+                        false,
+                    )
+                    .await;
+                    groups.extend(page["data"]["groups"].as_array().unwrap().clone());
+                }
+                assert_eq!(
+                    json!(groups),
+                    collector
+                        .get(&format!("/v1/{kind}?group_by={field}"), token)
+                        .await["groups"]
+                );
+            }
+            let result = call_metrics(
+                &client,
+                kind,
+                json!({"country":"GB","city":"London","continent":"EU"}),
+                false,
+            )
+            .await;
+            assert_eq!(
+                result["data"],
+                collector
+                    .get(
+                        &format!("/v1/{kind}?country=GB&city=London&continent=EU"),
+                        token
+                    )
+                    .await
+            );
+            assert_eq!(result["data"]["views"], 1);
+        }
+        for field in ["continent", "country", "city"] {
+            let result = call(
+                &client,
+                "list_dimension_values",
+                json!({"dimension":field,"country":"GB"}),
+                false,
+            )
+            .await;
+            assert_eq!(
+                result["data"],
+                collector
+                    .get(
+                        &format!("/v1/dimensions/{field}?country=GB&limit=10"),
+                        token
+                    )
+                    .await
+            );
+            assert_eq!(result["data"]["values"].as_array().unwrap().len(), 1);
+        }
+        let cities = call_metrics(
+            &client,
+            "summary",
+            json!({"group_by":"city","country":"GB"}),
+            false,
+        )
+        .await;
+        assert_eq!(cities["data"]["groups"][0]["value"], "London");
+        for (tool, path) in [
+            ("list_events", "events"),
+            ("list_views", "views"),
+            ("list_video_metrics", "videos"),
+        ] {
+            let result = call(&client, tool, json!({"country":"GB"}), false).await;
+            assert_eq!(
+                result["data"],
+                collector
+                    .get(&format!("/v1/{path}?country=GB&limit=10"), token)
+                    .await
+            );
+        }
+        let dates = json!({"kind":"summary","country":"GB","from":"2026-10-01T00:00:00Z","to":"2026-11-01T00:00:00Z","interval":"day"});
+        let series = call(&client, "get_timeseries", dates, false).await;
+        assert_eq!(series["data"], collector.get("/v1/timeseries?country=GB&from=2026-10-01T00:00:00Z&to=2026-11-01T00:00:00Z&interval=day", token).await);
+        for invalid in [
+            json!({"country":"gb"}),
+            json!({"continent":"XX"}),
+            json!({"city":""}),
+            json!({"city":"x".repeat(257)}),
+        ] {
+            assert_eq!(
+                call_metrics(&client, "summary", invalid, true).await["error"]["code"],
+                "invalid_arguments"
+            );
+        }
+        let export = call(
+            &client,
+            "export_data",
+            json!({"resource":"summary","query":{"group_by":"city","country":"GB"}}),
+            false,
+        )
+        .await;
+        let csv = http
+            .get(export["data"]["download_url"].as_str().unwrap())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(csv.status(), 200);
+        let csv = csv.text().await.unwrap();
+        assert!(csv.contains("London"));
+        assert!(!csv.contains("81.2.69.160"));
+        let other = connect_mode(
+            &collector.url,
+            collector.live["secret_key"].as_str().unwrap(),
+            true,
+            embedded,
+        )
+        .await;
+        assert_eq!(
+            call_metrics(&other, "summary", json!({"group_by":"country"}), false).await["data"]["groups"],
+            json!([])
+        );
         other.cancel().await.unwrap();
         client.cancel().await.unwrap();
     }

@@ -31,7 +31,7 @@ You need Docker. Pull the latest stable release:
 docker pull ghcr.io/chunkifydev/chunkify-analytics:latest
 ```
 
-The image includes the analytics server and DuckDB. No Git, Rust, or local build
+The image includes the analytics server, DuckDB, and the local DB-IP City Lite database. No Git, Rust, or local build
 is required. For a fixed version, replace `:latest` with a release version such
 as `:0.1.0` in every command, and download that version's sample configuration.
 See [building from source](docs/development.md#build-the-docker-image) if you want
@@ -55,7 +55,6 @@ Edit `config.toml` and set the website origin that will send events:
 ```toml
 [server]
 allowed_origins = ["http://localhost:3000"]
-store_ip = true
 
 [retention]
 seconds = 2592000
@@ -65,8 +64,9 @@ Use the exact origin, including the scheme and any nonstandard port, without a
 path or trailing slash. For local development, that might be
 `http://localhost:3000`. Add multiple origins as separate array entries.
 
-Retention defaults to 30 days. Set `store_ip = false` under `[server]` to stop
-the analytics server from adding request IP addresses to new events.
+Retention defaults to 30 days. The server looks up continent, country and city locally, then
+discards the request IP. No lookup requests leave your infrastructure.
+[Geolocation setup and attribution](docs/geolocation.md).
 
 ### 3. Initialize persistent storage
 
@@ -154,9 +154,11 @@ the download directory. Replace the version and target to match your archive:
 shasum -a 256 --check --ignore-missing SHA256SUMS
 tar -xzf chunkify-analytics-0.1.0-x86_64-unknown-linux-gnu.tar.gz
 cd chunkify-analytics-0.1.0-x86_64-unknown-linux-gnu
-mkdir -p "$HOME/.local/bin" "$HOME/.local/lib"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/lib" "$HOME/.local/share/chunkify-analytics"
 install -m 755 bin/chunkify-analytics "$HOME/.local/bin/"
 install -m 755 lib/libduckdb.* "$HOME/.local/lib/"
+install -m 644 share/chunkify-analytics/dbip-city-lite.mmdb "$HOME/.local/share/chunkify-analytics/"
+install -m 644 docs/licenses/db-ip.txt "$HOME/.local/share/chunkify-analytics/"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -175,16 +177,21 @@ Linux, use your distribution's build tools.
 git clone https://github.com/chunkifydev/chunkify-analytics.git
 cd chunkify-analytics
 sh scripts/install-duckdb.sh
+sh scripts/install-geolocation.sh
 cargo build --locked --release
-mkdir -p "$HOME/.local/bin" "$HOME/.local/lib"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/lib" "$HOME/.local/share/chunkify-analytics"
 install -m 755 target/release/chunkify-analytics "$HOME/.local/bin/"
 install -m 755 target/lib/libduckdb.* "$HOME/.local/lib/"
+install -m 644 target/share/chunkify-analytics/dbip-city-lite.mmdb "$HOME/.local/share/chunkify-analytics/"
+install -m 644 docs/licenses/db-ip.txt "$HOME/.local/share/chunkify-analytics/"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Keep `$HOME/.local/bin` in your shell's PATH to use the command in future
 sessions. The setup script downloads DuckDB 2.0.0 for macOS or Linux and verifies
-its checksum. The executable finds the library in the adjacent `lib` directory.
+its checksum. The geolocation installer downloads and verifies the pinned DB-IP
+City Lite MMDB. The executable finds these files in the adjacent `lib` and
+`share/chunkify-analytics` directories.
 
 ### 2. Configure and initialize
 

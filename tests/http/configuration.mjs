@@ -1,8 +1,8 @@
 import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 const arrays = new Set(["server.allowed_origins", "server.trusted_proxies", "mcp.allowed_hosts"]);
-const strings = new Set(["data_dir", "server.bind", "logging.level", "batch.insert_mode", "storage.backend", "storage.path",
+const strings = new Set(["data_dir", "server.bind", "server.geoip_database", "logging.level", "batch.insert_mode", "storage.backend", "storage.path",
   "storage.url", "storage.endpoint", "storage.region", "storage.access_key_id", "storage.secret_access_key",
   "storage.session_token", "storage.url_style", "mcp.url", "mcp.secret_key"]);
 const field = name => name === "data_dir" || name === "profile" || /^(server|retention|batch|duckdb|experimental|storage|mcp|rate_limits|logging)\./.test(name);
@@ -31,6 +31,6 @@ export function collectorEnvironment(settings = process.env) {
 
 export async function writeConfig(directory, settings) {
   const path = join(directory, "config.toml");
-  await writeFile(path, configSource(settings), { mode: 0o600 });
+  await writeFile(path, configSource({ "server.geoip_database": resolve("tests/fixtures/GeoIP2-City-Test.mmdb"), ...settings }), { mode: 0o600 });
   return path;
 }

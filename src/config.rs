@@ -24,7 +24,7 @@ pub struct Config {
     pub rate_limits: crate::limits::Config,
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
-    pub store_ip: bool,
+    pub geoip_database: PathBuf,
     pub profile: bool,
     pub log_level: LevelFilter,
     pub checkpoint_threshold_mib: u32,
@@ -227,11 +227,10 @@ impl Config {
             trusted_proxies: crate::context::trusted_proxies(
                 &settings.var("server.trusted_proxies").unwrap_or_default(),
             )?,
-            store_ip: settings
-                .var("server.store_ip")
-                .unwrap_or_else(|_| "true".into())
-                .parse()
-                .map_err(|_| "server.store_ip must be true or false")?,
+            geoip_database: settings
+                .var_os("server.geoip_database")
+                .map(PathBuf::from)
+                .unwrap_or(crate::geolocation::default_path()?),
             data_dir: data_dir.map(Path::to_path_buf).unwrap_or_else(|| {
                 settings
                     .var_os("data_dir")

@@ -44,7 +44,7 @@ async function collector(t, settings = {}) {
     "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
     "data_dir": directory, "server.bind": "127.0.0.1:0",
-    "server.allowed_origins": "https://player.example", "server.store_ip": "true",
+    "server.allowed_origins": "https://player.example",
     "server.trusted_proxies": "", ...settings };
   await writeConfig(directory, env);
   const init = spawn(binary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
@@ -290,7 +290,7 @@ test("concurrent event requests share bounded transactions and preserve their da
     const index = events.findIndex((event) => event.event_id === record.event.event_id);
     assert.deepEqual(record.event, events[index]);
     assert.equal(record.otlp, undefined);
-    assert.equal(record.event_context.client_ip, "127.0.0.1");
+    assert.deepEqual(record.event_context, { schema_version: 1, continent: null, country: null, city: null });
   }
   await server.stop();
   const profile = writerProfile(server);
@@ -451,118 +451,71 @@ test("invalid batch settings fail startup with the setting name", async (t) => {
   }
 });
 
-test("connection IP is stored separately and cannot be replaced by event fields or untrusted headers", async (t) => {
+test("local geolocation ignores forged context and untrusted proxy headers", async (t) => {
   const server = await collector(t);
-  const event = { ...sdkEvents()[0], event_context: { client_ip: "203.0.113.99" } };
-  await server.send(event, { "X-Forwarded-For": "198.51.100.99", "X-Real-IP": "198.51.100.99",
-    "Forwarded": "for=198.51.100.99", "CF-Connecting-IP": "198.51.100.99" });
+  const event = { ...sdkEvents()[0], event_context: { country: "FR", city: "Paris" } };
+  await server.send(event, { "X-Forwarded-For": "81.2.69.160", "X-Real-IP": "81.2.69.160",
+    "Forwarded": "for=81.2.69.160", "CF-Connecting-IP": "81.2.69.160" });
   const stored = await server.get("/v1/events");
   assert.deepEqual(stored.events[0].event, event);
-  assert.deepEqual(stored.events[0].event_context, {
-    schema_version: 1, peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
-  });
-  await server.send(event);
+  assert.deepEqual(stored.events[0].event_context, { schema_version: 1, continent: null, country: null, city: null });
   await server.stop("SIGKILL");
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), stored);
 });
 
-test("IP collection can be disabled without rewriting earlier events or enriching retries", async (t) => {
-  const server = await collector(t, { "server.store_ip": "false" });
-  const events = sdkEvents();
-  await server.send(events[0]);
-  await server.send(events[1]);
-  const withoutIp = (await server.get("/v1/events")).events;
-  assert.ok(withoutIp.every((record) => !Object.hasOwn(record, "event_context")));
-  await server.stop();
-  await server.start(binary, { "server.store_ip": "true" });
-  for (const event of events) await server.send(event);
-  const added = sdkEvents("with-ip")[0];
-  await server.send(added);
-  const withIp = (await server.get("/v1/events")).events;
-  assert.deepEqual(withIp.slice(0, 2), withoutIp);
-  assert.equal(withIp[2].event_context.client_ip, "127.0.0.1");
-  await server.stop();
-  await server.start(binary, { "server.store_ip": "false" });
-  await server.send(added);
-  assert.deepEqual((await server.get("/v1/events")).events, withIp);
-  await server.send(sdkEvents("disabled-again")[0]);
-  assert.equal((await server.get("/v1/events")).events.at(-1).event_context, undefined);
-});
-
-test("flat event context copies browser fields and reserves IP fields for the collector", async (t) => {
-  const server = await collector(t);
+test("flat context combines browser fields with collector-owned country and city", async (t) => {
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
   const event = { ...sdkEvents()[0], browser_context: {
     schema_version: 1, browser_name: "Firefox", os_name: "Linux", device_type: "desktop",
-    viewport_width_px: 960, client_ip: "203.0.113.99", peer_ip: "203.0.113.99",
-    browser_version: { invalid: "nested" },
-    client_ip_source: "forged", extra: "preserve only in original payload",
+    viewport_width_px: 960, page_origin: "https://example.com", page_path: "/watch/first", country: "FR", city: "Paris", browser_version: { invalid: "nested" },
   } };
-  await server.send(event);
+  await server.send(event, { "X-Forwarded-For": "81.2.69.160" });
   const stored = (await server.get("/v1/events")).events[0];
   assert.deepEqual(stored.event, event);
   assert.deepEqual(stored.event_context, {
     schema_version: 1, browser_name: "Firefox", os_name: "Linux", device_type: "desktop", viewport_width_px: 960,
-    peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection",
+    page_origin: "https://example.com", page_path: "/watch/first", continent: "EU", country: "GB", city: "London",
   });
   await server.stop("SIGKILL");
-  await server.start(binary, { "server.store_ip": "false" });
-  const withoutIp = { ...sdkEvents()[0], browser_context: event.browser_context };
-  await server.send(withoutIp);
-  const records = (await server.get("/v1/events")).events;
-  assert.deepEqual(records[0], stored);
-  assert.deepEqual(records[1].event, withoutIp);
-  assert.deepEqual(records[1].event_context, {
-    schema_version: 1, browser_name: "Firefox", os_name: "Linux", device_type: "desktop", viewport_width_px: 960,
-  });
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events[0], stored);
 });
 
-test("trusted proxies resolve the first untrusted address from the right", async (t) => {
+test("trusted proxy lookups persist location but no request IP, including retries and CSV", async (t) => {
   const server = await collector(t, { "server.trusted_proxies": "127.0.0.1,10.20.0.0/16,2001:db8:abcd::/48" });
   const event = sdkEvents()[0];
-  await server.send(event, { "X-Forwarded-For": "203.0.113.99, 198.51.100.8, 10.20.1.2, 2001:db8:abcd::1" });
+  await server.send(event, { "X-Forwarded-For": "216.160.83.56, 81.2.69.160, 10.20.1.2, 2001:db8:abcd::1" });
   const stored = (await server.get("/v1/events")).events;
   assert.deepEqual(stored[0].event, event);
-  assert.deepEqual(stored[0].event_context, {
-    schema_version: 1, peer_ip: "127.0.0.1", client_ip: "198.51.100.8", client_ip_source: "x_forwarded_for",
-  });
-  await server.send(event, { "X-Forwarded-For": "203.0.113.33" });
-  assert.deepEqual((await server.get("/v1/events")).events, stored, "a retry cannot replace the first request context");
-  assert.ok(!server.logs().includes("198.51.100.8"));
+  assert.deepEqual(stored[0].event_context, { schema_version: 1, continent: "EU", country: "GB", city: "London" });
+  await server.send(event, { "X-Forwarded-For": "216.160.83.56" });
+  assert.deepEqual((await server.get("/v1/events")).events, stored, "a retry cannot replace the first location");
+  const grant = await fetch(`${server.url}/v1/exports`, { method: "POST", headers: {
+    Authorization: `Bearer ${server.keys.secret_key}`, "Content-Type": "application/json",
+  }, body: JSON.stringify({ resource: "events", query: {} }) });
+  assert.equal(grant.status, 201, await grant.clone().text());
+  const csv = await (await fetch((await grant.json()).download_url)).text();
+  assert.match(csv, /context.country/); assert.match(csv, /context.city/); assert.match(csv, /London/);
+  await server.stop();
+  const database = await readFile(join(server.directory, "analytics.duckdb"));
+  for (const ip of ["216.160.83.56", "81.2.69.160", "10.20.1.2", "2001:db8:abcd::1"]) {
+    assert.ok(!JSON.stringify(stored).includes(ip));
+    assert.ok(!csv.includes(ip)); assert.ok(!server.logs().includes(ip)); assert.ok(!database.includes(Buffer.from(ip)));
+  }
+  for (const field of ["peer_ip", "client_ip", "client_ip_source"]) assert.ok(!csv.includes(field));
+  await server.start();
+  assert.deepEqual((await server.get("/v1/events")).events, stored);
 });
 
-test("proxy headers are ignored unless the connection peer matches the configured trust list", async (t) => {
-  const server = await collector(t, { "server.trusted_proxies": "10.0.0.0/8,::1" });
-  await server.send(sdkEvents()[0], { "X-Forwarded-For": "203.0.113.10, 10.1.2.3" });
-  const context = (await server.get("/v1/events")).events[0].event_context;
-  assert.equal(context.client_ip, "127.0.0.1");
-  assert.equal(context.client_ip_source, "connection");
-});
-
-test("trusted forwarding accepts literal IPs and leaves invalid or missing client addresses unresolved", async (t) => {
-  const server = await collector(t, { "server.trusted_proxies": "127.0.0.0/8,10.20.0.0/16,2001:db8:abcd::/48" });
-  const cases = [
-    ["198.51.100.2", "198.51.100.2"],
-    ["2001:db8:beef::5, 2001:db8:abcd::1", "2001:db8:beef::5"],
-    ["::ffff:198.51.100.6, ::ffff:10.20.1.2", "198.51.100.6"],
-    ["203.0.113.5, 10.21.1.2", "10.21.1.2"],
-    [undefined, null], ["", null], ["unknown", null], ["for=198.51.100.2", null],
-    ["198.51.100.2:443", null], ["[2001:db8::2]", null], ["fe80::1%en0", null],
-    ["198.51.100.2,", null], [",198.51.100.2", null], ["malformed, 198.51.100.2", null],
-    ["127.0.0.1, 10.20.1.2", null],
-    [["198.51.100.2", ...Array(31).fill("10.20.1.2")].join(","), "198.51.100.2"],
-    [["198.51.100.2", ...Array(32).fill("10.20.1.2")].join(","), null],
-    [`198.51.100.2,${" ".repeat(4096)}10.20.1.2`, null],
-  ];
-  for (const [forwarded, expected] of cases) {
-    const event = sdkEvents()[0];
-    await server.send(event, {
-      ...(forwarded === undefined ? {} : { "X-Forwarded-For": forwarded }),
-      "Forwarded": "for=192.0.2.99", "X-Real-IP": "192.0.2.99", "CF-Connecting-IP": "192.0.2.99",
-    });
-    const context = (await server.get("/v1/events")).events.at(-1).event_context;
-    assert.deepEqual(context, { schema_version: 1, peer_ip: "127.0.0.1", client_ip: expected,
-      client_ip_source: expected ? "x_forwarded_for" : null }, `forwarded case ${cases.findIndex((entry) => entry[0] === forwarded)}`);
+test("missing, invalid, private and unknown forwarded addresses have unknown locations", async (t) => {
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1,10.20.0.0/16" });
+  for (const forwarded of [undefined, "", "unknown", "for=81.2.69.160", "81.2.69.160:443", "malformed, 81.2.69.160",
+    "81.2.69.160,", "10.1.2.3", "1.1.1.1", "127.0.0.1, 10.20.1.2",
+    ["81.2.69.160", ...Array(32).fill("10.20.1.2")].join(","), `81.2.69.160,${" ".repeat(4096)}10.20.1.2`]) {
+    await server.send(sdkEvents()[0], forwarded === undefined ? {} : { "X-Forwarded-For": forwarded });
+    assert.deepEqual((await server.get("/v1/events")).events.at(-1).event_context,
+      { schema_version: 1, continent: null, country: null, city: null });
   }
 });
 
@@ -573,50 +526,49 @@ test("multiple X-Forwarded-For header lines form one ordered chain", async (t) =
     const request = httpRequest(`${server.url}/v1/events`, { method: "POST", headers: [
       "Content-Type", "application/json", "Content-Length", String(Buffer.byteLength(body)),
       "X-Chunkify-Ingest-Key", server.keys.public_key,
-      "X-Forwarded-For", "203.0.113.99, 198.51.100.7", "X-Forwarded-For", "10.20.1.2",
+      "X-Forwarded-For", "216.160.83.56, 81.2.69.160", "X-Forwarded-For", "10.20.1.2",
     ] }, (response) => { response.resume(); response.on("end", () => resolveStatus(response.statusCode)); });
     request.on("error", reject);
     request.end(body);
   });
   assert.equal(status, 201);
-  assert.equal((await server.get("/v1/events")).events[0].event_context.client_ip, "198.51.100.7");
+  assert.deepEqual((await server.get("/v1/events")).events[0].event_context,
+    { schema_version: 1, continent: "EU", country: "GB", city: "London" });
 });
 
-test("IPv6 connection addresses are captured and can be trusted explicitly", async (t) => {
+test("IPv6 and mapped IPv4 addresses are located through explicitly trusted proxies", async (t) => {
   const server = await collector(t, { "server.bind": "[::1]:0" });
-  await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
-  assert.deepEqual((await server.get("/v1/events")).events[0].event_context, {
-    schema_version: 1, peer_ip: "::1", client_ip: "::1", client_ip_source: "connection",
-  });
+  await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:218::1" });
+  assert.deepEqual((await server.get("/v1/events")).events[0].event_context,
+    { schema_version: 1, continent: null, country: null, city: null });
   await server.stop();
   await server.start(binary, { "server.trusted_proxies": "::1/128" });
-  await server.send(sdkEvents()[0], { "X-Forwarded-For": "2001:db8::4" });
-  assert.deepEqual((await server.get("/v1/events")).events.at(-1).event_context, {
-    schema_version: 1, peer_ip: "::1", client_ip: "2001:db8::4", client_ip_source: "x_forwarded_for",
-  });
+  for (const [ip, continent, country, city] of [["2001:218::1", "AS", "JP", null], ["::ffff:81.2.69.160", "EU", "GB", "London"]]) {
+    await server.send(sdkEvents()[0], { "X-Forwarded-For": ip });
+    assert.deepEqual((await server.get("/v1/events")).events.at(-1).event_context,
+      { schema_version: 1, continent, country, city });
+  }
 });
 
-test("invalid IP configuration fails at startup without changing events or credentials", async (t) => {
+test("invalid proxy or geolocation configuration fails before touching events or credentials", async (t) => {
   const server = await collector(t);
   await server.send(sdkEvents()[0]);
   const before = await server.get("/v1/events");
-  const keys = { ...server.keys };
   await server.stop();
   for (const settings of [
-    ...["0", "1", "yes", "FALSE", ""].map((value) => ({ "server.store_ip": value })),
+    { "server.store_ip": true }, { "server.store_ip": false },
     ...["*", "localhost", "127.0.0.1:80", "127.0.0.1/33", "::1/129", "127.0.0.1,", "::ffff:127.0.0.0/104"]
       .map((value) => ({ "server.trusted_proxies": value })),
+    ...["missing.mmdb", resolve("Cargo.toml"), resolve("tests/fixtures/GeoIP2-Country-Test.mmdb")]
+      .map((value) => ({ "server.geoip_database": value })),
   ]) {
     const result = await server.command(["serve"], settings);
     assert.notEqual(result.code, 0);
-    assert.match(result.stderr, new RegExp(`${Object.keys(settings)[0]}|Invalid TOML configuration`));
+    assert.match(result.stderr, /trusted_proxies|Invalid TOML configuration|geolocation|Geolocation/);
   }
   await server.assertStoredKeyHashes();
-  assert.deepEqual(server.keys, keys);
-  await server.start(binary, { "server.trusted_proxies": " ::ffff:127.0.0.1 , 2001:db8::/32 " });
+  await server.start();
   assert.deepEqual(await server.get("/v1/events"), before);
-  await server.send(sdkEvents()[0], { "X-Forwarded-For": "198.51.100.11" });
-  assert.equal((await server.get("/v1/events")).events.at(-1).event_context.client_ip, "198.51.100.11");
 });
 
 test("the browser Chunkify adapter persists context through authenticated ingestion, retries, and restart", async (t) => {
@@ -670,7 +622,7 @@ test("the browser Chunkify adapter persists context through authenticated ingest
     assert.equal(event.browser_context.language, "fr-FR");
     assert.equal(event.browser_context.timezone, "Europe/Paris");
     assert.equal(event.browser_context.viewport_width_px, 960);
-    assert.deepEqual(event_context, { ...event.browser_context, peer_ip: "127.0.0.1", client_ip: "127.0.0.1", client_ip_source: "connection" });
+    assert.deepEqual(event_context, { ...event.browser_context, continent: null, country: null, city: null });
   }
   assert.ok(events[1].playing_time_ms > 0);
   assert.deepEqual(await server.get("/v1/summary"), {
@@ -1008,7 +960,7 @@ test("separate reader serves committed SDK events with stable pagination", async
     assert.deepEqual(new Set(records.map(({ event }) => event.event_id)), new Set(events.map((event) => event.event_id)), "later commits must stay outside the pagination watermark");
     for (const record of records) {
       assert.deepEqual(record.event, events.find((event) => event.event_id === record.event.event_id));
-      assert.equal(record.event_context.client_ip, "127.0.0.1");
+      assert.deepEqual(record.event_context, { schema_version: 1, continent: null, country: null, city: null });
     }
     await server.stop();
     const reader = profiles(server).find((profile) => profile.worker === "reader");

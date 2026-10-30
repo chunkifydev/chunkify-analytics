@@ -24,17 +24,18 @@ function events() {
   return result;
 }
 
-async function installation(t, storage, retention = 0, environment = {}) {
+async function installation(t, storage, retention = 0, environment = {}, server = {}) {
   let directory = await mkdtemp(join(tmpdir(), "chunkify-storage-test-"));
   const directories = [directory];
   let child, closed;
   const inherited = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("CHUNKIFY_"))),
-    ...environment };
+    CHUNKIFY_GEOIP_DATABASE: resolve("tests/fixtures/GeoIP2-City-Test.mmdb"), ...environment };
   let config;
   async function configure() {
     config = join(directory, "config.toml");
+    const serverFields = Object.entries(server).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
     const fields = Object.entries(storage).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
-    await writeFile(config, `data_dir = "state"\n[server]\nbind = "127.0.0.1:0"\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = 86400\n`, { mode: 0o600 });
+    await writeFile(config, `data_dir = "state"\n[server]\nbind = "127.0.0.1:0"\n${serverFields}\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = 86400\n`, { mode: 0o600 });
   }
   async function stop() {
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
@@ -520,4 +521,41 @@ test("S3 video reports match local storage after repeated delivery and replaceme
   assert.deepEqual(await remote.get("/v1/engagement?video_id=s3-video"), snapshots[0][0]);
   assert.deepEqual(await remote.get("/v1/quality?video_id=s3-video"), snapshots[0][3]);
   assert.deepEqual(await remote.get("/v1/renditions?video_id=s3-video"), snapshots[0][6]);
+});
+
+
+test("S3 persists country, city and page context without request addresses across replacement", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, s3Settings(), 0, {}, { trusted_proxies: ["127.0.0.1", "10.0.0.0/8"] });
+  await app.command(["init"]);
+  await app.start();
+  const event = { ...events()[0], browser_context: { schema_version: 1,
+    browser_name: "Chrome", page_origin: "https://example.com", page_path: "/watch/first" } };
+  const response = await fetch(`${app.url}/v1/events`, { method: "POST", headers: {
+    "content-type": "application/json", "x-chunkify-ingest-key": app.keys.public_key,
+    "x-forwarded-for": "81.2.69.160, 10.1.2.3",
+  }, body: JSON.stringify(event) });
+  assert.equal(response.status, 201, await response.text());
+  const expected = { schema_version: 1, continent: "EU", country: "GB", city: "London", browser_name: "Chrome",
+    page_origin: "https://example.com", page_path: "/watch/first" };
+  const before = (await app.get("/v1/events")).events;
+  assert.deepEqual(before[0].event_context, expected);
+  await app.replaceTask();
+  const after = (await app.get("/v1/events")).events;
+  assert.deepEqual(after, before);
+  for (const [dimension, value] of [["country", "GB"], ["city", "London"], ["continent", "EU"]]) {
+    for (const route of ["summary", "quality", "engagement"]) {
+      const result = await app.get(`/v1/${route}?group_by=${dimension}&country=GB`);
+      assert.equal(result.groups.length, 1);
+      assert.equal(result.groups[0].value, value);
+      assert.equal(result.groups[0].data.views, 1);
+    }
+    assert.deepEqual((await app.get(`/v1/dimensions/${dimension}?country=GB`)).values, [{ value, views: 1 }]);
+  }
+  assert.equal((await app.get("/v1/summary?country=JP")).views, 0);
+  assert.equal((await app.get("/v1/events?country=GB&city=London&continent=EU")).events.length, 1);
+  for (const value of ["81.2.69.160", "10.1.2.3", "peer_ip", "client_ip"]) {
+    assert.ok(!JSON.stringify(after).includes(value));
+  }
 });

@@ -35,6 +35,10 @@ COPY --from=build /usr/local/bin/chunkify-analytics /usr/local/bin/
 COPY --from=build /opt/duckdb/libduckdb.so /usr/local/lib/
 COPY LICENSE /usr/share/doc/chunkify-analytics/LICENSE
 COPY docs/licenses/duckdb.txt /usr/share/doc/chunkify-analytics/LICENSE-DuckDB
+COPY docs/licenses/db-ip.txt /usr/share/doc/chunkify-analytics/LICENSE-DB-IP
+COPY scripts/install-geolocation.sh /tmp/install-geolocation.sh
+RUN sh /tmp/install-geolocation.sh /usr/local/share/chunkify-analytics \
+    && rm /tmp/install-geolocation.sh
 RUN ldconfig
 ENV CHUNKIFY_DATA_DIR=/data CHUNKIFY_BIND=0.0.0.0:4174
 USER 10001:10001

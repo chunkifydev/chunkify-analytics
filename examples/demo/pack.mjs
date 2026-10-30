@@ -27,6 +27,10 @@ try {
     // Source builds with bundled-duckdb do not need a separate shared library.
     if (error.code !== 'ENOENT') throw error;
   }
+  const geoDirectory = path.join(bundle, 'share/chunkify-analytics');
+  await mkdir(geoDirectory, { recursive: true });
+  await copyFile(path.resolve(path.dirname(binary), '../share/chunkify-analytics/dbip-city-lite.mmdb'),
+    path.join(geoDirectory, 'dbip-city-lite.mmdb'));
   // Explicit files only: custom --data-dir paths or local files can live anywhere.
   const sourceFiles = [
     'examples/dashboard/server.cjs', 'examples/dashboard/seed-events.mjs',
@@ -34,6 +38,7 @@ try {
     'examples/dashboard/public/event-details.js', 'examples/dashboard/public/style.css',
     'examples/demo/start.mjs', 'examples/demo/server.mjs', 'examples/demo/README.md',
     'examples/demo/public/player.html', 'examples/demo/public/player.js', 'examples/demo/public/player.css',
+    'docs/licenses/db-ip.txt',
   ];
   for (const file of sourceFiles) {
     await mkdir(path.dirname(path.join(bundle, file)), { recursive: true });

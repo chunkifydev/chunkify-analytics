@@ -1,7 +1,5 @@
 use crate::{
-    api::ApiError,
-    context::{RequestContext, event_context},
-    event::IncomingEvent,
+    api::ApiError, context::event_context, event::IncomingEvent, geolocation::Location,
     profile::Profile,
 };
 use duckdb::{
@@ -258,7 +256,7 @@ impl Writer {
         project: &crate::projects::Access,
         key_id: &str,
         events: Vec<IncomingEvent>,
-        request_context: Option<RequestContext>,
+        request_context: Option<Location>,
     ) -> Result<usize, ApiError> {
         let too_large = || {
             ApiError::new(

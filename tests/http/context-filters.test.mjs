@@ -19,7 +19,7 @@ const safari = { schema_version: 1, browser_name: "Safari", os_name: "iOS", devi
 async function collector(t, separateReads) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-context-filters-"));
   const env = { ...process.env, "data_dir": directory, "server.bind": "127.0.0.1:0",
-    "retention.seconds": "0", "server.store_ip": "false", "server.trusted_proxies": "",
+    "retention.seconds": "0", "server.trusted_proxies": "",
     "experimental.read_worker": String(separateReads) };
   let child;
   let exited;

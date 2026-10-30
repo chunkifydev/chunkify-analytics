@@ -31,7 +31,9 @@ backend = "local"
 bind = "127.0.0.1:4174"
 allowed_origins = ["http://localhost:3000"]
 trusted_proxies = []
-store_ip = true
+# Continent, country and city lookup is always on. Request IPs are never stored.
+# The image/release includes a City MMDB. Override only to use your own file:
+# geoip_database = "./dbip-city-lite.mmdb"
 max_body_bytes = 65536
 ingest_per_second = 100
 

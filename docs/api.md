@@ -16,6 +16,7 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | `POST /v1/project/keys/{key_id}/rotate` | Full-access `Authorization: Bearer SECRET_KEY` | New key value with its access level; the previous value stops working immediately. |
 | `GET /v1/events` | `Authorization: Bearer SECRET_KEY` | `{"events":[{"project_id":"default","ingest_key_id":"primary-public","received_at":"...","event":{...}}],"next_cursor":null}` |
 | `GET /v1/summary` | `Authorization: Bearer SECRET_KEY` | `{"views":3,"unique_viewers":1,"total_playing_time_ms":6500}` |
+| `GET /v1/retention` | `Authorization: Bearer SECRET_KEY` | Watched sections along one video, excluding seeks. Requires `video_id`. |
 | `GET /v1/engagement` | `Authorization: Bearer SECRET_KEY` | Average playing time per attempt and observed reached-end count/rate. |
 | `GET /v1/quality` | `Authorization: Bearer SECRET_KEY` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
 | `GET /v1/timeseries` | `Authorization: Bearer SECRET_KEY` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
@@ -657,3 +658,7 @@ reachable analytics server base, for example `https://analytics.example.com/coll
 Otherwise the analytics server derives the URL from the request Host and scheme; it only
 trusts `X-Forwarded-Proto` from configured trusted proxies. In-memory tokens belong
 to one analytics server process; route downloads to the process that issued their link.
+
+## Watched-section retention
+
+Use `GET /v1/retention?video_id=VIDEO_ID` to build engagement curves along media position. See [Video timelines](video-timelines.md) for measurements, sample counts, bucket resolution, CSV and rendition-event semantics.

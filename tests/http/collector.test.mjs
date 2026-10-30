@@ -1998,3 +1998,27 @@ test("read-only private keys read analytics live and cannot manage projects or k
   assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${rotated.key}` } })).status, 401);
   assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
 });
+
+for (const readers of [false, true]) test(`retention reports watched sections and exports CSV (readers=${readers})`, async t => {
+  const server = await collector(t, { "experimental.read_worker": String(readers) });
+  const records = sdkEvents("retention-video");
+  const last = { ...records.at(-1), media_duration_seconds: 5,
+    played_ranges: [{ start_seconds: 0, end_seconds: 1 }, { start_seconds: 3, end_seconds: 4 }], playhead_seconds: 4 };
+  await server.send(records[0]); await server.send(last); await server.send(last);
+  const report = await server.get("/v1/retention?video_id=retention-video");
+  component("RetentionReport", report);
+  assert.equal(report.views, 1); assert.equal(report.sample_views, 1);
+  assert.deepEqual(report.buckets.map(b => b.views), [1, 0, 0, 1, 0]);
+  for (const query of ["", "video_id=retention-video&limit=1", "video_id=retention-video&group_by=country"]) {
+    assert.equal((await fetch(`${server.url}/v1/retention?${query}`, { headers: { Authorization: `Bearer ${server.keys.secret_key}` } })).status, 400);
+  }
+  assert.equal((await fetch(`${server.url}/v1/retention?video_id=retention-video`)).status, 401);
+  const invalid = { ...last, event_id: randomUUID(), played_ranges: [{ start_seconds: 3, end_seconds: 2 }] };
+  assert.equal((await postEvent(server, JSON.stringify(invalid))).status, 400);
+  const response = await fetch(`${server.url}/v1/exports`, { method: "POST", headers: { Authorization: `Bearer ${server.keys.secret_key}`, "content-type": "application/json" }, body: JSON.stringify({ resource: "retention", query: { video_id: "retention-video" } }) });
+  assert.equal(response.status, 201, await response.clone().text());
+  const grant = await response.json();
+  const csv = await (await fetch(grant.download_url)).text();
+  assert.match(csv, /start_seconds,end_seconds,views,ratio/);
+  assert.equal(csv.trim().split("\n").length, 6);
+});

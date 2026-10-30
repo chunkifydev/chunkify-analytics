@@ -324,3 +324,7 @@ matching measurements; `limit` controls the ranked rows, default 10 and maximum
 100. Coverage reports whether more renditions exist. Use `export_data` with
 `resource=renditions` for all matching rows. Rendition counts can overlap across
 views. Missing bitrate contributes no weight to the average.
+
+## Watched sections
+
+`get_metrics` with `kind=retention` and `video_id` returns up to 200 media-position buckets. Each attempt counts once per overlapped section. Ratios use measured attempts (`sample_views`), and missing played ranges are excluded. This report does not accept pagination or grouping. `export_data` supports `resource=retention` with the same filters. See [Video timelines](video-timelines.md).

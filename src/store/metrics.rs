@@ -659,6 +659,7 @@ pub(super) enum CohortMetrics {
     Engagement,
     Complete,
     Renditions,
+    Retention,
 }
 
 pub(super) fn view_cohort(
@@ -679,6 +680,10 @@ pub(super) fn view_cohort(
     let (measurement_fields, error_aggregate, measurement_projection, error_events) = match metrics
     {
         CohortMetrics::Basic => (String::new(), "", "", ""),
+        CohortMetrics::Retention => (
+            format!(", media_duration_seconds := {}, played_ranges := json_extract(event_remainder, '$.played_ranges')", stored_number("media_duration_seconds")),
+            "", ", measurement", "",
+        ),
         CohortMetrics::Renditions => (
             ", rendition_playing_time := json_extract(event_remainder, '$.rendition_playing_time')".into(),
             "", ", measurement", "",

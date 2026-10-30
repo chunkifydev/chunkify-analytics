@@ -145,6 +145,7 @@ pub fn router(
         .route("/v1/summary", get(summary))
         .route("/v1/quality", get(quality))
         .route("/v1/renditions", get(renditions))
+        .route("/v1/retention", get(retention))
         .route("/v1/engagement", get(engagement))
         .route("/v1/timeseries", get(timeseries))
         .route("/v1/videos", get(videos))
@@ -212,6 +213,7 @@ async fn access(
                     | "/v1/timeseries"
                     | "/v1/quality"
                     | "/v1/renditions"
+                    | "/v1/retention"
                     | "/v1/engagement"
                     | "/v1/views"
                     | "/v1/errors"
@@ -611,6 +613,17 @@ async fn renditions(
     Ok(Json(
         app.store
             .renditions(resolved.project.id.clone(), query)
+            .await?,
+    ))
+}
+async fn retention(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .retention(resolved.project.id.clone(), query)
             .await?,
     ))
 }

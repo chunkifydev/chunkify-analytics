@@ -17,6 +17,7 @@ pub(super) fn metric_path(kind: &Value) -> Option<&'static str> {
         "summary" => Some("/v1/summary"),
         "quality" => Some("/v1/quality"),
         "renditions" => Some("/v1/renditions"),
+        "retention" => Some("/v1/retention"),
         "engagement" => Some("/v1/engagement"),
         "errors" => Some("/v1/errors"),
         _ => None,
@@ -108,12 +109,12 @@ impl Contract {
             schema.as_object().unwrap().clone(),
         )];
         let mut parameters = self.parameters("/v1/summary");
-        parameters.insert("kind".into(), json!({"type":"string","enum":["summary","quality","engagement","errors","renditions"],
-            "description":"summary returns views, unique viewers and total playing time; quality returns startup, buffering, fatal errors and startup outcomes with sample counts; engagement returns average watch time, observed reached-end rates, furthest-progress milestones and measured watch-time distribution; errors returns paginated error-code and fatal-status groups; renditions returns time-weighted average bitrate and top renditions by watch time."}));
+        parameters.insert("kind".into(), json!({"type":"string","enum":["summary","quality","engagement","errors","renditions","retention"],
+            "description":"summary returns views, unique viewers and total playing time; quality returns startup, buffering, fatal errors and startup outcomes with sample counts; engagement returns average watch time, observed reached-end rates, furthest-progress milestones and measured watch-time distribution; errors returns paginated error-code and fatal-status groups; retention returns watched media-position buckets for one video; renditions returns time-weighted average bitrate and top renditions by watch time."}));
         let schema = json!({"type":"object","properties":parameters,"required":["kind"],"additionalProperties":false});
         tools.push(Tool::new(
             "get_metrics",
-            "Read one metric set for the authenticated project. Engagement includes progress_reached and watch_time_ms; quality includes startup_outcomes. Progress ratios use measured progress samples, watch-time distributions exclude missing measurements, and startup outcome ratios use all attempts. Progress can include seeking; it is not retention. kind is required: summary, quality, engagement, errors or renditions. Renditions returns global totals with the top rows; use limit to select up to 100 rows, or export for every rendition. Renditions does not accept group_by or cursor. Error metrics return paginated code/fatal groups without group_by. Add group_by=browser_name, os_name, device_type, continent, country, city, page_origin or page_path for paginated groups; omit it for filtered totals. Group membership uses the first retained view start. Filter by country when grouping cities to avoid combining names shared by different countries. Location displays using bundled DB-IP data must link to https://db-ip.com. Missing context forms a null group, distinct from the literal device type unknown. Pagination requires group_by for summary, quality and engagement; errors always paginate. Pages default to 10 rows and accept at most 100. Keep kind, group_by and filters unchanged with every cursor. Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON. Each query has a 15-second deadline and a 1 MiB response limit. Results contain the unchanged HTTP body in data and explicit coverage. No automatic pagination. Use describe_api topic=metrics for definitions.",
+            "Read one metric set for the authenticated project. Engagement includes progress_reached and watch_time_ms; quality includes startup_outcomes. Progress ratios use measured progress samples, watch-time distributions exclude missing measurements, and startup outcome ratios use all attempts. Progress can include seeking; it is not retention. kind is required: summary, quality, engagement, errors, renditions or retention. Retention requires video_id and returns watched sections with at most 200 buckets; it does not accept pagination or group_by. Renditions returns global totals with the top rows; use limit to select up to 100 rows, or export for every rendition. Renditions does not accept group_by or cursor. Error metrics return paginated code/fatal groups without group_by. Add group_by=browser_name, os_name, device_type, continent, country, city, page_origin or page_path for paginated groups; omit it for filtered totals. Group membership uses the first retained view start. Filter by country when grouping cities to avoid combining names shared by different countries. Location displays using bundled DB-IP data must link to https://db-ip.com. Missing context forms a null group, distinct from the literal device type unknown. Pagination requires group_by for summary, quality and engagement; errors always paginate. Pages default to 10 rows and accept at most 100. Keep kind, group_by and filters unchanged with every cursor. Combined filters excluding limit/cursor must fit in 4 KiB of serialized JSON. Each query has a 15-second deadline and a 1 MiB response limit. Results contain the unchanged HTTP body in data and explicit coverage. No automatic pagination. Use describe_api topic=metrics for definitions.",
             schema.as_object().unwrap().clone(),
         ));
         for (name, path) in QUERIES {
@@ -137,6 +138,7 @@ impl Contract {
             "/v1/summary",
             "/v1/quality",
             "/v1/renditions",
+            "/v1/retention",
             "/v1/engagement",
             "/v1/errors",
             "/v1/timeseries",
@@ -152,7 +154,7 @@ impl Contract {
             );
         }
         let schema = json!({"type":"object","required":["resource"],"additionalProperties":false,
-            "properties":{"resource":{"type":"string","enum":["summary","quality","engagement","timeseries","videos","events","views","errors","dimensions","renditions"]},
+            "properties":{"resource":{"type":"string","enum":["summary","quality","engagement","timeseries","videos","events","views","errors","dimensions","renditions","retention"]},
                 "query":{"type":"object","properties":export_parameters,"additionalProperties":false}}});
         tools.push(Tool::new("export_data","Create a scoped CSV download link for all matching rows. Returns a URL, never CSV contents. For readable reports prefer views, videos or timeseries; use events when individual events are requested. CSV contains documented scalar fields in columns, with no JSON cells. Custom attributes, nested arrays and historical OTLP payloads are excluded; list_events preserves original payloads. Open the link without a project key within 30 minutes; anyone holding it can download this report. No export files are retained. Downloads stream from a separate read connection and do not inherit query pagination or response-size caps. Use the resource's query filters, excluding limit and cursor; kind is only for timeseries. Keep the returned URL private. Read-only private keys may export.",schema.as_object().unwrap().clone()));
         for tool in &mut tools {
@@ -424,6 +426,27 @@ impl Contract {
         }
         if path == "/v1/quality" {
             return quality_metrics(data);
+        }
+        if path == "/v1/retention" {
+            return data["views"].as_u64().is_some()
+                && data["sample_views"]
+                    .as_u64()
+                    .is_some_and(|n| n <= data["views"].as_u64().unwrap_or(0))
+                && nullable_number(data.get("duration_seconds"), f64::MAX)
+                && nullable_number(data.get("interval_seconds"), f64::MAX)
+                && data["buckets"].as_array().is_some_and(|rows| {
+                    rows.len() <= 200
+                        && rows.iter().all(|r| {
+                            nonnegative_number(&r["start_seconds"])
+                                && nonnegative_number(&r["end_seconds"])
+                                && r["views"].as_u64().is_some_and(|n| {
+                                    n <= data["sample_views"].as_u64().unwrap_or(0)
+                                })
+                                && r["ratio"]
+                                    .as_f64()
+                                    .is_some_and(|n| (0.0..=1.0).contains(&n))
+                        })
+                });
         }
         if path == "/v1/renditions" {
             return data["views"].as_u64().is_some()

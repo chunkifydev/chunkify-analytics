@@ -388,7 +388,14 @@ async fn exercise_project_queries(http: bool) {
     assert_eq!(metric_schema["required"], json!(["kind"]));
     assert_eq!(
         metric_schema["properties"]["kind"]["enum"],
-        json!(["summary", "quality", "engagement", "errors", "renditions"])
+        json!([
+            "summary",
+            "quality",
+            "engagement",
+            "errors",
+            "renditions",
+            "retention"
+        ])
     );
     for arguments in [
         json!({}),
@@ -403,6 +410,20 @@ async fn exercise_project_queries(http: bool) {
             "invalid_arguments"
         );
     }
+    let retention = call(
+        &client,
+        "get_metrics",
+        json!({"kind":"retention","video_id":"unknown"}),
+        false,
+    )
+    .await;
+    assert_eq!(retention["coverage"]["kind"], "media_buckets");
+    assert_eq!(retention["data"]["sample_views"], 0);
+    assert_eq!(retention["data"]["buckets"], json!([]));
+    assert_eq!(
+        call(&client, "get_metrics", json!({"kind":"retention"}), true).await["error"]["code"],
+        "invalid_arguments"
+    );
     let renditions = call(&client, "get_metrics", json!({"kind":"renditions"}), false).await;
     assert_eq!(renditions["coverage"]["kind"], "ranked_renditions");
     assert_eq!(renditions["data"]["average_bitrate_bps"], Value::Null);

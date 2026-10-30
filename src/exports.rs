@@ -39,6 +39,7 @@ impl ExportRequest {
             "summary" => Ok("/v1/summary"),
             "quality" => Ok("/v1/quality"),
             "renditions" => Ok("/v1/renditions"),
+            "retention" => Ok("/v1/retention"),
             "engagement" => Ok("/v1/engagement"),
             "errors" => Ok("/v1/errors"),
             "events" => Ok("/v1/events"),
@@ -99,6 +100,9 @@ impl ExportRequest {
             }
             let q: query::Query = parse(args)?;
             q.filters()?;
+            if self.resource == "retention" {
+                crate::store::validate_retention_query(&q)?;
+            }
             if q.group_by.is_some()
                 && !matches!(self.resource.as_str(), "summary" | "quality" | "engagement")
             {
@@ -347,6 +351,7 @@ async fn run(
         "summary" => store.summary(project, q, false).await,
         "quality" => store.quality(project, q).await,
         "renditions" => store.renditions(project, q).await,
+        "retention" => store.retention(project, q).await,
         "engagement" => store.engagement(project, q).await,
         "errors" => store.errors(project, q).await,
         "dimensions" => {
@@ -477,6 +482,7 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
             "unique_viewers",
             "total_playing_time_ms",
         ],
+        "retention" => &["start_seconds", "end_seconds", "views", "ratio"],
         "renditions" => &[
             "width",
             "height",

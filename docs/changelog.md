@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.5.0...v0.6.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* **analytics:** remove server.store_ip and request IP context fields. Serving now requires a City MMDB, included in Docker images and native release archives. Existing stored events are not rewritten.
+
+### Features
+
+* **analytics:** add local geolocation and location reports ([#43](https://github.com/chunkifydev/chunkify-analytics/issues/43)) ([e108aa9](https://github.com/chunkifydev/chunkify-analytics/commit/e108aa93f48fe8b617beb9db54109c0764f966f3))
+
 ## [0.5.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.4.0...v0.5.0) (2026-10-29)
 
 

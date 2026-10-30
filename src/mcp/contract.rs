@@ -153,6 +153,17 @@ impl Contract {
                     .filter(|(name, _)| !matches!(name.as_str(), "limit" | "cursor")),
             );
         }
+        // Exports share a query object, but ordering defaults depend on the resource.
+        let order = export_parameters
+            .get_mut("order")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        order.remove("default");
+        order.insert(
+            "description".into(),
+            self.0["components"]["parameters"]["order"]["description"].clone(),
+        );
         let schema = json!({"type":"object","required":["resource"],"additionalProperties":false,
             "properties":{"resource":{"type":"string","enum":["summary","quality","engagement","timeseries","videos","events","views","errors","dimensions","renditions","retention"]},
                 "query":{"type":"object","properties":export_parameters,"additionalProperties":false}}});
@@ -746,6 +757,31 @@ fn quality_metrics(value: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordering_defaults_are_specific_to_each_resource() {
+        let tools = Contract::new().tools();
+        for (name, expected) in [
+            ("list_views", "desc"),
+            ("list_events", "asc"),
+            ("list_video_metrics", "asc"),
+        ] {
+            let tool = tools.iter().find(|tool| tool.name == name).unwrap();
+            assert_eq!(
+                tool.input_schema["properties"]["order"]["default"],
+                expected
+            );
+        }
+        let export = tools
+            .iter()
+            .find(|tool| tool.name == "export_data")
+            .unwrap();
+        let order = &export.input_schema["properties"]["query"]["properties"]["order"];
+        assert!(order.get("default").is_none());
+        assert_eq!(order["enum"], json!(["asc", "desc"]));
+        let description = order["description"].as_str().unwrap();
+        assert!(description.contains("Events and videos default to asc; views default to desc"));
+    }
 
     #[test]
     fn grouped_responses_require_matching_metrics_and_bounded_pages() {

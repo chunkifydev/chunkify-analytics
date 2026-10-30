@@ -34,33 +34,37 @@ impl Store {
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
-        let order = query.order.unwrap_or_default();
+        let order = query.order.unwrap_or(SortOrder::Desc);
         let kind = format!("views_{}_{:?}", order.as_str(), input.has_fatal_error);
         let cursor = query
             .cursor
             .as_deref()
-            .map(|c| Cursor::<String>::decode(c, &kind, &filters, &project))
+            .map(|c| Cursor::<(i64, String)>::decode(c, &kind, &filters, &project))
             .transpose()?;
         self.read("views", project.clone(), move |db| {
             let through = match &cursor { Some(c) => c.through, None => watermark(db, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Complete);
             let (direction, comparison) = match order { SortOrder::Asc => ("ASC", ">"), SortOrder::Desc => ("DESC", "<") };
             let mut conditions = Vec::new();
-            if let Some(c) = cursor { conditions.push(format!("view_id {comparison} ?")); values.push(SqlValue::Text(c.after)); }
+            if let Some(c) = cursor {
+                conditions.push(format!("(occurred_at_ms {comparison} ? OR (occurred_at_ms = ? AND view_id {comparison} ?))"));
+                values.extend([SqlValue::BigInt(c.after.0), SqlValue::BigInt(c.after.0), SqlValue::Text(c.after.1)]);
+            }
             if let Some(fatal) = input.has_fatal_error { conditions.push("COALESCE(has_fatal_error, FALSE) = ?".into()); values.push(SqlValue::Boolean(fatal)); }
             values.push(SqlValue::BigInt((limit + 1) as i64));
             let conditions = if conditions.is_empty() { "TRUE".into() } else { conditions.join(" AND ") };
-            let mut statement = db.prepare(&format!("{sql} SELECT {VIEW_COLUMNS} FROM view_metrics WHERE {conditions} ORDER BY view_id {direction} LIMIT ?"))?;
-            let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(view_row);
-            let mut views = Vec::new(); let mut next_cursor = None;
+            let mut statement = db.prepare(&format!("{sql} SELECT {VIEW_COLUMNS} FROM view_metrics WHERE {conditions} ORDER BY occurred_at_ms {direction}, view_id {direction} LIMIT ?"))?;
+            let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|row| Ok((view_row(row)?, row.get::<_, i64>(3)?)));
+            let mut views = Vec::new(); let mut next_cursor = None; let mut last = None;
             for row in rows {
                 if views.len() == limit {
-                    let last: &Value = views.last().expect("nonempty page");
                     next_cursor = Some(Cursor { version:1, project_id:project.clone(), kind:kind.clone(),
-                        after:last["view_id"].as_str().unwrap().to_owned(), through, filters:filters.clone() }.encode()?);
+                        after:last.expect("nonempty page"), through, filters:filters.clone() }.encode()?);
                     break;
                 }
-                crate::exports::emit(&export,&mut views,row?)?;
+                let (view, started_at_ms) = row?;
+                last = Some((started_at_ms, view["view_id"].as_str().unwrap().to_owned()));
+                crate::exports::emit(&export,&mut views,view)?;
             }
             Ok(json!({"views":views,"next_cursor":next_cursor}))
         }).await

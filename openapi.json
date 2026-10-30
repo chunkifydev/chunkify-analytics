@@ -2898,7 +2898,7 @@
       "get": {
         "operationId": "listViews",
         "summary": "List playback attempts",
-        "description": "One row per first retained start, using the same final/latest measurement selection as metrics. Filter by identity, context, dates or has_fatal_error. Order by view_id ascending by default or descending. Cursors bind filters, order, fatal-error selection, project and ingestion watermark. Missing end or error events are not proof of an ongoing or successful playback.",
+        "description": "One row per first retained start, using the same final/latest measurement selection as metrics. Filter by identity, context, dates or has_fatal_error. Order by started_at descending by default (newest first), or ascending with order=asc. Equal start times use view_id in the same direction. Cursors bind filters, order, fatal-error selection, project and ingestion watermark. Missing end or error events are not proof of an ongoing or successful playback.",
         "tags": [
           "Queries"
         ],
@@ -2949,7 +2949,7 @@
             "$ref": "#/components/parameters/cursor"
           },
           {
-            "$ref": "#/components/parameters/order"
+            "$ref": "#/components/parameters/views_order"
           },
           {
             "$ref": "#/components/parameters/has_fatal_error"
@@ -4625,7 +4625,7 @@
           ],
           "default": "asc"
         },
-        "description": "Sort direction, defaulting to asc. Events sort by server ingestion sequence; videos sort by sort_by. Video metric ties use video_id ascending in either direction. Keep the same order with each cursor."
+        "description": "Sort direction. Events and videos default to asc; views default to desc. Events sort by server ingestion sequence, videos by sort_by, and views by started_at with view_id in the same direction for ties. Video metric ties use video_id ascending in either direction. Keep the same order with each cursor."
       },
       "sort_by": {
         "name": "sort_by",
@@ -4795,6 +4795,19 @@
           "maxLength": 4096
         },
         "description": "Exact, case-sensitive page path captured by the player, such as /watch/video. Filter by page_origin as well to distinguish identical paths on different sites. Metrics use the first retained view start; raw events use each event context. Missing values do not match."
+      },
+      "views_order": {
+        "name": "order",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "asc",
+            "desc"
+          ],
+          "default": "desc"
+        },
+        "description": "Sort by started_at and then view_id in this direction. Defaults to newest first. Keep the same order with each cursor."
       }
     },
     "schemas": {

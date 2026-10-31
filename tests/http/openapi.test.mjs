@@ -1451,8 +1451,15 @@ for (const separateReads of [false, true]) test(`location reports use first star
 test("playback scores match JSON reports and CSV, including missing samples", async t => {
   const server = await collector(t);
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const goodScore = 87.20198728264428;
+  const sessionScore = 86.68783991421262;
+  const longStartupScore = 78.40526816831157;
+  const heavyBufferScore = 49.658530379140956;
   for (const [video, startup, playing, rebuffer, outcome, expected] of [
-    ["good", 2000, 9900, 100, "started", 72],
+    ["good", 2000, 9900, 100, "started", goodScore],
+    ["session", 4830.200000286102, 20719.29999923706, 3.40000057220459, "started", sessionScore],
+    ["long-startup", 10000, 10000, 0, "started", longStartupScore],
+    ["heavy-buffer", 0, 9000, 1000, "started", heavyBufferScore],
     ["failed", null, 0, 0, "failed_before_start", 0],
     ["missing", null, 1000, 0, "started", null],
   ]) {
@@ -1466,13 +1473,21 @@ test("playback scores match JSON reports and CSV, including missing samples", as
     assert.equal(view.playback_score.sample_views, Number(expected !== null));
     if (expected === null) assert.equal(view.playback_score.value, null);
     else assert.ok(Math.abs(view.playback_score.value - expected) < 1e-9);
+    const detail = await assertResponse("/v1/views/{view_id}", "get",
+      await fetch(`${server.url}/v1/views/${start.view_id}`, {
+        headers: { Authorization: `Bearer ${server.keys.secret_key}` },
+      }), 200);
+    assert.deepEqual(detail.view.playback_score, view.playback_score);
   }
   const quality = await server.get("/v1/quality");
-  assert.deepEqual(quality.playback_score, { value: 36, sample_views: 2 });
+  const meanScore = (goodScore + sessionScore + longStartupScore + heavyBufferScore) / 5;
+  assert.equal(quality.playback_score.sample_views, 5);
+  assert.ok(Math.abs(quality.playback_score.value - meanScore) < 1e-9);
   const headers = { Authorization: `Bearer ${server.keys.secret_key}` };
   for (const [resource, query, count, score] of [
-    ["quality", {}, "2", "36"],
-    ["videos", { video_id: "good" }, "1", "72"],
+    ["quality", {}, "5", meanScore],
+    ["videos", { video_id: "good" }, "1", goodScore],
+    ["views", { video_id: "session" }, "1", sessionScore],
     ["views", { video_id: "missing" }, "0", ""],
     ["quality", { video_id: "absent" }, "0", ""],
   ]) {
@@ -1481,7 +1496,7 @@ test("playback scores match JSON reports and CSV, including missing samples", as
     assert.equal(row[columns.indexOf("playback_score/sample_views")], count);
     const value = row[columns.indexOf("playback_score/value")];
     if (score === "") assert.equal(value, "");
-    else { assert.notEqual(value, ""); assert.equal(Number(value), Number(score)); }
+    else { assert.notEqual(value, ""); assert.ok(Math.abs(Number(value) - score) < 1e-9); }
   }
 });
 

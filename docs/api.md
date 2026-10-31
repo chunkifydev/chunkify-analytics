@@ -459,6 +459,47 @@ have no startup/buffering sample. Views without a retained start are excluded.
 The MCP server provides the same result through `get_metrics` with
 `{"kind":"quality"}`.
 
+### Playback score
+
+`playback_score` reports a value from 0 to 100 and `sample_views`, the number of
+scored attempts. Each attempt combines startup and smoothness using a weighted
+geometric mean:
+
+```text
+startup = 8 / (8 + startup_time_ms / 1000)
+buffering_ratio = rebuffer_duration_ms / (playing_time_ms + rebuffer_duration_ms)
+smoothness = exp(-10 * buffering_ratio)
+score = 100 * startup^0.30 * smoothness^0.70
+```
+
+The weights give startup 30% and smoothness 70% of the combined score. They are
+heuristic and require calibration against observed playback experiences. The
+score measures startup and uninterrupted playback, not picture quality, and
+does not use interruption count. Startup uses the reported measurement without
+subtracting seek time. Buffering excludes startup, pauses and seeks as measured
+by the SDK.
+
+| Startup | Buffering ratio | Score, rounded |
+| --- | --- | --- |
+| 1 second | 0% | 97 |
+| 5 seconds | 0% | 86 |
+| 10 seconds | 0% | 78 |
+| 1 second | 1% | 90 |
+| 1 second | 5% | 68 |
+| 1 second | 10% | 48 |
+
+A retained fatal playback error or a final `failed_before_start` outcome scores
+zero, even without duration measurements. Other attempts require positive
+playing time and known startup and rebuffer durations. `ended_before_start` and
+`unknown` outcomes are unscored. Missing measurements remain unknown rather than
+counting as zero delay.
+
+Reports average eligible attempt scores equally and include observed zero-score
+failures. With no scored attempts, `value` is null and `sample_views` is zero.
+Session details, video totals, quality totals, breakdowns, timeseries, MCP and CSV
+exports use the same per-attempt calculation. Scores are calculated from retained
+measurements at query time, including for historical attempts.
+
 ### Startup outcomes
 
 Quality adds `startup_outcomes`, also available in quality breakdowns, timeseries

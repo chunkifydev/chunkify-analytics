@@ -37,6 +37,20 @@ MCP exposes the same report through `get_metrics` with `kind=retention` and a
 required `video_id`. CSV uses `resource=retention` and the same query. Both include
 all buckets. Grouping, pagination and sorting are not supported for this report.
 
+## Tab visibility
+
+Events may include `visibility_state`: `visible`, `hidden`, or null when the
+player cannot read tab visibility. Older events omit it. This is the observed
+visibility when the event was recorded, independent of playback state. Hidden
+playback can keep accumulating playing time. A transition to `paused` while
+hidden can be displayed as "Paused in background"; it does not establish who
+caused the pause. Keep that label with the pause that began in the background,
+even if the tab is visible by the time playback resumes. Do not infer background
+pauses for historical events without visibility measurements. With snapshots
+enabled, the SDK records visibility changes immediately. A hidden playing
+interval can be labeled "Playing in background" and remains part of measured
+playing time.
+
 ## Renditions within one playback attempt
 
 Use `GET /v1/views/{view_id}` or MCP `get_view` and follow its cursor to inspect

@@ -83,6 +83,11 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
             .is_some_and(|n| (1..=9_007_199_254_740_991).contains(&n))
     })?;
     field(object, "occurred_at", date)?;
+    if object.contains_key("visibility_state") {
+        field(object, "visibility_state", |v| {
+            v.is_null() || one_of(v, &["visible", "hidden"])
+        })?;
+    }
     for key in [
         "connector_version",
         "player_name",

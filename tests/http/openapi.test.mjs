@@ -125,6 +125,34 @@ const browserContext = {
   screen_width_px: 1920, screen_height_px: 1080, viewport_width_px: 1280, viewport_height_px: 720, pixel_ratio: 2,
 };
 
+test("tab visibility survives ingestion and view history without changing playback states", async t => {
+  const server = await collector(t);
+  const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const start = { ...sample, event_id: randomUUID(), view_id: randomUUID(), visibility_state: "visible" };
+  const pause = { ...start, event_id: randomUUID(), sequence: 2,
+    event_name: "chunkify.video.playback_state_changed", from_state: "playing", to_state: "paused",
+    previous_state_duration_ms: 1000, playhead_seconds: 1, visibility_state: "hidden" };
+  const resume = { ...pause, event_id: randomUUID(), sequence: 3, from_state: "paused", to_state: "playing", visibility_state: "visible" };
+  const unavailable = { ...pause, event_id: randomUUID(), sequence: 4, visibility_state: null };
+  const legacy = { ...pause, event_id: randomUUID(), sequence: 5 };
+  delete legacy.visibility_state;
+  const events = [start, pause, resume, unavailable, legacy];
+  for (const event of events) {
+    assertRequest("/v1/events", "post", event);
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  const response = await fetch(`${server.url}/v1/views/${start.view_id}?limit=100`, {
+    headers: { Authorization: `Bearer ${server.keys.secret_key}` },
+  });
+  const detail = await assertResponse("/v1/views/{view_id}", "get", response, 200);
+  assert.deepEqual(detail.events.map(record => record.event), events);
+  for (const visibility_state of ["background", true, 1, {}]) {
+    const invalid = { ...start, event_id: randomUUID(), visibility_state };
+    assert.throws(() => assertRequest("/v1/events", "post", invalid), assert.AssertionError);
+    await server.post("/v1/events", JSON.stringify(invalid), 400);
+  }
+});
+
 test("documented native requests, read responses, filters and pagination match the public API", async t => {
   const events = sdkPlayback(t).map(event => ({ ...event, browser_context: browserContext, custom_tag: "preserved" }));
   component("BrowserContext", browserContext);

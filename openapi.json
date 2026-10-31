@@ -5299,6 +5299,18 @@
               "$ref": "#/components/schemas/RenditionPlayingTime"
             }
           },
+          "visibility_state": {
+            "description": "Tab visibility when the event was recorded. Hidden does not imply paused playback or identify the cause of a pause. Missing on older events; null when unavailable.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "visible",
+              "hidden",
+              null
+            ]
+          },
           "browser_context": {
             "description": "Optional browser information supplied by the player."
           }

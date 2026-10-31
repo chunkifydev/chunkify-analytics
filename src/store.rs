@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread};
 
 pub struct DatabaseWorker {
-    database: thread::JoinHandle<duckdb::Result<()>>,
+    database: thread::JoinHandle<Result<(), String>>,
     reader: Option<thread::JoinHandle<()>>,
     // Keep the writer alive until readers finish.
     writer: Writer,
@@ -22,7 +22,7 @@ impl DatabaseWorker {
         drop(self.writer);
         let database = self.database.join();
         reader?;
-        Ok(database?.map_err(|e| e.to_string()))
+        database
     }
 }
 

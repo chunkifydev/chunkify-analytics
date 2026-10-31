@@ -4,11 +4,14 @@ import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer, request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { attachAnalytics } from "@chunkify/analytics";
 import { createHttpAdapter } from "@chunkify/analytics/http";
+import { assertResponse } from "./openapi-support.mjs";
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 
@@ -24,7 +27,7 @@ function events() {
   return result;
 }
 
-async function installation(t, storage, retention = 0, environment = {}, server = {}) {
+async function installation(t, storage, retention = 0, environment = {}, server = {}, batch = {}) {
   let directory = await mkdtemp(join(tmpdir(), "chunkify-storage-test-"));
   const directories = [directory];
   let child, closed;
@@ -35,11 +38,16 @@ async function installation(t, storage, retention = 0, environment = {}, server 
     config = join(directory, "config.toml");
     const serverFields = Object.entries(server).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
     const fields = Object.entries(storage).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
-    await writeFile(config, `data_dir = "state"\n[server]\nbind = "127.0.0.1:0"\n${serverFields}\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = 86400\n`, { mode: 0o600 });
+    const batchFields = Object.entries(batch).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
+    await writeFile(config, `data_dir = "state"\n[server]\nbind = "127.0.0.1:0"\n${serverFields}\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = 86400\n[batch]\n${batchFields}\n`, { mode: 0o600 });
   }
-  async function stop() {
-    if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-    if (closed) assert.equal((await closed)[0], 0);
+  async function stop(signal = "SIGTERM", expectedCode = 0) {
+    if (child && child.exitCode === null && child.signalCode === null) child.kill(signal);
+    if (closed) {
+      const [code, receivedSignal] = await closed;
+      if (signal === "SIGTERM") assert.equal(code, expectedCode, app.logs());
+      else assert.equal(receivedSignal, signal);
+    }
     child = closed = undefined;
   }
   t.after(async () => { await stop(); for (const path of directories) await rm(path, { recursive: true, force: true }); });
@@ -127,6 +135,178 @@ function s3Settings() {
     secret_access_key: process.env.CHUNKIFY_S3_TEST_SECRET_ACCESS_KEY ?? "test",
     url_style: "path", use_ssl: process.env.CHUNKIFY_S3_TEST_USE_SSL === "true" };
 }
+
+async function waitFor(check, description, timeout = 15000) {
+  const deadline = Date.now() + timeout;
+  while (!(await check())) {
+    assert.ok(Date.now() < deadline, `Timed out waiting for ${description}`);
+    await delay(50);
+  }
+}
+
+test("buffered S3 ingestion responds before upload and reads do not flush or postpone the batch", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, { ...s3Settings(), flush_interval_seconds: 2 });
+  await app.command(["init"]);
+  await app.start();
+  const first = events()[0], second = events()[0];
+  const before = Date.now();
+  const response = await fetch(`${app.url}/v1/events`, { method: "POST",
+    headers: { "content-type": "application/json", "x-chunkify-ingest-key": app.keys.public_key },
+    body: JSON.stringify(first) });
+  assert.deepEqual(await assertResponse("/v1/events", "post", response, 201), { accepted: true, duplicate: false });
+  assert.ok(Date.now() - before < 1000, "acceptance must not wait for the upload timer");
+  assert.deepEqual((await app.get("/v1/events")).events, []);
+  const exportResponse = await fetch(`${app.url}/v1/exports`, { method: "POST",
+    headers: { authorization: `Bearer ${app.keys.secret_key}`, "content-type": "application/json" },
+    body: JSON.stringify({ resource: "events" }) });
+  assert.equal(exportResponse.status, 201);
+  const link = await exportResponse.json();
+  const download = await fetch(link.download_url);
+  assert.equal(download.status, 200);
+  assert.equal((await download.text()).trimEnd().split("\r\n").length, 1, "exports must show only uploaded events");
+  await delay(1200);
+  await app.send(second);
+  await app.send(first);
+  assert.deepEqual((await app.get("/v1/events")).events, []);
+  assert.doesNotMatch(app.logs(), /batch_saved/);
+  await waitFor(() => /batch_saved/.test(app.logs()), "the first receipt's upload deadline", 1800);
+  assert.match(app.logs(), /requests=3 received=3 inserted=3/);
+  const saved = (await app.get("/v1/events")).events;
+  assert.deepEqual(saved.map(row => row.event), [first, second, first]);
+  assert.ok(Date.parse(saved[0].received_at) >= before);
+  assert.ok(Date.parse(saved[0].received_at) < before + 1000, "receipt time precedes upload");
+  await app.replaceTask();
+  assert.deepEqual((await app.get("/v1/events")).events, saved);
+});
+
+for (const [limit, batch, extra, expectedBatch] of [
+  ["event", { max_events: 2 }, "", /requests=2 received=2 inserted=2/],
+  ["byte", { max_bytes: 16384 }, "x".repeat(4000), /requests=1 received=1 inserted=1/],
+]) test(`buffered S3 flushes early at the ${limit} limit`, {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, { ...s3Settings(), flush_interval_seconds: 60 }, 0, {}, {}, batch);
+  await app.command(["init"]);
+  await app.start();
+  const records = [events()[0], events()[0]].map(event => ({ ...event, extra }));
+  for (const event of records) await app.send(event);
+  await waitFor(() => /batch_saved/.test(app.logs()), "a full batch upload");
+  assert.match(app.logs(), expectedBatch);
+  await app.replaceTask();
+  assert.deepEqual((await app.get("/v1/events")).events.map(row => row.event), records);
+});
+
+test("buffered S3 holds admission budgets until upload and releases them afterward", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, { ...s3Settings(), flush_interval_seconds: 1 }, 0, {}, {}, { queue_max_requests: 1 });
+  await app.command(["init"]);
+  await app.start();
+  await app.send(events()[0]);
+  await app.send(events()[0], undefined, 503);
+  await waitFor(() => /batch_saved/.test(app.logs()), "upload to release the request budget");
+  await app.send(events()[0]);
+  await app.replaceTask();
+  assert.equal((await app.get("/v1/events")).events.length, 2);
+});
+
+test("buffered S3 defaults can collect over 100 requests and flush at 10 MiB", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, { ...s3Settings(), flush_interval_seconds: 60 }, 0, {}, { ingest_per_second: 10000 });
+  await app.command(["init"]);
+  await app.start();
+  const payload = "x".repeat(4000);
+  let sent = 0;
+  for (; sent < 150; sent++) await app.send({ ...events()[0], extra: payload });
+  assert.doesNotMatch(app.logs(), /batch_saved/, "old event and byte limits must not flush the new buffer");
+  while (!/batch_saved/.test(app.logs()) && sent < 2000) {
+    await app.send({ ...events()[0], extra: payload });
+    sent++;
+  }
+  await waitFor(() => /batch_saved/.test(app.logs()), "the default 10 MiB buffer upload");
+  const size = Number(app.logs().match(/batch_saved[^\n]* bytes=(\d+)/)[1]);
+  assert.ok(size > 10485760 - 65536 && size <= 10485760, `unexpected batch size: ${size}`);
+  await app.replaceTask();
+  assert.equal((await app.get("/v1/summary")).views, sent);
+});
+
+test("buffered S3 drains on graceful shutdown and can lose the last minute on a crash", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, { ...s3Settings(), flush_interval_seconds: 60 });
+  await app.command(["init"]);
+  await app.start();
+  const customer = JSON.parse(await app.command(["project", "create", "Buffered customer"]));
+  const first = events()[0], second = events()[0];
+  await app.send(first);
+  await app.send(second, customer.public_key);
+  assert.deepEqual((await app.get("/v1/events")).events, []);
+  assert.deepEqual((await app.get("/v1/events", customer.secret_key)).events, []);
+  assert.doesNotMatch(app.logs(), /batch_saved/);
+  const before = Date.now();
+  await app.replaceTask();
+  assert.ok(Date.now() - before < 15000, "shutdown should flush without waiting a minute");
+  assert.deepEqual((await app.get("/v1/events")).events.map(row => row.event), [first]);
+  assert.deepEqual((await app.get("/v1/events", customer.secret_key)).events.map(row => row.event), [second]);
+  await app.send(events()[0]);
+  assert.doesNotMatch(app.logs(), /batch_saved/);
+  await app.stop("SIGKILL");
+  await app.start();
+  assert.deepEqual((await app.get("/v1/events")).events.map(row => row.event), [first]);
+});
+
+test("buffered S3 retries partial uploads without duplicating files or dropping later requests", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const storage = s3Settings();
+  const upstream = `${storage.use_ssl ? "https" : "http"}://${storage.endpoint}`;
+  const successful = new Set();
+  let fail = true;
+  const proxy = createServer((request, response) => {
+    const eventWrite = request.method === "PUT" && request.url.includes(".parquet");
+    if (eventWrite && fail && successful.size > 0) {
+      request.resume();
+      response.writeHead(403, { "content-type": "application/xml" });
+      response.end("<Error><Code>AccessDenied</Code><Message>Injected test failure</Message></Error>");
+      return;
+    }
+    const forward = (storage.use_ssl ? httpsRequest : httpRequest)(new URL(request.url, upstream), {
+      method: request.method, headers: request.headers,
+    }, result => {
+      if (eventWrite && result.statusCode >= 200 && result.statusCode < 300) successful.add(request.url);
+      response.writeHead(result.statusCode, result.headers);
+      result.pipe(response);
+    });
+    forward.on("error", () => { response.writeHead(502); response.end(); });
+    request.pipe(forward);
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => new Promise(resolve => { proxy.close(resolve); proxy.closeAllConnections(); }));
+  const app = await installation(t, { ...storage, endpoint: `127.0.0.1:${proxy.address().port}`,
+    use_ssl: false, flush_interval_seconds: 1 });
+  await app.command(["init"]);
+  await app.start();
+  const other = JSON.parse(await app.command(["project", "create", "Retry customer"]));
+  const records = [events()[0], events()[0], events()[0]];
+  await app.send(records[0]);
+  await app.send(records[1], other.public_key);
+  await waitFor(() => /batch_failed/.test(app.logs()), "an upload failure", 30000);
+  assert.equal(successful.size, 1, "one project must upload before the injected failure");
+  await app.send(records[2]);
+  fail = false;
+  await waitFor(() => (app.logs().match(/batch_saved/g) ?? []).length === 2, "both the retried and later batches", 30000);
+  assert.equal(successful.size, 3, "the successful part of the retried batch must reuse its object name");
+  assert.deepEqual((await app.get("/v1/events")).events.map(row => row.event), [records[0], records[2]]);
+  assert.deepEqual((await app.get("/v1/events", other.secret_key)).events.map(row => row.event), [records[1]]);
+  await app.send(events()[0]);
+  fail = true;
+  await app.stop("SIGTERM", 1);
+  assert.match(app.logs(), /Cannot upload buffered S3 events during shutdown/);
+});
 
 test("S3 stores repeated events, isolates projects and survives task replacement", {
   skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",

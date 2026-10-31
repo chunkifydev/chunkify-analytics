@@ -155,6 +155,10 @@ impl Config {
             );
         }
         let backend = crate::backend::Backend::load(settings)?;
+        let batch = crate::writer::BatchConfig::load(
+            settings,
+            matches!(&backend, crate::backend::Backend::S3(s3) if !s3.flush_interval.is_zero()),
+        )?;
         if matches!(backend, crate::backend::Backend::S3(_))
             && settings.var("experimental.read_worker").as_deref() == Ok("true")
         {
@@ -200,7 +204,7 @@ impl Config {
             mcp_allowed_hosts,
             checkpoint_threshold_mib,
             duckdb_threads,
-            batch: crate::writer::BatchConfig::load(settings)?,
+            batch,
             separate_reads: settings
                 .var("experimental.read_worker")
                 .unwrap_or_else(|_| "false".into())

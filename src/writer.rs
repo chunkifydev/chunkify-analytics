@@ -25,7 +25,10 @@ pub struct BatchConfig {
 }
 
 impl BatchConfig {
-    pub fn load(settings: &crate::settings::Settings) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(
+        settings: &crate::settings::Settings,
+        buffered_s3: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         fn number(
             settings: &crate::settings::Settings,
             name: &str,
@@ -43,7 +46,12 @@ impl BatchConfig {
             }
             Ok(value)
         }
-        let max_bytes = number(settings, "batch.max_bytes", 1048576, 1, 67108864)?;
+        let (max_events, max_bytes, queue_bytes, queue_requests) = if buffered_s3 {
+            (10000, 10485760, 33554432, 4096)
+        } else {
+            (100, 1048576, 16777216, 256)
+        };
+        let max_bytes = number(settings, "batch.max_bytes", max_bytes, 1, 67108864)?;
         Ok(Self {
             bulk: match settings
                 .var("batch.insert_mode")
@@ -54,17 +62,23 @@ impl BatchConfig {
                 "row" => false,
                 _ => return Err("batch.insert_mode must be bulk or row".into()),
             },
-            max_events: number(settings, "batch.max_events", 100, 1, 10000)?,
+            max_events: number(settings, "batch.max_events", max_events, 1, 10000)?,
             max_bytes,
             delay: Duration::from_millis(number(settings, "batch.delay_ms", 10, 0, 1000)? as u64),
             queue_bytes: number(
                 settings,
                 "batch.queue_max_bytes",
-                16777216,
+                queue_bytes,
                 max_bytes,
                 268435456,
             )?,
-            queue_requests: number(settings, "batch.queue_max_requests", 256, 1, 4096)?,
+            queue_requests: number(
+                settings,
+                "batch.queue_max_requests",
+                queue_requests,
+                1,
+                4096,
+            )?,
         })
     }
 }
@@ -142,6 +156,7 @@ pub struct Writer {
     budget: Arc<Semaphore>,
     config: BatchConfig,
     profile: bool,
+    buffered: bool,
 }
 
 impl Writer {
@@ -149,7 +164,7 @@ impl Writer {
         connection: Connection,
         config: BatchConfig,
         profile: bool,
-    ) -> duckdb::Result<(Self, thread::JoinHandle<duckdb::Result<()>>)> {
+    ) -> duckdb::Result<(Self, thread::JoinHandle<Result<(), String>>)> {
         Self::start_with_storage(connection, config, profile, None)
     }
 
@@ -158,7 +173,7 @@ impl Writer {
         config: BatchConfig,
         profile: bool,
         remote: Option<Arc<crate::s3_store::RemoteStore>>,
-    ) -> duckdb::Result<(Self, thread::JoinHandle<duckdb::Result<()>>)> {
+    ) -> duckdb::Result<(Self, thread::JoinHandle<Result<(), String>>)> {
         if remote.is_none() && config.bulk {
             crate::storage::create_stage(&connection)?;
         }
@@ -166,61 +181,78 @@ impl Writer {
         let budget = Arc::new(Semaphore::new(config.queue_bytes));
         let worker_config = config.clone();
         let mut measurements = Profile::new(profile, &connection, "writer")?;
+        let buffered = remote
+            .as_ref()
+            .is_some_and(|remote| !remote.flush_interval().is_zero());
         let worker = thread::spawn(move || {
             let profile = &mut measurements;
-            let mut pending = None;
-            while let Some(job) = pending.take().or_else(|| receiver.recv().ok()) {
-                match job {
-                    Job::Call(operation) => operation(&mut connection, profile),
-                    Job::Write(first) => {
-                        let deadline = Instant::now() + worker_config.delay;
-                        let mut records = first.rows.len();
-                        let mut bytes = first.bytes;
-                        let mut batch = vec![first];
-                        while records < worker_config.max_events && bytes < worker_config.max_bytes
-                        {
-                            if Instant::now() >= deadline {
-                                break;
-                            }
-                            let next = match receiver.try_recv() {
-                                Ok(job) => Some(job),
-                                Err(mpsc::TryRecvError::Empty) => receiver
-                                    .recv_timeout(
-                                        deadline.saturating_duration_since(Instant::now()),
-                                    )
-                                    .ok(),
-                                Err(mpsc::TryRecvError::Disconnected) => None,
-                            };
-                            match next {
-                                Some(Job::Write(request))
-                                    if records + request.rows.len() <= worker_config.max_events
-                                        && bytes + request.bytes <= worker_config.max_bytes =>
-                                {
-                                    records += request.rows.len();
-                                    bytes += request.bytes;
-                                    batch.push(request);
-                                }
-                                Some(job) => {
-                                    pending = Some(job);
+            if buffered {
+                buffered::run(
+                    &mut connection,
+                    receiver,
+                    &worker_config,
+                    remote.as_deref().expect("buffered S3 storage"),
+                    profile,
+                )?;
+            } else {
+                let mut pending = None;
+                while let Some(job) = pending.take().or_else(|| receiver.recv().ok()) {
+                    match job {
+                        Job::Call(operation) => operation(&mut connection, profile),
+                        Job::Write(first) => {
+                            let deadline = Instant::now() + worker_config.delay;
+                            let mut records = first.rows.len();
+                            let mut bytes = first.bytes;
+                            let mut batch = vec![first];
+                            while records < worker_config.max_events
+                                && bytes < worker_config.max_bytes
+                            {
+                                if Instant::now() >= deadline {
                                     break;
                                 }
-                                None => break,
+                                let next = match receiver.try_recv() {
+                                    Ok(job) => Some(job),
+                                    Err(mpsc::TryRecvError::Empty) => receiver
+                                        .recv_timeout(
+                                            deadline.saturating_duration_since(Instant::now()),
+                                        )
+                                        .ok(),
+                                    Err(mpsc::TryRecvError::Disconnected) => None,
+                                };
+                                match next {
+                                    Some(Job::Write(request))
+                                        if records + request.rows.len()
+                                            <= worker_config.max_events
+                                            && bytes + request.bytes <= worker_config.max_bytes =>
+                                    {
+                                        records += request.rows.len();
+                                        bytes += request.bytes;
+                                        batch.push(request);
+                                    }
+                                    Some(job) => {
+                                        pending = Some(job);
+                                        break;
+                                    }
+                                    None => break,
+                                }
                             }
+                            flush(
+                                &mut connection,
+                                batch,
+                                records,
+                                bytes,
+                                worker_config.bulk,
+                                remote.as_deref(),
+                                profile,
+                            );
                         }
-                        flush(
-                            &mut connection,
-                            batch,
-                            records,
-                            bytes,
-                            worker_config.bulk,
-                            remote.as_deref(),
-                            profile,
-                        );
                     }
                 }
             }
             profile.report();
-            connection.execute_batch("CHECKPOINT")
+            connection
+                .execute_batch("CHECKPOINT")
+                .map_err(|error| error.to_string())
         });
         Ok((
             Self {
@@ -228,6 +260,7 @@ impl Writer {
                 budget,
                 config,
                 profile,
+                buffered,
             },
             worker,
         ))
@@ -301,6 +334,7 @@ impl Writer {
         }
         let project_permit = project.admit(bytes)?;
         let (reply, receiver) = oneshot::channel();
+        let accepted = rows.len();
         let request = WriteRequest {
             rows,
             bytes,
@@ -313,6 +347,9 @@ impl Writer {
         self.sender
             .try_send(Job::Write(request))
             .map_err(|_| ApiError::unavailable())?;
+        if self.buffered {
+            return Ok(accepted);
+        }
         receiver.await.map_err(|_| ApiError::unavailable())?
     }
 }
@@ -326,6 +363,37 @@ fn flush(
     remote: Option<&crate::s3_store::RemoteStore>,
     profile: &mut Profile,
 ) {
+    let result = save_batch(
+        connection,
+        &batch,
+        (records, bytes),
+        bulk,
+        remote,
+        &mut RemoteBatch::default(),
+        profile,
+    );
+    for (index, request) in batch.into_iter().enumerate() {
+        let response = match &result {
+            Ok(counts) => Ok(counts[index]),
+            Err(_) => Err(ApiError::internal()),
+        };
+        // Release buffers and permits before waking the request's consumer.
+        drop(request.rows);
+        drop(request._permit);
+        drop(request.project_permit);
+        let _ = request.reply.send(response);
+    }
+}
+
+fn save_batch(
+    connection: &mut Connection,
+    batch: &[WriteRequest],
+    (records, bytes): (usize, usize),
+    bulk: bool,
+    remote: Option<&crate::s3_store::RemoteStore>,
+    remote_batch: &mut RemoteBatch,
+    profile: &mut Profile,
+) -> Result<Vec<usize>, &'static str> {
     let write_started = Instant::now();
     let backend = if remote.is_some() { "s3" } else { "duckdb" };
     let queue_ms = batch
@@ -340,13 +408,13 @@ fn flush(
         "batch_started"
     );
     let started = profile.start();
-    for request in &batch {
+    for request in batch {
         profile.queue("ingest", Some(request.queued), started);
         profile.duration("prepare_request", request.preparation);
     }
     let result = match remote {
-        Some(remote) => write_remote(connection, &batch, remote),
-        None => write_batch(connection, &batch, bulk, profile),
+        Some(remote) => write_remote(connection, batch, remote, remote_batch),
+        None => write_batch(connection, batch, bulk, profile),
     };
     profile.executed("ingest", started);
     let duration_ms = write_started.elapsed().as_millis();
@@ -377,17 +445,20 @@ fn flush(
             "batch_failed"
         ),
     }
-    for (index, request) in batch.into_iter().enumerate() {
-        let response = match &result {
-            Ok(counts) => Ok(counts[index]),
-            Err(_) => Err(ApiError::internal()),
-        };
-        // Release prepared buffers before waking the queue consumer, which may
-        // immediately reserve the same byte budget for its next batch.
-        drop(request.rows);
-        drop(request._permit);
-        drop(request.project_permit);
-        let _ = request.reply.send(response);
+    result
+}
+
+struct RemoteBatch {
+    id: uuid::Uuid,
+    staged: bool,
+}
+
+impl Default for RemoteBatch {
+    fn default() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4(),
+            staged: false,
+        }
     }
 }
 
@@ -395,11 +466,12 @@ fn write_remote(
     connection: &Connection,
     batch: &[WriteRequest],
     remote: &crate::s3_store::RemoteStore,
+    state: &mut RemoteBatch,
 ) -> Result<Vec<usize>, &'static str> {
-    connection
-        .execute("DELETE FROM collector_parquet_stage", [])
-        .map_err(|_| "clear_stage")?;
-    let result = (|| {
+    if !state.staged {
+        connection
+            .execute("DELETE FROM collector_parquet_stage", [])
+            .map_err(|_| "clear_stage")?;
         let mut appender = connection
             .appender_to_catalog_and_db("collector_parquet_stage", "temp", "main")
             .map_err(|_| "append_events")?;
@@ -420,11 +492,14 @@ fn write_remote(
         }
         appender.flush().map_err(|_| "append_events")?;
         drop(appender);
-        remote.publish(connection).map_err(|_| "publish")
-    })();
-    let cleanup = connection.execute("DELETE FROM collector_parquet_stage", []);
-    result?;
-    cleanup.map_err(|_| "clear_stage")?;
+        state.staged = true;
+    }
+    remote
+        .publish(connection, state.id)
+        .map_err(|_| "publish")?;
+    connection
+        .execute("DELETE FROM collector_parquet_stage", [])
+        .map_err(|_| "clear_stage")?;
     Ok(batch.iter().map(|request| request.rows.len()).collect())
 }
 
@@ -533,3 +608,5 @@ fn write_bulk(
 
 #[cfg(test)]
 mod lookup_tests;
+
+mod buffered;

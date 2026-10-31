@@ -72,19 +72,65 @@ Events are compressed Parquet files, grouped by project and UTC receipt date:
 analytics/events/project_id=live/received_date=2026-10-27/batch-<id>.parquet
 ```
 
-S3 stores every delivery. Repeated event IDs remain separate rows. Success means
-all files for the batch finished uploading. A failed batch can leave some files
-stored; retrying can repeat events. Requests still waiting in memory do not
-survive a crash.
+S3 stores every delivery. Repeated event IDs remain separate rows. By default,
+success means all files for the batch finished uploading. A failed batch can
+leave some files stored; retrying the request can repeat events. Requests still
+waiting in memory do not survive a crash.
+
+### Buffered S3 writes
+
+To collect up to one minute of events before uploading, add this field to your
+existing `[storage]` section and restart the server:
+
+```toml
+flush_interval_seconds = 60
+```
+
+The default is `0`, which waits for storage before responding. A positive value
+from 1 to 3600 enables memory buffering. Requests keep the existing HTTP 201 with
+`{"accepted":true,"duplicate":false}` after entering the bounded buffer, before
+S3 storage completes. Buffered events can be lost if the process crashes or is
+killed. With `60`, the normal unpersisted window is up to one minute, plus upload
+time; storage failures can extend it.
+
+The first request starts the timer. Later requests and reads do not reset it.
+The writer uploads sooner when `[batch].max_events` or `max_bytes` fills, and
+on graceful shutdown. Each upload creates one file per project and UTC receipt
+date. Empty intervals create no files. Buffered S3 defaults to 10 MiB of prepared
+buffers and 10,000 events per batch, with a 32 MiB queue budget and up to 4096
+outstanding requests. These are memory sizes, not compressed Parquet file sizes.
+Explicit `[batch]` settings override these defaults, so remove any old 100-event
+or 1 MiB overrides when enabling buffering. Without buffering, the smaller local
+and S3 defaults still apply.
+
+Tune these fields in `config.toml` as traffic changes. For example:
+
+```toml
+[batch]
+max_bytes = 10485760
+max_events = 10000
+queue_max_bytes = 33554432
+queue_max_requests = 4096
+```
+
+Analytics reads and exports show uploaded events only and never force an early
+upload. Failed uploads remain in memory and retry after the configured interval,
+using the same object names and event ordering to avoid extra files on retry.
+Queue budgets remain held until successful upload; full budgets reject new
+requests with 503. A failed final upload makes graceful shutdown exit with an
+error. There is no durable queue, so preserve the process during an S3 outage.
+
+### Retention and file counts
 
 Expiration uses server receipt time. It defaults to 30 days, and projects can
 override it. Set `seconds = 0` under `[retention]` to keep events indefinitely. Queries
 hide expired rows immediately; cleanup removes a file after all its rows expire.
 There is no manual event deletion command.
 
-For busy installations, a longer `[batch].delay_ms` and larger `max_events` can
-reduce small files. Both also affect write latency. Use expiration to bound
-history; queries cost more as retained file counts grow.
+S3 buffering and larger batch limits can reduce small files. Without buffering,
+a longer `[batch].delay_ms` can group more concurrent requests but also increases
+response latency. Use expiration to bound history; queries cost more as retained
+file counts grow.
 
 Keep bucket lifecycle rules from removing active data or `keys.json`. With bucket
 versioning, configure expiry of old versions too. Changing the backend or prefix

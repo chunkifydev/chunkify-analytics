@@ -89,6 +89,10 @@ struct EventFile {
 }
 
 impl RemoteStore {
+    pub fn flush_interval(&self) -> Duration {
+        self.config.flush_interval
+    }
+
     pub fn open(config: S3Config, connection: &Connection, directory: &Path) -> Result<Self> {
         let extensions = directory.join("extensions");
         std::fs::create_dir_all(&extensions)?;
@@ -245,7 +249,11 @@ impl RemoteStore {
         Ok(())
     }
 
-    pub fn publish(&self, connection: &Connection) -> std::result::Result<(), ApiError> {
+    pub fn publish(
+        &self,
+        connection: &Connection,
+        batch_id: uuid::Uuid,
+    ) -> std::result::Result<(), ApiError> {
         let groups = connection
             .prepare(
                 "SELECT project_id, epoch_ms(received_at_ms)::DATE::VARCHAR,
@@ -263,8 +271,7 @@ impl RemoteStore {
         for (project, date, received, count) in groups {
             let key = format!(
                 "{}events/project_id={project}/received_date={date}/batch-{received}-{count}-{}.parquet",
-                self.config.prefix,
-                uuid::Uuid::new_v4()
+                self.config.prefix, batch_id
             );
             connection.execute_batch(&format!("COPY (SELECT * FROM collector_parquet_stage WHERE project_id = {} AND epoch_ms(received_at_ms)::DATE = DATE {})
                 TO {} (FORMAT parquet, COMPRESSION zstd);", literal(&project), literal(&date), literal(&self.config.uri(&key))))?;

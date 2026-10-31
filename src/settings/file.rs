@@ -68,6 +68,7 @@ struct Duckdb {
 #[serde(default, deny_unknown_fields)]
 struct Storage {
     backend: Option<String>,
+    flush_interval_seconds: Option<u64>,
     path: Option<PathBuf>,
     url: Option<String>,
     endpoint: Option<String>,
@@ -124,6 +125,12 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         ..Settings::default()
     };
     let mut storage = config.storage;
+    if let Some(value) = storage.flush_interval_seconds {
+        settings.values.insert(
+            "storage.flush_interval_seconds".into(),
+            value.to_string().into(),
+        );
+    }
     if let Some(path) = storage.path.take() {
         let path = if path.is_absolute() {
             path

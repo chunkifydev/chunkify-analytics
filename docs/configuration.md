@@ -61,6 +61,7 @@ See [storage](storage.md) for local and S3/R2 examples.
 | `storage.session_token` | Unset | Optional temporary-credential token. |
 | `storage.url_style` | `path` | `path` or `vhost` bucket addressing. |
 | `storage.use_ssl` | `true` | HTTPS for S3 connections; `false` selects HTTP. |
+| `storage.flush_interval_seconds` | `0` | S3 only. `0` waits for uploads before responding. Values 1..3600 buffer events in memory and return the existing HTTP 201 response immediately. Upload after this many seconds from the first buffered request, or sooner when a batch fills. Set `60` for a one-minute window. See [storage guarantees](storage.md#buffered-s3-writes). |
 
 ## Application settings
 
@@ -83,15 +84,15 @@ See [storage](storage.md) for local and S3/R2 examples.
 | --- | --- | --- |
 | `server.max_body_bytes` | `65536` | Maximum JSON request body size in bytes. Must be positive. |
 | `server.ingest_per_second` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
-| `batch.queue_max_bytes` | `16777216` | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
-| `batch.queue_max_requests` | `256` | Database channel capacity, shared by writes, reads and maintenance. Range 1..4096. The byte budget also applies to writes. |
+| `batch.queue_max_bytes` | `16777216`; `33554432` for buffered S3 | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
+| `batch.queue_max_requests` | `256`; `4096` for buffered S3 | Database channel capacity, shared by writes, reads and maintenance. Also bounds per-project outstanding writes. Range 1..4096. The byte budget also applies to writes. |
 
 ### Advanced performance settings
 
 | TOML field | Default | Meaning |
 | --- | --- | --- |
-| `batch.max_events` | `100` | Maximum records per write batch, including duplicates. Range 1..10000. A whole request must fit. |
-| `batch.max_bytes` | `1048576` | Maximum prepared request-buffer bytes per batch. Range 1..67108864. See write batching below. |
+| `batch.max_events` | `100`; `10000` for buffered S3 | Maximum records per write batch, including duplicates. Range 1..10000. A whole request must fit. |
+| `batch.max_bytes` | `1048576`; `10485760` for buffered S3 | Maximum prepared request-buffer bytes per batch. Range 1..67108864. See write batching below. |
 | `batch.delay_ms` | `10` | Maximum time the worker spends collecting a batch. Range 0..1000 ms. `0` gives each request its own batch. |
 | `duckdb.threads` | Automatic | Optional DuckDB execution thread count, from 1..256. Applies to the shared database used by writes and reads. HTTP runs separately. |
 | `duckdb.checkpoint_threshold_mib` | `16` | DuckDB's automatic checkpoint threshold, in MiB. Integer from 1..1024. Local storage only. Larger values allow a larger write-ahead log between checkpoints; see below. |
@@ -133,6 +134,10 @@ and optional shutdown-profile output is independent of `logging.level`.
 Concurrent writes share batches up to the event, byte or delay limit. Reads can
 flush a pending batch early. A request larger than either batch limit returns
 413. Increase both limits when accepting larger events.
+
+With S3 buffering enabled, `storage.flush_interval_seconds` replaces the batch
+collection delay. Reads do not flush buffered events or reset the deadline.
+The event, byte and queue limits still apply; full batches upload early.
 
 Ingestion rate limits return 429 with `Retry-After: 1`. Full request or write-buffer budgets
 return 503. The byte budget covers prepared writes, not total process memory.

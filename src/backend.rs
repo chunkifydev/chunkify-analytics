@@ -1,6 +1,6 @@
 //! Storage selection and connection settings. Credentials are never formatted in diagnostics.
 use crate::settings::Settings;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -12,6 +12,7 @@ pub enum Backend {
 
 #[derive(Clone)]
 pub struct S3Config {
+    pub flush_interval: Duration,
     pub bucket: String,
     pub prefix: String,
     pub endpoint: Option<String>,
@@ -97,7 +98,15 @@ impl S3Config {
             .unwrap_or_else(|_| "true".into())
             .parse()
             .map_err(|_| "S3 use_ssl must be true or false")?;
+        let flush_interval = settings
+            .var("storage.flush_interval_seconds")
+            .unwrap_or_else(|_| "0".into())
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds <= 3600)
+            .ok_or("storage.flush_interval_seconds must be between 0 and 3600")?;
         Ok(Self {
+            flush_interval: Duration::from_secs(flush_interval),
             bucket: bucket.into(),
             prefix: if prefix.is_empty() {
                 String::new()

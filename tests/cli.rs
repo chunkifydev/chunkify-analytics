@@ -71,6 +71,40 @@ fn flags_override_environment_and_configuration_check_needs_no_data_directory() 
 }
 
 #[test]
+fn s3_buffer_interval_is_validated_from_toml_without_contacting_storage() {
+    let directory =
+        std::env::temp_dir().join(format!("chunkify-buffer-config-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).unwrap();
+    let config = directory.join("config.toml");
+    for (value, valid) in [
+        ("0", true),
+        ("1", true),
+        ("60", true),
+        ("3600", true),
+        ("3601", false),
+        ("-1", false),
+        ("1.5", false),
+        ("\"60\"", false),
+    ] {
+        std::fs::write(&config, format!(
+            "[storage]\nbackend = \"s3\"\nurl = \"s3://unused-buffer-test/analytics/\"\nflush_interval_seconds = {value}\n"
+        )).unwrap();
+        let output = run(&["--config", config.to_str().unwrap(), "config", "check"]);
+        assert_eq!(output.status.success(), valid, "{value}: {output:?}");
+        if !valid {
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                error.contains("flush_interval_seconds")
+                    || error.contains("Invalid TOML configuration"),
+                "{error}"
+            );
+        }
+    }
+    assert!(!directory.join("data").exists());
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn data_directory_flag_is_global_and_controls_initialization() {
     let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
     let output = run(&["init", "--data-dir", directory.to_str().unwrap()]);

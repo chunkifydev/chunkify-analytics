@@ -247,10 +247,10 @@ async fn playback_scores_agree_across_sessions_videos_quality_and_buckets() {
         store.call("score_fixture", |db| {
             db.execute_batch("INSERT INTO events(event_id,project_id,view_id,video_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,context_browser_name,playing_time_ms,e_startup_time_ms,e_rebuffer_duration_ms,e_startup_outcome)
                 SELECT id||'-start','default',id,'video','chunkify.video.view_started',1,1000,1000,'{}',0,'Chrome',NULL,NULL,NULL,NULL
-                FROM (VALUES ('perfect'),('slow'),('buffer'),('combined'),('fatal'),('missing'),('pending'),('exit')) AS v(id);
+                FROM (VALUES ('perfect'),('slow'),('buffer'),('combined'),('session'),('long-startup'),('heavy-buffer'),('fatal'),('missing'),('pending'),('exit')) AS v(id);
                 INSERT INTO events(event_id,project_id,view_id,video_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,playing_time_ms,e_startup_time_ms,e_rebuffer_duration_ms,e_startup_outcome)
                 SELECT id||'-end','default',id,'video','chunkify.video.view_ended',3,5000,5000,'{}',0,playing,startup,rebuffer,outcome
-                FROM (VALUES ('perfect',10000,0,0,'started'),('slow',10000,2000,0,'started'),('buffer',9800,0,200,'started'),('combined',9900,2000,100,'started'),('missing',10000,100,NULL,'started'),('exit',0,NULL,0,'ended_before_start')) AS v(id,playing,startup,rebuffer,outcome);
+                FROM (VALUES ('perfect',10000,0,0,'started'),('slow',10000,2000,0,'started'),('buffer',9800,0,200,'started'),('combined',9900,2000,100,'started'),('session',20719.29999923706,4830.200000286102,3.40000057220459,'started'),('long-startup',10000,10000,0,'started'),('heavy-buffer',9000,0,1000,'started'),('missing',10000,100,NULL,'started'),('exit',0,NULL,0,'ended_before_start')) AS v(id,playing,startup,rebuffer,outcome);
                 INSERT INTO events(event_id,project_id,view_id,video_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,e_error_fatal)
                 VALUES ('fatal-error','default','fatal','video','chunkify.video.playback_error',2,2000,2000,'{}',0,TRUE);
                 INSERT INTO events(event_id,project_id,view_id,video_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,playing_time_ms,e_startup_time_ms,e_rebuffer_duration_ms)
@@ -259,9 +259,12 @@ async fn playback_scores_agree_across_sessions_videos_quality_and_buckets() {
         }).await.unwrap_or_else(|e| panic!("{}",e.message));
         let expected = [
             ("perfect", Some(100.0)),
-            ("slow", Some(80.0)),
-            ("buffer", Some(80.0)),
-            ("combined", Some(72.0)),
+            ("slow", Some(93.52484478226214)),
+            ("buffer", Some(86.93582353988059)),
+            ("combined", Some(87.20198728264428)),
+            ("session", Some(86.68783991421262)),
+            ("long-startup", Some(78.40526816831157)),
+            ("heavy-buffer", Some(49.658530379140956)),
             ("fatal", Some(0.0)),
             ("missing", None),
             ("pending", None),
@@ -297,8 +300,9 @@ async fn playback_scores_agree_across_sessions_videos_quality_and_buckets() {
             .quality("default".into(), Query::default())
             .await
             .unwrap();
-        assert_eq!(quality["playback_score"]["sample_views"], 5);
-        assert!((quality["playback_score"]["value"].as_f64().unwrap() - 66.4).abs() < 1e-9);
+        assert_eq!(quality["playback_score"]["sample_views"], 8);
+        let mean = expected.iter().filter_map(|(_, score)| *score).sum::<f64>() / 8.0;
+        assert!((quality["playback_score"]["value"].as_f64().unwrap() - mean).abs() < 1e-9);
         let videos = store
             .summary("default".into(), Query::default(), true)
             .await

@@ -682,7 +682,8 @@ fn metric_json(values: MetricValues) -> Result<Value, ApiError> {
 }
 
 // A bounded playback heuristic, not a perceptual picture-quality metric.
-// Startup loses all credit at 10 seconds, buffering at 10% of active time.
+// Weighted geometric mean: 30% startup (8 / (8 + seconds)), 70% smoothness
+// (exp(-10 * buffering ratio)). Applying the smoothness weight gives exp(-7 * ratio).
 // Missing inputs remain NULL; observed failures are measured zero scores.
 const PLAYBACK_SCORE: &str = ", CASE
     WHEN COALESCE(has_fatal_error, FALSE) OR measurement.startup_outcome = 'failed_before_start' THEN 0.0
@@ -690,8 +691,8 @@ const PLAYBACK_SCORE: &str = ", CASE
         AND measurement.startup_time_ms IS NOT NULL
         AND measurement.rebuffer_duration_ms IS NOT NULL
         AND COALESCE(measurement.startup_outcome, 'started') = 'started'
-    THEN 100.0 * GREATEST(0.0, 1.0 - measurement.startup_time_ms / 10000.0)
-        * GREATEST(0.0, 1.0 - 10.0 *
+    THEN 100.0 * POWER(8000.0 / (8000.0 + measurement.startup_time_ms), 0.30)
+        * EXP(-7.0 *
             (measurement.rebuffer_duration_ms / GREATEST(measurement.playing_time_ms, measurement.rebuffer_duration_ms)) /
             (measurement.playing_time_ms / GREATEST(measurement.playing_time_ms, measurement.rebuffer_duration_ms)
                 + measurement.rebuffer_duration_ms / GREATEST(measurement.playing_time_ms, measurement.rebuffer_duration_ms)))
@@ -814,15 +815,28 @@ mod score_tests {
     fn playback_score_preserves_missing_data_and_bounds_extreme_inputs() {
         let db = Connection::open_in_memory().unwrap();
         let cases = [
-            ("10000, 0, 0, 'started', FALSE", Some(100.0)),
-            ("10000, 10000, 0, 'started', FALSE", Some(0.0)),
-            ("10000, 20000, 0, 'started', FALSE", Some(0.0)),
-            ("9000, 0, 1000, 'started', FALSE", Some(0.0)),
-            ("8000, 0, 2000, 'started', FALSE", Some(0.0)),
-            ("1e308, 0, 1e308, 'started', FALSE", Some(0.0)),
+            ("10000, 0, 0, 'started', FALSE", Some(100.0_f64)),
+            ("10000, 10000, 0, 'started', FALSE", Some(78.40526816831157)),
+            ("10000, 20000, 0, 'started', FALSE", Some(68.67198272427282)),
+            ("9000, 0, 1000, 'started', FALSE", Some(49.658530379140956)),
+            ("8000, 0, 2000, 'started', FALSE", Some(24.659696394160644)),
+            (
+                "1e308, 0, 1e308, 'started', FALSE",
+                Some(3.0197383422318502),
+            ),
+            (
+                "10000, 1e308, 0, 'started', FALSE",
+                Some(5.901018770673883e-90),
+            ),
+            (
+                "20719.29999923706, 4830.200000286102, 3.40000057220459, 'started', FALSE",
+                Some(86.68783991421262),
+            ),
             ("10000, 0, 0, NULL, FALSE", Some(100.0)),
             ("NULL, NULL, NULL, 'failed_before_start', FALSE", Some(0.0)),
             ("NULL, NULL, NULL, NULL, TRUE", Some(0.0)),
+            ("10000, 0, 0, 'started', TRUE", Some(0.0)),
+            ("10000, 0, 0, 'failed_before_start', FALSE", Some(0.0)),
             ("0, 0, 0, 'started', FALSE", None),
             ("10000, NULL, 0, 'started', FALSE", None),
             ("10000, 0, NULL, 'started', FALSE", None),
@@ -837,7 +851,20 @@ mod score_tests {
                         fatal AS has_fatal_error
                     FROM (VALUES ({values})) AS v(playing, startup, rebuffer, outcome, fatal)))"
             ), [], |row| row.get(0)).unwrap();
-            assert_eq!(actual, expected, "{values}");
+            match (actual, expected) {
+                (Some(actual), Some(expected)) => {
+                    assert!(
+                        actual.is_finite() && (0.0..=100.0).contains(&actual),
+                        "{values}: {actual}"
+                    );
+                    let tolerance = 1e-12 * expected.abs().max(1e-100);
+                    assert!(
+                        (actual - expected).abs() <= tolerance,
+                        "{values}: {actual} != {expected}"
+                    );
+                }
+                (actual, expected) => assert_eq!(actual, expected, "{values}"),
+            }
         }
     }
 }

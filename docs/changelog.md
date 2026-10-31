@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.10.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.9.0...v0.10.0) (2026-10-31)
+
+
+### Features
+
+* **events:** support tab visibility in playback events ([#54](https://github.com/chunkifydev/chunkify-analytics/issues/54)) ([942bb98](https://github.com/chunkifydev/chunkify-analytics/commit/942bb98863b89b491b846bff9343b918a4de1519))
+
+
+### Bug Fixes
+
+* **metrics:** balance startup and playback smoothness scores ([#53](https://github.com/chunkifydev/chunkify-analytics/issues/53)) ([5956dc5](https://github.com/chunkifydev/chunkify-analytics/commit/5956dc5dc8159c62829cd137ad4071146627a3da))
+
 ## [0.9.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.8.0...v0.9.0) (2026-10-30)
 
 

@@ -22,6 +22,7 @@ pub struct Config {
     pub max_body_bytes: usize,
     pub ingest_per_second: u32,
     pub rate_limits: crate::limits::Config,
+    pub report_cache_seconds: u64,
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
     pub geoip_database: PathBuf,
@@ -159,11 +160,20 @@ impl Config {
             settings,
             matches!(&backend, crate::backend::Backend::S3(s3) if !s3.flush_interval.is_zero()),
         )?;
-        if matches!(backend, crate::backend::Backend::S3(_))
-            && settings.var("experimental.read_worker").as_deref() == Ok("true")
-        {
-            return Err("S3 storage uses a single worker; disable read_worker".into());
-        }
+        let report_cache_seconds = settings
+            .var("cache.report_ttl_seconds")
+            .unwrap_or_else(|_| {
+                if matches!(backend, crate::backend::Backend::S3(_)) {
+                    "60"
+                } else {
+                    "0"
+                }
+                .into()
+            })
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds <= 60)
+            .ok_or("cache.report_ttl_seconds must be between 0 and 60")?;
         let public_url = settings
             .var("server.public_url")
             .ok()
@@ -196,6 +206,7 @@ impl Config {
                 .filter(|key| !key.trim().is_empty())
                 .map(|key| crate::projects::hash(&key)),
             backend,
+            report_cache_seconds,
             mcp_enabled: settings
                 .var("mcp.enabled")
                 .unwrap_or_else(|_| "true".into())

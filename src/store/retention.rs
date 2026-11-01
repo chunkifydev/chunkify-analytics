@@ -7,7 +7,7 @@ impl Store {
         validate_query(&query)?;
         let export = query.export.clone();
         let filters = query.filters()?;
-        self.read("retention", project.clone(), move |db| {
+        self.read_report("retention", project.clone(), &query, export.is_some(), move |db| {
             let through = watermark(db, &project)?;
             let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Retention);
             let sql = format!("{sql}, measured AS (

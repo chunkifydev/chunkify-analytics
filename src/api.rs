@@ -35,7 +35,7 @@ struct App {
     rate: Arc<Mutex<RateLimit>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ApiError {
     pub status: StatusCode,
     pub message: String,
@@ -561,12 +561,14 @@ async fn events(
     ))
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
+    app.store.check_read_index()?;
     app.store
         .call("health", |db| {
             db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;
             Ok(())
         })
         .await?;
+    app.store.check_read_index()?;
     Ok(Json(json!({ "status": "ok" })))
 }
 

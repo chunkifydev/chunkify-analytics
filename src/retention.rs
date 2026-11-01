@@ -32,12 +32,14 @@ impl Policy {
     }
 
     pub fn project_cutoff(&self, project: &str, now_ms: i64) -> i64 {
-        let seconds = self
-            .overrides
+        cutoff(now_ms, self.project_seconds(project))
+    }
+
+    pub fn project_seconds(&self, project: &str) -> u64 {
+        self.overrides
             .iter()
             .find(|(id, _)| id == project)
-            .map_or(self.default_seconds, |(_, seconds)| *seconds);
-        cutoff(now_ms, seconds)
+            .map_or(self.default_seconds, |(_, seconds)| *seconds)
     }
 
     pub fn purge(&self, connection: &mut Connection, now_ms: i64) -> duckdb::Result<usize> {

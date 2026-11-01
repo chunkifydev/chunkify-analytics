@@ -301,7 +301,6 @@ fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets
             "https://account.r2.cloudflarestorage.com",
         ),
         format!("{source}\n[experimental]\ndurable_queue = true"),
-        format!("{source}\n[experimental]\nread_worker = true"),
     ] {
         std::fs::write(fixture.0.join("config.toml"), invalid).unwrap();
         let output = fixture.run(&["config", "check"]);
@@ -461,7 +460,7 @@ fn rate_limit_overrides_validate_without_starting_storage() {
         ("read_burst", "1000001"),
         ("read_concurrent", "257"),
         ("export_concurrent", "65"),
-        ("read_concurrent_per_project", "9"),
+        ("read_concurrent_per_project", "33"),
         ("export_concurrent_per_project", "5"),
         ("read_per_minute", "-1"),
         ("read_burst", "1.5"),
@@ -474,6 +473,28 @@ fn rate_limit_overrides_validate_without_starting_storage() {
         .unwrap();
         let output = fixture.run(&["config", "check"]);
         assert!(!output.status.success(), "accepted {field}={value}");
+    }
+    assert!(!fixture.0.join("data").exists());
+}
+
+#[test]
+fn report_cache_freshness_is_bounded_to_one_minute() {
+    let fixture = Fixture::new();
+    for (value, valid) in [
+        ("0", true),
+        ("1", true),
+        ("60", true),
+        ("61", false),
+        ("-1", false),
+        ("1.5", false),
+    ] {
+        std::fs::write(
+            fixture.0.join("config.toml"),
+            format!("cache.report_ttl_seconds={value}\n"),
+        )
+        .unwrap();
+        let output = fixture.run(&["config", "check"]);
+        assert_eq!(output.status.success(), valid, "cache TTL {value}");
     }
     assert!(!fixture.0.join("data").exists());
 }

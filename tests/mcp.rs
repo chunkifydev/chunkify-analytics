@@ -869,7 +869,7 @@ async fn video_pages_accept_a_thousand_rows_while_events_keep_their_smaller_limi
                 "max_response_bytes": 1048576,
                 "max_filter_json_bytes": 4096,
                 "timeout_seconds": 15,
-                "concurrent_queries": 4
+                "concurrent_queries": 256
             })
         );
         for (tool, key) in [("list_video_metrics", "videos"), ("list_events", "events")] {
@@ -1122,7 +1122,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
         "response_too_large"
     );
     let mut pending = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..256 {
         pending.push(
             client
                 .peer()
@@ -1138,7 +1138,7 @@ async fn bounded_http_failures_cancellation_and_timeout() {
         );
     }
     tokio::time::timeout(Duration::from_secs(5), async {
-        while hits.load(Ordering::SeqCst) < 4 {
+        while hits.load(Ordering::SeqCst) < 256 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })

@@ -1,9 +1,15 @@
 use crate::{api::ApiError, profile::Profile};
 use duckdb::Connection;
-use std::{sync::mpsc, thread, time::Instant};
+use std::{
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::Instant,
+};
 use tokio::sync::oneshot;
 
-// One executing read and at most 64 waiting reads. Saturation returns HTTP 503.
+pub mod cache;
+
+// At most 64 waiting reads across the pool. Saturation returns HTTP 503.
 const QUEUE_CAPACITY: usize = 64;
 type Operation = Box<dyn FnOnce(&mut Connection, &mut Profile) + Send>;
 
@@ -15,18 +21,44 @@ pub struct Reader {
 
 impl Reader {
     pub fn start(
-        mut connection: Connection,
+        connection: Connection,
         profile: bool,
     ) -> duckdb::Result<(Self, thread::JoinHandle<()>)> {
+        let (reader, mut workers) = Self::start_pool(vec![connection], profile)?;
+        Ok((reader, workers.pop().expect("one reader connection")))
+    }
+
+    pub fn start_pool(
+        connections: Vec<Connection>,
+        profile: bool,
+    ) -> duckdb::Result<(Self, Vec<thread::JoinHandle<()>>)> {
+        assert!(!connections.is_empty());
+        let connections = connections
+            .into_iter()
+            .map(|connection| {
+                let measurements = Profile::new(profile, &connection, "reader")?;
+                Ok((connection, measurements))
+            })
+            .collect::<duckdb::Result<Vec<_>>>()?;
         let (sender, receiver) = mpsc::sync_channel::<Operation>(QUEUE_CAPACITY);
-        let mut measurements = Profile::new(profile, &connection, "reader")?;
-        let worker = thread::spawn(move || {
-            while let Ok(operation) = receiver.recv() {
-                operation(&mut connection, &mut measurements);
-            }
-            measurements.report();
-        });
-        Ok((Self { sender, profile }, worker))
+        let receiver = Arc::new(Mutex::new(receiver));
+        let workers = connections
+            .into_iter()
+            .map(|(mut connection, mut measurements)| {
+                let receiver = receiver.clone();
+                thread::spawn(move || {
+                    loop {
+                        // Only taking the next job is serialized. Queries run on
+                        // independent connections without holding this lock.
+                        let next = receiver.lock().expect("reader queue lock").recv();
+                        let Ok(operation) = next else { break };
+                        operation(&mut connection, &mut measurements);
+                    }
+                    measurements.report();
+                })
+            })
+            .collect();
+        Ok((Self { sender, profile }, workers))
     }
 
     pub async fn call<T: Send + 'static>(
@@ -76,6 +108,60 @@ mod tests {
         task::Poll,
         time::Duration,
     };
+
+    #[tokio::test]
+    async fn pool_isolates_project_views_and_does_not_block_other_reads_or_writes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE receipts (id INTEGER)")
+            .unwrap();
+        let connections = (0..2).map(|_| connection.try_clone().unwrap()).collect();
+        let (reader, workers) = Reader::start_pool(connections, false).unwrap();
+        let (entered, ready) = oneshot::channel();
+        let (release, blocked) = mpsc::channel();
+        let busy_reader = reader.clone();
+        let busy = tokio::spawn(async move {
+            busy_reader
+                .call("test_slow_project", move |db| {
+                    db.execute_batch(
+                        "CREATE OR REPLACE TEMP VIEW events AS SELECT 'project-a' AS project",
+                    )?;
+                    let _ = entered.send(());
+                    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(db.query_row("SELECT project FROM events", [], |r| r.get::<_, String>(0))?)
+                })
+                .await
+        });
+        ready.await.unwrap();
+        let other = tokio::time::timeout(
+            Duration::from_secs(1),
+            reader.call("test_other_project", |db| {
+                db.execute_batch(
+                    "CREATE OR REPLACE TEMP VIEW events AS SELECT 'project-b' AS project",
+                )?;
+                Ok(db.query_row("SELECT project FROM events", [], |r| r.get::<_, String>(0))?)
+            }),
+        )
+        .await;
+        let write = connection.execute("INSERT INTO receipts VALUES (1)", []);
+        release.send(()).unwrap();
+        let first = busy.await.unwrap();
+        drop(reader);
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(
+            other.unwrap().unwrap(),
+            "project-b",
+            "another tenant must finish while the first is blocked"
+        );
+        assert_eq!(
+            first.unwrap(),
+            "project-a",
+            "project views must remain connection-local"
+        );
+        assert_eq!(write.unwrap(), 1, "ingestion must still commit");
+    }
 
     #[tokio::test]
     async fn reads_keep_a_snapshot_without_blocking_commits_and_recover_after_errors() {

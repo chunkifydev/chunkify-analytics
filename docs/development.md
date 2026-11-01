@@ -177,3 +177,34 @@ Follow the commit conventions in [AGENTS.md](../AGENTS.md).
 See [the release guide](releasing.md) for automatic release PRs, version tags,
 release packages, Docker images, and a manual build that checks the release
 without publishing.
+
+## Concurrent report benchmark
+
+With a disposable S3 bucket reachable from Docker and an ARM64 image built from
+this checkout, run:
+
+```sh
+CHUNKIFY_IMAGE=chunkify-analytics:tenant-reads CHUNKIFY_S3_TEST_ENDPOINT=host.docker.internal:4566 \
+  node tests/http/docker/read-load.mjs
+```
+
+This seeds ten projects with 100 SDK playback attempts each, then runs 100 users
+requesting seven dashboard reports and one MCP report concurrently. During the
+70-second timed workload, SDK generators continuously offer 100 events per second
+across those projects. S3 buffering is disabled, so a successful write waits for
+publication. The workload crosses the 60-second report-cache refresh and checks
+that acknowledged events older than the freshness bound appear in reports.
+
+The ARM64 container defaults to one CPU and 2 GiB. Set
+`CHUNKIFY_READ_LOAD_CPUS` and `CHUNKIFY_READ_LOAD_MEMORY_MIB` to compare
+resource sizes. The write client uses up to 128 connections and bounds outstanding
+requests at 256; missed schedules count as failures. Dashboard bounds advance
+with the clock, so each new minute also exercises a cold cohort. The JSON report under
+`target/benchmarks/` includes cold and cached read latency, HTTP/MCP failures,
+actual query counts, offered and completed writes, write failures and latency,
+and cgroup memory. Set `CHUNKIFY_READ_LOAD_VIEWS` to change attempts per project,
+`CHUNKIFY_READ_LOAD_SECONDS` for duration, and `CHUNKIFY_READ_LOAD_DISTINCT=1`
+to add a burst of 100 distinct uncached queries. Compare concurrency using
+`CHUNKIFY_READ_LOAD_CONCURRENT` and `CHUNKIFY_READ_LOAD_PER_PROJECT`.
+These results describe this synthetic dataset and local S3 endpoint, not a
+production capacity guarantee. Test prefixes remain in the disposable bucket.

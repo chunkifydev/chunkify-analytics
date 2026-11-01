@@ -229,7 +229,7 @@ impl Store {
             .as_deref()
             .map(|c| Cursor::<Option<String>>::decode(c, &kind, &filters, &project))
             .transpose()?;
-        self.read("dimension", project.clone(), move |db| {
+        self.read_report("dimension", project.clone(), (&query, dimension.column()), export.is_some(), move |db| {
             let through = match &cursor { Some(c) => c.through, None => watermark(db, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
             let column = dimension.column();
@@ -265,7 +265,7 @@ impl Store {
             .as_deref()
             .map(|c| Cursor::<(String, String)>::decode(c, "errors", &filters, &project))
             .transpose()?;
-        self.read("errors", project.clone(), move |db| {
+        self.read_report("errors", project.clone(), &query, export.is_some(), move |db| {
             let through = match &cursor { Some(c) => c.through, None => watermark(db, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
             values.extend([SqlValue::Text(project.clone()), SqlValue::BigInt(through)]);

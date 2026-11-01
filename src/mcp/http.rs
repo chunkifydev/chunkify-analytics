@@ -12,7 +12,7 @@ pub fn router<S: Clone + Send + Sync + 'static>(
     exports: crate::exports::Exports,
     allowed_hosts: Vec<String>,
 ) -> Router<S> {
-    let queries = Arc::new(Semaphore::new(4));
+    let queries = Arc::new(Semaphore::new(super::MAX_CONCURRENT_REQUESTS));
     let contract = Arc::new(contract::Contract::new());
     let mut config = StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)

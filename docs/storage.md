@@ -57,9 +57,16 @@ No local `s3-keys.json` cache is created.
 
 A replacement container can start with an empty local data directory. Give it
 the same configuration and run `serve`; do not run `init` again. `data_dir` must
-be writable, but does not need a persistent volume. Large queries can use up to
-1 GiB of temporary disk space. First startup needs access to DuckDB's extension
-repository.
+be writable, but does not need a persistent volume. Startup rebuilds
+`query-cache.duckdb` from retained S3 event objects before accepting requests.
+Reserve disk for this index, which contains all retained event rows, plus up to
+1 GiB of temporary query files. Rebuilding time and disk requirements depend on
+the retained dataset. First startup needs access to DuckDB's extension repository.
+
+Reports use the local index without listing or downloading S3 objects. An upload
+updates the index only after S3 stores the object. Index update failures make
+reads and health checks unavailable until restart rebuilds the index. S3 remains
+the durable source; deleting the local index does not delete events.
 
 Run one analytics server per prefix. Stop it before starting a replacement, and run
 administration commands inside the active container.

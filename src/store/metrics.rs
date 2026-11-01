@@ -35,75 +35,81 @@ impl Store {
             .as_deref()
             .map(|value| Cursor::<Option<String>>::decode(value, &kind, &filters, &project))
             .transpose()?;
-        self.read("breakdown", project.clone(), move |connection| {
-            let through = match &cursor {
-                Some(cursor) => cursor.through,
-                None => watermark(connection, &project)?,
-            };
-            let cohort = match metrics {
-                MetricSet::Summary => CohortMetrics::Basic,
-                MetricSet::Quality => CohortMetrics::Quality,
-                MetricSet::Engagement => CohortMetrics::Engagement,
-            };
-            let (sql, mut values) = view_cohort(project.clone(), through, &filters, cohort);
-            let column = group_by.column();
-            let continuation = match cursor {
-                None => "TRUE".to_owned(),
-                Some(cursor) => match cursor.after {
-                    None => format!("{column} IS NOT NULL"),
-                    Some(value) => {
-                        values.push(SqlValue::Text(value));
-                        format!("{column} > ?")
-                    }
-                },
-            };
-            values.push(SqlValue::BigInt((limit + 1) as i64));
-            let (samples, source) = match metrics {
-                MetricSet::Quality => (QUALITY_SAMPLES, "quality_samples"),
-                _ => ("", "view_metrics"),
-            };
-            // Each view belongs to its first retained start's context. Keep
-            // unknown context as NULL and group the full cohort in one snapshot.
-            let mut statement = connection.prepare(&format!(
-                "{sql}{samples} SELECT {column}, {} FROM {source}
+        self.read_report(
+            "breakdown",
+            project.clone(),
+            (&query, metrics.name()),
+            export.is_some(),
+            move |connection| {
+                let through = match &cursor {
+                    Some(cursor) => cursor.through,
+                    None => watermark(connection, &project)?,
+                };
+                let cohort = match metrics {
+                    MetricSet::Summary => CohortMetrics::Basic,
+                    MetricSet::Quality => CohortMetrics::Quality,
+                    MetricSet::Engagement => CohortMetrics::Engagement,
+                };
+                let (sql, mut values) = view_cohort(project.clone(), through, &filters, cohort);
+                let column = group_by.column();
+                let continuation = match cursor {
+                    None => "TRUE".to_owned(),
+                    Some(cursor) => match cursor.after {
+                        None => format!("{column} IS NOT NULL"),
+                        Some(value) => {
+                            values.push(SqlValue::Text(value));
+                            format!("{column} > ?")
+                        }
+                    },
+                };
+                values.push(SqlValue::BigInt((limit + 1) as i64));
+                let (samples, source) = match metrics {
+                    MetricSet::Quality => (QUALITY_SAMPLES, "quality_samples"),
+                    _ => ("", "view_metrics"),
+                };
+                // Each view belongs to its first retained start's context. Keep
+                // unknown context as NULL and group the full cohort in one snapshot.
+                let mut statement = connection.prepare(&format!(
+                    "{sql}{samples} SELECT {column}, {} FROM {source}
                 GROUP BY {column} HAVING {continuation}
                 ORDER BY {column} ASC NULLS FIRST LIMIT ?",
-                metric_columns(metrics)
-            ))?;
-            let rows = query_rows(&mut statement, &values, export.is_some())?.mapped(|row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    read_metrics(row, 1, metrics)?,
-                ))
-            });
-            let mut groups = Vec::new();
-            let mut last = None;
-            let mut next_cursor = None;
-            for row in rows {
-                let (value, data) = row?;
-                if groups.len() == limit {
-                    next_cursor = Some(
-                        Cursor {
-                            version: 1,
-                            project_id: project.clone(),
-                            kind: kind.clone(),
-                            after: last,
-                            through,
-                            filters: filters.clone(),
-                        }
-                        .encode()?,
-                    );
-                    break;
+                    metric_columns(metrics)
+                ))?;
+                let rows = query_rows(&mut statement, &values, export.is_some())?.mapped(|row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        read_metrics(row, 1, metrics)?,
+                    ))
+                });
+                let mut groups = Vec::new();
+                let mut last = None;
+                let mut next_cursor = None;
+                for row in rows {
+                    let (value, data) = row?;
+                    if groups.len() == limit {
+                        next_cursor = Some(
+                            Cursor {
+                                version: 1,
+                                project_id: project.clone(),
+                                kind: kind.clone(),
+                                after: last,
+                                through,
+                                filters: filters.clone(),
+                            }
+                            .encode()?,
+                        );
+                        break;
+                    }
+                    last = value.clone();
+                    crate::exports::emit(
+                        &export,
+                        &mut groups,
+                        json!({"value":value,"data":metric_json(data)?}),
+                    )?;
                 }
-                last = value.clone();
-                crate::exports::emit(
-                    &export,
-                    &mut groups,
-                    json!({"value":value,"data":metric_json(data)?}),
-                )?;
-            }
-            Ok(json!({"group_by":group_by,"groups":groups,"next_cursor":next_cursor}))
-        })
+                Ok(json!({"group_by":group_by,"groups":groups,"next_cursor":next_cursor}))
+            },
+        )
         .await
     }
 
@@ -151,7 +157,7 @@ impl Store {
         }) {
             return Err(ApiError::bad("Invalid video cursor position"));
         }
-        self.read(if per_video { "videos" } else { "summary" }, project.clone(), move |connection| {
+        self.read_report(if per_video { "videos" } else { "summary" }, project.clone(), (&query, per_video), export.is_some(), move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, if per_video { CohortMetrics::Quality } else { CohortMetrics::Basic });
             if !per_video {
@@ -246,19 +252,26 @@ impl Store {
             return Err(ApiError::bad("Unsupported engagement query parameter"));
         }
         let filters = query.filters()?;
-        self.read("engagement", project.clone(), move |connection| {
-            let through = watermark(connection, &project)?;
-            let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Engagement);
-            let values = connection.query_row(
-                &format!(
-                    "{sql} SELECT {} FROM view_metrics",
-                    metric_columns(MetricSet::Engagement)
-                ),
-                params_from_iter(values.iter()),
-                |row| read_metrics(row, 0, MetricSet::Engagement),
-            )?;
-            metric_json(values)
-        })
+        self.read_report(
+            "engagement",
+            project.clone(),
+            &query,
+            query.export.is_some(),
+            move |connection| {
+                let through = watermark(connection, &project)?;
+                let (sql, values) =
+                    view_cohort(project, through, &filters, CohortMetrics::Engagement);
+                let values = connection.query_row(
+                    &format!(
+                        "{sql} SELECT {} FROM view_metrics",
+                        metric_columns(MetricSet::Engagement)
+                    ),
+                    params_from_iter(values.iter()),
+                    |row| read_metrics(row, 0, MetricSet::Engagement),
+                )?;
+                metric_json(values)
+            },
+        )
         .await
     }
 
@@ -275,19 +288,25 @@ impl Store {
             return Err(ApiError::bad("Unsupported quality query parameter"));
         }
         let filters = query.filters()?;
-        self.read("quality", project.clone(), move |connection| {
-            let through = watermark(connection, &project)?;
-            let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Quality);
-            let values = connection.query_row(
-                &format!(
-                    "{sql}{QUALITY_SAMPLES} SELECT {} FROM quality_samples",
-                    metric_columns(MetricSet::Quality)
-                ),
-                params_from_iter(values.iter()),
-                |row| read_metrics(row, 0, MetricSet::Quality),
-            )?;
-            metric_json(values)
-        })
+        self.read_report(
+            "quality",
+            project.clone(),
+            &query,
+            query.export.is_some(),
+            move |connection| {
+                let through = watermark(connection, &project)?;
+                let (sql, values) = view_cohort(project, through, &filters, CohortMetrics::Quality);
+                let values = connection.query_row(
+                    &format!(
+                        "{sql}{QUALITY_SAMPLES} SELECT {} FROM quality_samples",
+                        metric_columns(MetricSet::Quality)
+                    ),
+                    params_from_iter(values.iter()),
+                    |row| read_metrics(row, 0, MetricSet::Quality),
+                )?;
+                metric_json(values)
+            },
+        )
         .await
     }
 
@@ -297,108 +316,115 @@ impl Store {
         query: TimeseriesQuery,
     ) -> Result<Value, ApiError> {
         let metrics = query.kind;
+        let cache_query = serde_json::to_value(&query).map_err(|_| ApiError::internal())?;
         let export = query.export.clone();
         let window = if export.is_some() {
             query.validate_export()?
         } else {
             query.validate()?
         };
-        self.read("timeseries", project.clone(), move |connection| {
-            let through = watermark(connection, &project)?;
-            let cohort = match metrics {
-                MetricSet::Summary => CohortMetrics::Basic,
-                MetricSet::Quality => CohortMetrics::Quality,
-                MetricSet::Engagement => CohortMetrics::Engagement,
-            };
-            let (sql, mut values) = view_cohort(project, through, &window.filters, cohort);
-            let width = window.interval.milliseconds();
-            values.extend([
-                SqlValue::BigInt(window.first_bucket_ms),
-                SqlValue::BigInt(width),
-            ]);
-            let (samples, source) = if matches!(metrics, MetricSet::Quality) {
-                (QUALITY_SAMPLES, "quality_samples")
-            } else {
-                ("", "view_metrics")
-            };
-            let mut statement = connection.prepare(&format!(
-                "{sql}{samples} SELECT (occurred_at_ms - ?) // ? AS bucket_index,
-                    {} FROM {source} GROUP BY bucket_index ORDER BY bucket_index",
-                metric_columns(metrics)
-            ))?;
-            let rows = query_rows(&mut statement, &values, export.is_some())?
-                .mapped(|row| Ok((row.get::<_, i64>(0)?, read_metrics(row, 1, metrics)?)));
-            let empty = metric_json(match metrics {
-                MetricSet::Summary => MetricValues::Summary {
-                    views: 0,
-                    viewers: 0,
-                    playing: 0.0,
-                },
-                MetricSet::Engagement => MetricValues::Engagement {
-                    views: 0,
-                    playing: 0.0,
-                    reached_end: 0,
-                    progress: ProgressMetrics::default(),
-                    watch_time: WatchTimeMetrics::default(),
-                },
-                MetricSet::Quality => MetricValues::Quality {
-                    views: 0,
-                    startup_samples: 0,
-                    median: None,
-                    p95: None,
-                    buffering_samples: 0,
-                    playing: 0.0,
-                    buffering: 0.0,
-                    affected: 0,
-                    outcomes: StartupOutcomes::default(),
-                    score: None,
-                    score_samples: 0,
-                },
-            })?;
-            if let Some(export) = &export {
-                let mut index = 0usize;
-                let bucket = |mut data: Value, index: usize| {
-                    data["bucket_start"] =
-                        json!(utc_timestamp(window.first_bucket_ms + index as i64 * width));
-                    data
+        self.read_report(
+            "timeseries",
+            project.clone(),
+            cache_query,
+            export.is_some(),
+            move |connection| {
+                let through = watermark(connection, &project)?;
+                let cohort = match metrics {
+                    MetricSet::Summary => CohortMetrics::Basic,
+                    MetricSet::Quality => CohortMetrics::Quality,
+                    MetricSet::Engagement => CohortMetrics::Engagement,
                 };
-                for row in rows {
-                    let (next, values) = row?;
-                    while index < next as usize {
+                let (sql, mut values) = view_cohort(project, through, &window.filters, cohort);
+                let width = window.interval.milliseconds();
+                values.extend([
+                    SqlValue::BigInt(window.first_bucket_ms),
+                    SqlValue::BigInt(width),
+                ]);
+                let (samples, source) = if matches!(metrics, MetricSet::Quality) {
+                    (QUALITY_SAMPLES, "quality_samples")
+                } else {
+                    ("", "view_metrics")
+                };
+                let mut statement = connection.prepare(&format!(
+                    "{sql}{samples} SELECT (occurred_at_ms - ?) // ? AS bucket_index,
+                    {} FROM {source} GROUP BY bucket_index ORDER BY bucket_index",
+                    metric_columns(metrics)
+                ))?;
+                let rows = query_rows(&mut statement, &values, export.is_some())?
+                    .mapped(|row| Ok((row.get::<_, i64>(0)?, read_metrics(row, 1, metrics)?)));
+                let empty = metric_json(match metrics {
+                    MetricSet::Summary => MetricValues::Summary {
+                        views: 0,
+                        viewers: 0,
+                        playing: 0.0,
+                    },
+                    MetricSet::Engagement => MetricValues::Engagement {
+                        views: 0,
+                        playing: 0.0,
+                        reached_end: 0,
+                        progress: ProgressMetrics::default(),
+                        watch_time: WatchTimeMetrics::default(),
+                    },
+                    MetricSet::Quality => MetricValues::Quality {
+                        views: 0,
+                        startup_samples: 0,
+                        median: None,
+                        p95: None,
+                        buffering_samples: 0,
+                        playing: 0.0,
+                        buffering: 0.0,
+                        affected: 0,
+                        outcomes: StartupOutcomes::default(),
+                        score: None,
+                        score_samples: 0,
+                    },
+                })?;
+                if let Some(export) = &export {
+                    let mut index = 0usize;
+                    let bucket = |mut data: Value, index: usize| {
+                        data["bucket_start"] =
+                            json!(utc_timestamp(window.first_bucket_ms + index as i64 * width));
+                        data
+                    };
+                    for row in rows {
+                        let (next, values) = row?;
+                        while index < next as usize {
+                            export.push(bucket(empty.clone(), index))?;
+                            index += 1;
+                        }
+                        export.push(bucket(metric_json(values)?, index))?;
+                        index += 1;
+                    }
+                    while index < window.bucket_count {
                         export.push(bucket(empty.clone(), index))?;
                         index += 1;
                     }
-                    export.push(bucket(metric_json(values)?, index))?;
-                    index += 1;
+                    return Ok(json!({"buckets":[]}));
                 }
-                while index < window.bucket_count {
-                    export.push(bucket(empty.clone(), index))?;
-                    index += 1;
+                let mut buckets: Vec<_> = (0..window.bucket_count)
+                    .map(|index| {
+                        let mut bucket = empty.clone();
+                        bucket["bucket_start"] =
+                            json!(utc_timestamp(window.first_bucket_ms + index as i64 * width));
+                        bucket
+                    })
+                    .collect();
+                for row in rows {
+                    let (index, data) = row?;
+                    let bucket = buckets
+                        .get_mut(index as usize)
+                        .ok_or_else(ApiError::internal)?;
+                    let start = bucket["bucket_start"].clone();
+                    *bucket = metric_json(data)?;
+                    bucket["bucket_start"] = start;
                 }
-                return Ok(json!({"buckets":[]}));
-            }
-            let mut buckets: Vec<_> = (0..window.bucket_count)
-                .map(|index| {
-                    let mut bucket = empty.clone();
-                    bucket["bucket_start"] =
-                        json!(utc_timestamp(window.first_bucket_ms + index as i64 * width));
-                    bucket
-                })
-                .collect();
-            for row in rows {
-                let (index, data) = row?;
-                let bucket = buckets
-                    .get_mut(index as usize)
-                    .ok_or_else(ApiError::internal)?;
-                let start = bucket["bucket_start"].clone();
-                *bucket = metric_json(data)?;
-                bucket["bucket_start"] = start;
-            }
-            Ok(json!({"kind":metrics,
-                "from": utc_timestamp(window.from_ms), "to": utc_timestamp(window.to_ms),
-                "interval": window.interval, "timezone": "UTC", "buckets": buckets,
-            }))
-        })
+                Ok(json!({"kind":metrics,
+                    "from": utc_timestamp(window.from_ms), "to": utc_timestamp(window.to_ms),
+                    "interval": window.interval, "timezone": "UTC", "buckets": buckets,
+                }))
+            },
+        )
         .await
     }
 }

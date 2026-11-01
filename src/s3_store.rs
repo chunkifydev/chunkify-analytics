@@ -5,7 +5,7 @@ use duckdb::Connection;
 use s3::{Bucket, Region, creds::Credentials};
 use std::{
     path::Path,
-    sync::atomic::{AtomicI64, Ordering},
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     time::Duration,
 };
 
@@ -79,6 +79,7 @@ pub struct RemoteStore {
     config: S3Config,
     client: Box<Bucket>,
     next_id: AtomicI64,
+    index_ready: AtomicBool,
 }
 
 struct EventFile {
@@ -93,7 +94,12 @@ impl RemoteStore {
         self.config.flush_interval
     }
 
-    pub fn open(config: S3Config, connection: &Connection, directory: &Path) -> Result<Self> {
+    pub fn open(
+        config: S3Config,
+        connection: &Connection,
+        directory: &Path,
+        policy: &Policy,
+    ) -> Result<Self> {
         let extensions = directory.join("extensions");
         std::fs::create_dir_all(&extensions)?;
         connection
@@ -145,6 +151,7 @@ impl RemoteStore {
             client: config.client()?,
             config,
             next_id: AtomicI64::new(0),
+            index_ready: AtomicBool::new(true),
         };
         let files = store
             .files(None)
@@ -163,6 +170,32 @@ impl RemoteStore {
                 )
                 .map_err(|_| "Cannot read S3 event ordering")?
         };
+        let now = chrono::Utc::now().timestamp_millis();
+        let retained: Vec<_> = files
+            .into_iter()
+            .filter(|file| file.max_received >= policy.project_cutoff(&file.project, now))
+            .collect();
+        let source = if retained.is_empty() {
+            "SELECT *, CAST(NULL AS VARCHAR) AS source_object FROM collector_parquet_stage"
+                .to_owned()
+        } else {
+            let paths = retained
+                .iter()
+                .map(|file| literal(&store.config.uri(&file.key)))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "SELECT * EXCLUDE(filename), filename AS source_object FROM read_parquet([{paths}], filename = true, hive_partitioning = false)"
+            )
+        };
+        // The local index is disposable. S3 remains authoritative on every start.
+        connection
+            .execute_batch(&format!(
+                "CREATE TABLE collector_query_index AS {source};
+            CREATE UNIQUE INDEX collector_query_order ON collector_query_index(ingest_id);
+            CREATE INDEX collector_query_project ON collector_query_index(project_id);"
+            ))
+            .map_err(|_| "Cannot rebuild the S3 query index")?;
         store.next_id.store(
             previous
                 .max(chrono::Utc::now().timestamp_micros())
@@ -177,6 +210,14 @@ impl RemoteStore {
         self.next_id
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
             .map_err(|_| ApiError::internal())
+    }
+
+    pub fn check_index(&self) -> std::result::Result<(), ApiError> {
+        if self.index_ready.load(Ordering::Acquire) {
+            Ok(())
+        } else {
+            Err(ApiError::unavailable())
+        }
     }
 
     fn files(&self, project: Option<&str>) -> std::result::Result<Vec<EventFile>, ApiError> {
@@ -236,14 +277,9 @@ impl RemoteStore {
         project: &str,
         policy: &Policy,
     ) -> std::result::Result<(), ApiError> {
-        let files = self.files(Some(project))?;
-        let source = if files.is_empty() {
-            "(SELECT * FROM collector_parquet_stage WHERE FALSE)".into()
-        } else {
-            self.scan(&files)
-        };
+        self.check_index()?;
         let cutoff = policy.project_cutoff(project, chrono::Utc::now().timestamp_millis());
-        connection.execute_batch(&format!("CREATE OR REPLACE TEMP VIEW collector_parquet_events AS SELECT * FROM {source}
+        connection.execute_batch(&format!("CREATE OR REPLACE TEMP VIEW collector_parquet_events AS SELECT * FROM collector_query_index
             WHERE project_id = {} AND received_at_ms >= {cutoff};
             CREATE OR REPLACE TEMP VIEW events AS SELECT ingest_id, {} FROM collector_parquet_events;", literal(project), *crate::storage::COLUMN_NAMES))?;
         Ok(())
@@ -275,11 +311,62 @@ impl RemoteStore {
             );
             connection.execute_batch(&format!("COPY (SELECT * FROM collector_parquet_stage WHERE project_id = {} AND epoch_ms(received_at_ms)::DATE = DATE {})
                 TO {} (FORMAT parquet, COMPRESSION zstd);", literal(&project), literal(&date), literal(&self.config.uri(&key))))?;
+            // Publish to readers only after the immutable object is durable.
+            // The ingest ID makes retrying the same staged batch idempotent.
+            self.update_index(connection, &format!("INSERT OR IGNORE INTO collector_query_index
+                SELECT *, {} FROM collector_parquet_stage WHERE project_id = {} AND epoch_ms(received_at_ms)::DATE = DATE {};",
+                literal(&self.config.uri(&key)), literal(&project), literal(&date)))?;
         }
         Ok(())
     }
 
-    pub fn purge(&self, policy: &Policy, now: i64) -> std::result::Result<usize, ApiError> {
+    fn update_index(
+        &self,
+        connection: &Connection,
+        sql: &str,
+    ) -> std::result::Result<(), ApiError> {
+        connection.execute_batch(sql).map_err(|_| {
+            self.index_ready.store(false, Ordering::Release);
+            ApiError::unavailable()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_fixture() -> Self {
+        let config = S3Config {
+            flush_interval: Duration::ZERO,
+            bucket: "test".into(),
+            prefix: String::new(),
+            endpoint: Some("127.0.0.1:1".into()),
+            region: "us-east-1".into(),
+            access_key_id: Some("test".into()),
+            secret_access_key: Some("test".into()),
+            session_token: None,
+            url_style: "path".into(),
+            use_ssl: false,
+        };
+        Self {
+            client: config.client().unwrap(),
+            config,
+            next_id: AtomicI64::new(0),
+            index_ready: AtomicBool::new(true),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_index_update(&self, connection: &Connection) {
+        assert!(
+            self.update_index(connection, "INSERT INTO missing_index VALUES (1)")
+                .is_err()
+        );
+    }
+
+    pub fn purge(
+        &self,
+        connection: &Connection,
+        policy: &Policy,
+        now: i64,
+    ) -> std::result::Result<usize, ApiError> {
         let mut removed = 0;
         for file in self.files(None)? {
             if file.max_received < policy.project_cutoff(&file.project, now) {
@@ -290,6 +377,13 @@ impl RemoteStore {
                 if !(200..300).contains(&response.status_code()) {
                     return Err(ApiError::internal());
                 }
+                self.update_index(
+                    connection,
+                    &format!(
+                        "DELETE FROM collector_query_index WHERE source_object = {}",
+                        literal(&self.config.uri(&file.key)),
+                    ),
+                )?;
                 removed += file.rows;
             }
         }

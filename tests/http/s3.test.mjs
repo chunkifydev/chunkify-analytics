@@ -27,7 +27,7 @@ function events() {
   return result;
 }
 
-async function installation(t, storage, retention = 0, environment = {}, server = {}, batch = {}) {
+async function installation(t, storage, retention = 0, environment = {}, server = {}, batch = {}, reports = {}) {
   let directory = await mkdtemp(join(tmpdir(), "chunkify-storage-test-"));
   const directories = [directory];
   let child, closed;
@@ -39,7 +39,7 @@ async function installation(t, storage, retention = 0, environment = {}, server 
     const serverFields = Object.entries(server).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
     const fields = Object.entries(storage).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
     const batchFields = Object.entries(batch).map(([key, value]) => `${key} = ${JSON.stringify(value)}`).join("\n");
-    await writeFile(config, `data_dir = "state"\n[server]\nbind = "127.0.0.1:0"\n${serverFields}\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = 86400\n[batch]\n${batchFields}\n`, { mode: 0o600 });
+    await writeFile(config, `data_dir = "state"\nprofile = ${reports.profile ?? false}\n[server]\nbind = "127.0.0.1:0"\n${serverFields}\n[storage]\n${fields}\n[retention]\nseconds = ${retention}\ninterval_seconds = ${reports.retention_interval_seconds ?? 86400}\n[batch]\n${batchFields}\n[cache]\nreport_ttl_seconds = ${reports.ttl_seconds ?? 0}\n`, { mode: 0o600 });
   }
   async function stop(signal = "SIGTERM", expectedCode = 0) {
     if (child && child.exitCode === null && child.signalCode === null) child.kill(signal);
@@ -306,6 +306,74 @@ test("buffered S3 retries partial uploads without duplicating files or dropping 
   fail = true;
   await app.stop("SIGTERM", 1);
   assert.match(app.logs(), /Cannot upload buffered S3 events during shutdown/);
+});
+
+test("S3 query index keeps reports available during publication and exposes events only after storage", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const storage = s3Settings();
+  const upstream = `${storage.use_ssl ? "https" : "http"}://${storage.endpoint}`;
+  let hold = false, eventReads = 0, lists = 0;
+  const waiting = [];
+  const proxy = createServer((request, response) => {
+    if (request.method === "GET" && request.url.includes(".parquet")) eventReads++;
+    if (new URL(request.url, "http://proxy").searchParams.get("prefix")?.includes("events/")) lists++;
+    const forward = () => {
+      const transfer = (storage.use_ssl ? httpsRequest : httpRequest)(new URL(request.url, upstream), {
+        method: request.method, headers: request.headers,
+      }, result => { response.writeHead(result.statusCode, result.headers); result.pipe(response); });
+      transfer.on("error", () => { response.writeHead(502); response.end(); });
+      request.pipe(transfer);
+    };
+    if (hold && request.method === "PUT" && request.url.includes(".parquet")) waiting.push(forward);
+    else forward();
+  });
+  proxy.listen(0, "127.0.0.1");
+  await once(proxy, "listening");
+  t.after(() => new Promise(resolve => { proxy.close(resolve); proxy.closeAllConnections(); }));
+  const app = await installation(t, { ...storage, endpoint: `127.0.0.1:${proxy.address().port}`, use_ssl: false });
+  await app.command(["init"]);
+  await app.start();
+  const other = JSON.parse(await app.command(["project", "create", "Independent tenant"]));
+  await app.send({ ...events()[0], video_id: "first-project" });
+  await app.send({ ...events()[0], video_id: "second-project" }, other.public_key);
+  const before = { eventReads, lists };
+  hold = true;
+  let saved = false;
+  const write = app.send({ ...events()[0], video_id: "during-write" }, other.public_key).then(() => { saved = true; });
+  try {
+    await waitFor(() => waiting.length > 0, "the durable upload to start");
+    const [first, second] = await Promise.all([app.get("/v1/videos"), app.get("/v1/videos", other.secret_key)]);
+    assert.deepEqual(first.videos.map(video => video.video_id), ["first-project"]);
+    assert.deepEqual(second.videos.map(video => video.video_id), ["second-project"]);
+    assert.equal(saved, false, "synchronous ingestion must wait for S3 publication");
+    assert.deepEqual({ eventReads, lists }, before, "normal reports must query the index without listing or reading S3 batches");
+  } finally {
+    hold = false;
+    for (const release of waiting.splice(0)) release();
+    await write;
+  }
+  assert.deepEqual((await app.get("/v1/videos", other.secret_key)).videos.map(v => v.video_id).sort(), ["during-write", "second-project"]);
+  await app.replaceTask();
+  assert.deepEqual((await app.get("/v1/videos", other.secret_key)).videos.map(v => v.video_id).sort(), ["during-write", "second-project"], "a replacement rebuilds the disposable index from S3");
+});
+
+test("S3 cached reports expire, isolate projects and still authenticate every read", {
+  skip: !endpoint && "Set CHUNKIFY_S3_TEST_ENDPOINT for an S3-compatible test bucket",
+}, async t => {
+  const app = await installation(t, s3Settings(), 0, {}, {}, {}, { ttl_seconds: 2 });
+  await app.command(["init"]);
+  await app.start();
+  const other = JSON.parse(await app.command(["project", "create", "Cache isolation"]));
+  await app.send(events()[0]);
+  assert.equal((await app.get("/v1/summary")).views, 1);
+  assert.equal((await app.get("/v1/summary", other.secret_key)).views, 0);
+  await app.send(events()[0]);
+  assert.equal((await app.get("/v1/summary")).views, 1, "reads within the freshness window reuse the report");
+  assert.equal((await fetch(`${app.url}/v1/summary`, { headers: { authorization: "Bearer invalid" } })).status, 401);
+  assert.equal((await app.get("/v1/summary?video_id=absent")).views, 0, "filters have separate entries");
+  await delay(2100);
+  assert.equal((await app.get("/v1/summary")).views, 2, "published events appear after cache expiry");
 });
 
 test("S3 stores repeated events, isolates projects and survives task replacement", {

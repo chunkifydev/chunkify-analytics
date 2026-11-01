@@ -14,7 +14,7 @@ impl Store {
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
-        self.read("renditions", project.clone(), move |connection| {
+        self.read_report("renditions", project.clone(), &query, export.is_some(), move |connection| {
             let through = watermark(connection, &project)?;
             let (sql, mut values) = view_cohort(project, through, &filters, CohortMetrics::Renditions);
             // Expand only the selected final/latest cumulative snapshot. Summing

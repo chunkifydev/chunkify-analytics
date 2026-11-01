@@ -12,16 +12,22 @@ use std::{path::Path, sync::Arc, thread};
 
 pub struct DatabaseWorker {
     database: thread::JoinHandle<Result<(), String>>,
-    reader: Option<thread::JoinHandle<()>>,
+    readers: Vec<thread::JoinHandle<()>>,
     // Keep the writer alive until readers finish.
     writer: Writer,
 }
 impl DatabaseWorker {
     pub fn join(self) -> thread::Result<Result<(), String>> {
-        let reader = self.reader.map(|worker| worker.join()).transpose();
+        let readers: Vec<_> = self
+            .readers
+            .into_iter()
+            .map(|worker| worker.join())
+            .collect();
         drop(self.writer);
         let database = self.database.join();
-        reader?;
+        for reader in readers {
+            reader?;
+        }
         database
     }
 }
@@ -30,14 +36,15 @@ impl DatabaseWorker {
 pub struct Store {
     writer: Writer,
     reader: Option<Reader>,
-    remote: Option<RemoteReads>,
+    remote: Option<Arc<RemoteReads>>,
     limits: Option<Arc<crate::limits::Reads>>,
 }
 
-#[derive(Clone)]
 struct RemoteReads {
     store: Arc<crate::s3_store::RemoteStore>,
     projects: Arc<crate::projects::Registry>,
+    reader: Reader,
+    cache: crate::reader::cache::ReportCache,
 }
 
 impl Store {
@@ -62,18 +69,47 @@ impl Store {
         };
         let settings_db =
             database_settings(config.checkpoint_threshold_mib, config.duckdb_threads)?;
-        let connection = Connection::open_in_memory_with_flags(settings_db)?;
+        // The serve command holds the data-directory lock. This cache can always
+        // be discarded and rebuilt from the durable S3 batches, including after a crash.
+        let index = config.data_dir.join("query-cache.duckdb");
+        for path in [
+            index.clone(),
+            config.data_dir.join("query-cache.duckdb.wal"),
+        ] {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let connection = Connection::open_with_flags(index, settings_db)?;
         let temporary = config.data_dir.join("temporary");
         std::fs::create_dir_all(&temporary)?;
         connection.execute_batch(&format!(
             "SET temp_directory = {}; SET max_temp_directory_size = '1 GiB';",
             crate::s3_store::literal(&temporary.to_string_lossy())
         ))?;
+        let policy = projects
+            .retention
+            .read()
+            .map_err(|_| "Cannot load retention policy")?
+            .clone();
         let remote = Arc::new(crate::s3_store::RemoteStore::open(
             settings.clone(),
             &connection,
             &config.data_dir,
+            &policy,
         )?);
+        // Share DuckDB's database-wide memory/thread budget, but isolate every
+        // reader's temporary project views and keep reads off the ingestion queue.
+        let connections = (0..config.rate_limits.read_concurrent)
+            .map(|_| {
+                let reader = connection.try_clone()?;
+                crate::storage::create_parquet_stage(&reader)?;
+                Ok(reader)
+            })
+            .collect::<duckdb::Result<Vec<_>>>()?;
+        let (reader, readers) = Reader::start_pool(connections, config.profile)?;
         let (writer, database) = Writer::start_with_storage(
             connection,
             config.batch.clone(),
@@ -88,14 +124,16 @@ impl Store {
                     &config.rate_limits,
                     projects.clone(),
                 ))),
-                remote: Some(RemoteReads {
+                remote: Some(Arc::new(RemoteReads {
                     store: remote,
                     projects,
-                }),
+                    reader,
+                    cache: crate::reader::cache::ReportCache::new(config.report_cache_seconds),
+                })),
             },
             DatabaseWorker {
                 database,
-                reader: None,
+                readers,
                 writer,
             },
         ))
@@ -133,10 +171,16 @@ impl Store {
             },
             DatabaseWorker {
                 database: worker,
-                reader: reader_worker,
+                readers: reader_worker.into_iter().collect(),
                 writer,
             },
         ))
+    }
+
+    pub fn check_read_index(&self) -> Result<(), ApiError> {
+        self.remote
+            .as_ref()
+            .map_or(Ok(()), |remote| remote.store.check_index())
     }
 
     pub async fn call<T: Send + 'static>(
@@ -169,22 +213,26 @@ impl Store {
         project: String,
         operation: impl FnOnce(&Connection) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
-        let admission = self
-            .limits
-            .as_ref()
-            .map(|limits| limits.admit(&project))
-            .transpose()?;
+        let admission = if let Some(limits) = &self.limits {
+            Some(limits.admit(&project).await?)
+        } else {
+            None
+        };
         // The queued database operation owns its permits even if HTTP/MCP cancels.
+        let remote_index = self.remote.as_ref().map(|remote| remote.store.clone());
         let operation = move |connection: &Connection| {
             let _admission = admission;
+            if let Some(remote) = remote_index {
+                remote.check_index()?;
+            }
             operation(connection)
         };
         if let Some(reader) = &self.reader {
             return reader.call(name, operation).await;
         }
         if let Some(remote) = self.remote.clone() {
-            return self
-                .writer
+            let reader = remote.reader.clone();
+            return reader
                 .call(name, move |connection| {
                     let policy = remote
                         .projects
@@ -193,7 +241,7 @@ impl Store {
                         .map_err(|_| ApiError::internal())?;
                     remote.store.prepare_read(connection, &project, &policy)?;
                     drop(policy);
-                    crate::reader::snapshot(connection, operation)
+                    operation(connection)
                 })
                 .await;
         }
@@ -202,6 +250,37 @@ impl Store {
                 crate::reader::snapshot(connection, operation)
             })
             .await
+    }
+
+    async fn read_report(
+        &self,
+        name: &'static str,
+        project: String,
+        query: impl serde::Serialize,
+        export: bool,
+        operation: impl FnOnce(&Connection) -> Result<Value, ApiError> + Send + 'static,
+    ) -> Result<Value, ApiError> {
+        if !export
+            && self.reader.is_none()
+            && let Some(remote) = &self.remote
+        {
+            remote.store.check_index()?;
+            let retention = remote
+                .projects
+                .retention
+                .read()
+                .map_err(|_| ApiError::internal())?
+                .project_seconds(&project);
+            return remote
+                .cache
+                .read(
+                    &project,
+                    (name, retention, query),
+                    self.read(name, project.clone(), operation),
+                )
+                .await;
+        }
+        self.read(name, project, operation).await
     }
 
     pub async fn export_reader(&self, project: String) -> Result<Self, ApiError> {
@@ -248,7 +327,9 @@ impl Store {
                 return Ok(0);
             }
             match remote {
-                Some(remote) => remote.purge(&policy, chrono::Utc::now().timestamp_millis()),
+                Some(remote) => {
+                    remote.purge(connection, &policy, chrono::Utc::now().timestamp_millis())
+                }
                 None => Ok(policy.purge(connection, chrono::Utc::now().timestamp_millis())?),
             }
         })
@@ -397,6 +478,93 @@ fn query_rows<'s>(
 mod tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
+
+    #[tokio::test]
+    async fn queued_export_rejects_an_index_failure_before_execution() {
+        let directory =
+            std::env::temp_dir().join(format!("collector-index-failure-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let env = directory.join("empty.env");
+        std::fs::write(&env, "").unwrap();
+        let config_file = directory.join("config.toml");
+        std::fs::write(&config_file, "retention.seconds=0\n").unwrap();
+        let settings = crate::settings::Settings::load(Some(&env), Some(&config_file)).unwrap();
+        let config = crate::config::Config::load_with(&settings, Some(&directory), None).unwrap();
+        let keys = crate::config::Keys {
+            projects: vec![crate::projects::primary_project("public", "secret")],
+        };
+        let projects = Arc::new(crate::projects::Registry::new(&keys, &config).unwrap());
+        let (mut store, worker) = Store::from_config(&config, projects.clone()).unwrap();
+        // Replace only the remote transport with a fixture. No S3 request is needed
+        // to exercise a failure between export setup and queued query execution.
+        let index = Arc::new(crate::s3_store::RemoteStore::test_fixture());
+        let connection = store.call("clone", |db| Ok(db.try_clone()?)).await.unwrap();
+        connection
+            .execute_batch("CREATE TABLE collector_query_index AS SELECT * FROM events")
+            .unwrap();
+        let (reader, reader_worker) = Reader::start(connection, false).unwrap();
+        store.remote = Some(Arc::new(RemoteReads {
+            store: index.clone(),
+            projects,
+            reader,
+            cache: crate::reader::cache::ReportCache::new(60),
+        }));
+        // Populate a cached response too, then prepare an export before the failure.
+        store
+            .summary("default".into(), Query::default(), false)
+            .await
+            .unwrap();
+        let export = store.export_reader("default".into()).await.unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, blocked) = mpsc::channel();
+        let busy_reader = export.reader.clone().unwrap();
+        let busy = tokio::spawn(async move {
+            busy_reader
+                .call("block_export", move |_| {
+                    let _ = entered.send(());
+                    blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                })
+                .await
+        });
+        ready.await.unwrap();
+        let pending =
+            tokio::spawn(async move { export.events("default".into(), Query::default()).await });
+        store
+            .call("fail_index", move |db| {
+                index.fail_index_update(db);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        release.send(()).unwrap();
+        busy.await.unwrap().unwrap();
+        assert_eq!(
+            pending.await.unwrap().unwrap_err().status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(store.check_read_index().is_err());
+        assert_eq!(
+            store
+                .summary("default".into(), Query::default(), false)
+                .await
+                .unwrap_err()
+                .status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            store
+                .events("default".into(), Query::default())
+                .await
+                .unwrap_err()
+                .status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(store);
+        reader_worker.join().unwrap();
+        worker.join().unwrap().unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[tokio::test]
     async fn dashboard_reads_do_not_wait_for_busy_ingestion_worker() {

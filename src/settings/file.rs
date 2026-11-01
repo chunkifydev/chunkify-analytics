@@ -19,6 +19,13 @@ struct FileConfig {
     experimental: Experimental,
     mcp: Mcp,
     rate_limits: crate::limits::Config,
+    cache: Cache,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct Cache {
+    report_ttl_seconds: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -124,6 +131,12 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         rate_limits: config.rate_limits,
         ..Settings::default()
     };
+    if let Some(seconds) = config.cache.report_ttl_seconds {
+        settings.values.insert(
+            "cache.report_ttl_seconds".into(),
+            seconds.to_string().into(),
+        );
+    }
     let mut storage = config.storage;
     if let Some(value) = storage.flush_interval_seconds {
         settings.values.insert(

@@ -47,8 +47,8 @@ ingest_per_second = 100
 # capacities equal their per-minute rates. All values must be positive.
 read_per_minute = 120
 read_burst = 20
-read_concurrent_per_project = 2
-read_concurrent = 8
+read_concurrent_per_project = 16
+read_concurrent = 32
 export_links_per_minute = 10
 export_downloads_per_minute = 2
 export_concurrent_per_project = 1
@@ -87,3 +87,7 @@ allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
 # The URL is the analytics HTTP API base URL.
 url = "http://127.0.0.1:4174"
 # secret_key = "..."
+
+# S3 report freshness. Local storage defaults to 0; raw events and exports bypass it.
+[cache]
+report_ttl_seconds = 60

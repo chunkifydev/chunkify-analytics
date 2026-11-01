@@ -85,7 +85,7 @@ See [storage](storage.md) for local and S3/R2 examples.
 | `server.max_body_bytes` | `65536` | Maximum JSON request body size in bytes. Must be positive. |
 | `server.ingest_per_second` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
 | `batch.queue_max_bytes` | `16777216`; `33554432` for buffered S3 | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
-| `batch.queue_max_requests` | `256`; `4096` for buffered S3 | Database channel capacity, shared by writes, reads and maintenance. Also bounds per-project outstanding writes. Range 1..4096. The byte budget also applies to writes. |
+| `batch.queue_max_requests` | `256`; `4096` for buffered S3 | Writer channel capacity for writes and maintenance, also shared by local reads unless the separate reader is enabled. Also bounds per-project outstanding writes. Range 1..4096. The byte budget also applies to writes. |
 
 ### Advanced performance settings
 
@@ -155,8 +155,8 @@ MCP companion. They have no environment-variable overrides.
 | --- | --- | --- |
 | `rate_limits.read_per_minute` | `120` | Average analytics reads per minute per project. Range 1..1000000. |
 | `rate_limits.read_burst` | `20` | Maximum burst of analytics reads per project. Range 1..1000000. |
-| `rate_limits.read_concurrent_per_project` | `2` | Maximum queued or running analytics reads per project. Range 1..256. |
-| `rate_limits.read_concurrent` | `8` | Maximum queued or running analytics reads across the server. Range 1..256. |
+| `rate_limits.read_concurrent_per_project` | `16` | Maximum queued or running analytics reads per project. Range 1..256. |
+| `rate_limits.read_concurrent` | `32` | Maximum executing analytics reads across the server. Up to 1024 additional unique reads can wait for a slot. Range 1..256. |
 | `rate_limits.export_links_per_minute` | `10` | Average export links created per minute per project, with the same burst capacity. Range 1..1000000. |
 | `rate_limits.export_downloads_per_minute` | `2` | Average CSV download starts per minute per project, with the same burst capacity. Range 1..1000000. |
 | `rate_limits.export_concurrent_per_project` | `1` | Maximum active CSV generations per project. Range 1..64. |
@@ -172,7 +172,9 @@ Budgets live in memory and reset when the analytics server restarts. Ingestion u
 separate limits. Health checks, MCP discovery/documentation and export HEAD
 requests do not run database queries and do not consume the read/download budgets.
 
-Excess requests return 429 immediately, without waiting for a slot or starting a
+Cache hits and callers sharing an in-flight report do not consume read budgets.
+Unique reads wait for a server execution slot in a bounded queue. Per-project
+concurrency, a full server queue, or rate exhaustion return 429 without starting a
 query. `Retry-After` gives the rounded-up time until the next rate allowance;
 concurrency rejections use one second because the finish time is unknown.
 MCP exposes the delay as `error.retry_after_seconds`. A cancelled query holds its
@@ -182,13 +184,48 @@ exports still include all matching rows, without an export row cap.
 Larger local checkpoint thresholds allow a larger WAL and more crash recovery
 work. Measure with your traffic before changing performance settings.
 
-### Separate reader
+### Report cache
+
+`cache.report_ttl_seconds` controls shared S3 report caching, from 0 to 60 seconds.
+The S3 default is 60; set 0 to disable it. Local storage remains uncached. Reports can
+lag published events by this interval. Raw events, session lists and histories,
+and export downloads bypass the cache. Authentication and authorization run on
+every HTTP and MCP request, including cache hits.
+
+Cache keys include the project, metric, complete query parameters, cursor and
+retention policy. Concurrent identical requests share one query. Successful
+reports up to 64 KiB are retained, with at most 1024 entries across the server
+and 64 per project, bounding retained payloads to 64 MiB. Errors are not retained.
+A full cache bypasses storage for new keys; existing hot entries remain usable.
+
+### Query index and separate readers
+
+S3 analytics reads use a pool of independent connections, with one worker for
+each `rate_limits.read_concurrent` slot. The default allows 32 reads across
+the server, with at most sixteen from one project. Temporary views stay local to each
+connection. Slow reads do not occupy the ingestion worker or prevent another
+project from using the remaining read slots. Connections share DuckDB's database
+memory and execution-thread budget; adding slots does not add CPU capacity.
+Exports use their own connections and export budgets.
+
+S3 stores durable immutable event objects. Reports query a local DuckDB index in
+`data_dir/query-cache.duckdb`, populated only after each object upload succeeds.
+Normal reads do not list or download S3 objects. Each query uses a transaction
+snapshot while ingestion and retention update the index. Retention removes indexed
+rows only after deleting their owning S3 object.
+
+Startup discards and rebuilds this index from retained S3 objects before accepting
+requests. Provision local disk for all retained indexed events plus up to 1 GiB of
+query spill files. Startup time and disk requirements grow with retained data;
+measure both with your dataset. An index update failure makes reads and health
+checks return 503 until restart rebuilds the index. Run one collector process per
+S3 prefix; the index does not synchronize multiple active writers.
 
 `experimental.read_worker = true` allows local analytics queries to run alongside
-writes. It is off by default and unavailable with S3. It accepts one running
+writes. It is off by default and does not control the S3 read pool. It accepts one running
 query and up to 64 waiting queries; further reads return 503.
 
-Each response sees committed data when its query begins. Await an ingestion
+Uncached responses see committed data when their query begins. Await an ingestion
 response before reading if the result must include it. Reads still share CPU,
 memory and disk with writes. `profile = true` reports reader and writer timings
 on graceful shutdown.

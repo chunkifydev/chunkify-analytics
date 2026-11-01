@@ -31,3 +31,14 @@ or credential files. When S3 owns the project registry, do not write a local
 credential cache. Tests and examples must follow the same storage rules.
 Do not add compatibility formats or migration paths when the user explicitly
 excludes backward compatibility.
+
+Keep multi-project analytics reads off the ingestion worker. Use independent
+connections for concurrent reports so temporary project views cannot leak across
+tenants. Bound active work per project and server, and test that a blocked tenant
+does not prevent another tenant's reads or ingestion from completing.
+
+Measure analytics read capacity with continuous ingestion and publication during
+the timed workload, using the deployed storage lifecycle and resource limits.
+Report offered and completed write rates, write failures and latency alongside
+cold and cached reads. Seeding a dataset before reads does not establish mixed
+read/write capacity.

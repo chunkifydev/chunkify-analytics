@@ -3,7 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use duckdb::types::Value as SqlValue;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
     #[default]
@@ -20,7 +20,7 @@ impl SortOrder {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoSort {
     #[default]
@@ -43,7 +43,7 @@ impl VideoSort {
     }
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Query {
     #[serde(skip)]
@@ -94,7 +94,7 @@ pub enum MetricKind {
     Engagement,
 }
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewSort {
     #[default]
@@ -257,7 +257,7 @@ impl TimeInterval {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimeseriesQuery {
     #[serde(skip)]

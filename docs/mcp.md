@@ -222,10 +222,12 @@ Grouped `get_metrics` calls also default to 10 groups and accept at most 100 per
 page. `limit` and `cursor` require `group_by` for summary, quality and engagement.
 Error groups always paginate. Session pages, session event histories and dimension
 values also default to 10 rows and accept at most 100.
-Each adapter and the embedded endpoint allow up to four concurrent queries.
+Each adapter and the embedded endpoint allow up to 256 concurrent requests.
+Cached reports and callers waiting for the same report do not consume database
+read slots. Unique queries still use the shared project and server budgets.
 The analytics server also applies project budgets shared with HTTP and other keys:
-120 analytics reads/minute with a burst of 20, at most 2 queued/running reads per
-project and 8 across the server. Rate or concurrency rejections return
+120 uncached analytics reads/minute with a burst of 20, at most 16 queued/running reads per
+project and 32 executing across the server, with up to 1024 waiting unique reads. Rate or concurrency rejections return
 `error.code: "rate_limited"`, HTTP status 429 and `error.retry_after_seconds`.
 Use the delay before retrying. `describe_api` and protocol discovery do not consume
 read budgets. All server budgets are configurable in

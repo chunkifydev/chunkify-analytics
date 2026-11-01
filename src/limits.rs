@@ -23,8 +23,8 @@ impl Default for Config {
         Self {
             read_per_minute: 120,
             read_burst: 20,
-            read_concurrent_per_project: 2,
-            read_concurrent: 8,
+            read_concurrent_per_project: 16,
+            read_concurrent: 32,
             export_links_per_minute: 10,
             export_downloads_per_minute: 2,
             export_concurrent_per_project: 1,
@@ -161,27 +161,111 @@ impl Project {
 pub struct Reads {
     projects: Arc<crate::projects::Registry>,
     concurrent: Arc<Semaphore>,
+    waiting: Arc<Semaphore>,
 }
 impl Reads {
     pub fn new(config: &Config, projects: Arc<crate::projects::Registry>) -> Self {
         Self {
             projects,
             concurrent: Arc::new(Semaphore::new(config.read_concurrent as usize)),
+            waiting: Arc::new(Semaphore::new(1024)),
         }
     }
 
-    pub fn admit(&self, project: &str) -> Result<Admission, ApiError> {
-        self.projects
-            .access(project)?
-            .limits
-            .reads
-            .admit(&self.concurrent, "read")
+    pub async fn admit(&self, project: &str) -> Result<Admission, ApiError> {
+        let access = self.projects.access(project)?;
+        let budget = &access.limits.reads;
+        let project = budget.concurrent.clone().try_acquire_owned().map_err(|_| {
+            ApiError::limited(
+                "Project read concurrency limit exceeded",
+                Duration::from_secs(1),
+            )
+        })?;
+        let waiting =
+            self.waiting.clone().try_acquire_owned().map_err(|_| {
+                ApiError::limited("Server read queue is full", Duration::from_secs(1))
+            })?;
+        let server = self
+            .concurrent
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ApiError::unavailable())?;
+        drop(waiting);
+        budget.rate.take("Project read rate limit exceeded")?;
+        Ok(Admission {
+            _project: project,
+            _server: server,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn waiting_reads_release_project_and_queue_permits_when_canceled() {
+        let directory =
+            std::env::temp_dir().join(format!("collector-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("config.toml");
+        let env = directory.join("empty.env");
+        std::fs::write(&env, "").unwrap();
+        std::fs::write(
+            &file,
+            "rate_limits.read_concurrent=1\nrate_limits.read_concurrent_per_project=1\n",
+        )
+        .unwrap();
+        let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();
+        let config = crate::config::Config::load_with(&settings, Some(&directory), None).unwrap();
+        let mut other = crate::projects::primary_project("other-public", "other-secret");
+        other.id = uuid::Uuid::new_v4().to_string();
+        let other_id = other.id.clone();
+        let keys = crate::config::Keys {
+            projects: vec![crate::projects::primary_project("public", "secret"), other],
+        };
+        let projects = Arc::new(crate::projects::Registry::new(&keys, &config).unwrap());
+        let reads = Reads::new(&config.rate_limits, projects);
+        let active = reads.admit("default").await.unwrap();
+        let mut waiting = Box::pin(reads.admit(&other_id));
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(reads.waiting.available_permits(), 1023);
+        drop(waiting);
+        assert_eq!(reads.waiting.available_permits(), 1024);
+        let mut next = Box::pin(reads.admit(&other_id));
+        assert!(
+            futures::poll!(next.as_mut()).is_pending(),
+            "canceled waiter must release its project slot"
+        );
+        drop(active);
+        let next = tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(reads.waiting.available_permits(), 1024);
+        drop(next);
+        assert_eq!(reads.concurrent.available_permits(), 1);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn defaults_admit_sixteen_reads_per_project_and_thirty_two_across_projects() {
+        let config = Config::default();
+        let server = Arc::new(Semaphore::new(config.read_concurrent as usize));
+        let projects: Vec<_> = (0..5).map(|_| Project::new(&config)).collect();
+        let mut admitted = Vec::new();
+        for project in projects.iter().take(2) {
+            for _ in 0..16 {
+                admitted.push(project.reads.admit(&server, "read").unwrap());
+            }
+            assert!(project.reads.admit(&server, "read").is_err());
+        }
+        assert!(projects[2].reads.admit(&server, "read").is_err());
+        drop(admitted);
+        assert_eq!(server.available_permits(), 32);
+        assert!(projects[2].reads.admit(&server, "read").is_ok());
+    }
 
     #[test]
     fn concurrency_and_rate_budgets_release_slots_after_rejection() {

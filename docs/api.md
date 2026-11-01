@@ -682,8 +682,12 @@ Date filters are optional except for `timeseries`; no fixed 30-day cap applies.
 The server retains at most 1024 active grant records and returns 503 when full.
 Default rates are 10 links and 2 download starts per minute per project, with
 continuous refill and burst capacities equal to those rates. Analytics reads
-have a separate budget of 120/minute with a burst of 20, at most 2 queued/running
-per project and 8 server-wide. HTTP and MCP share these limits. See
+have a separate budget of 120 uncached reads/minute with a burst of 20, at most
+16 queued/running per project and 32 executing server-wide. Up to 1024 unique
+reads can wait for a server slot. HTTP and MCP share these limits. Identical
+reports share queries and S3 reports can reuse results for up to one minute.
+Cache hits consume no database slots or read-rate allowance; authentication
+still runs on every request. Raw events, sessions and exports bypass caching. See
 [configuration](configuration.md#read-and-export-limits) to override them.
 
 Supported resources are `summary`, `quality`, `renditions`, `engagement`, `timeseries`,
@@ -711,10 +715,10 @@ cells. Strings that could be interpreted as spreadsheet formulas receive an
 apostrophe prefix. Empty exports contain headers.
 
 Normal analytics endpoints continue returning JSON. Interrupted or failed downloads
-terminate the stream; discard the partial file and retry the download. Local reads
-remain consistent during ingestion and retention. With S3 storage, deleting source
-objects during a download can abort it. Large queries still consume database CPU,
-memory and storage I/O.
+terminate the stream; discard the partial file and retry the download. Reads
+use a consistent local database snapshot during ingestion and retention, including
+S3-backed installations. Large queries still consume database CPU, memory and
+storage I/O.
 
 Behind an HTTPS ingress or a URL prefix, set `server.public_url` to the externally
 reachable analytics server base, for example `https://analytics.example.com/collector/`.

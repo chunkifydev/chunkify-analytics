@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.11.0...v0.12.0) (2026-11-01)
+
+
+### Features
+
+* **reports:** isolate tenant queries with an S3-backed read index ([#58](https://github.com/chunkifydev/chunkify-analytics/issues/58)) ([b5799d9](https://github.com/chunkifydev/chunkify-analytics/commit/b5799d9db0d61c9d787916cec60aad302324c264))
+
 ## [0.11.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.10.0...v0.11.0) (2026-10-31)
 
 

@@ -1400,11 +1400,11 @@ for (const separateReads of [false, true]) test(`location reports use first star
   }
   const query = (route, args = {}) => server.get(`/v1/${route}?${new URLSearchParams(args)}`);
   const expected = {
-    country: [[null, 1, 0, 0], ["GB", 2, 1, 4000], ["JP", 1, 1, 2000]],
-    continent: [[null, 1, 0, 0], ["AS", 1, 1, 2000], ["EU", 2, 1, 4000]],
+    country: [["GB", 2, 1, 4000], [null, 1, 0, 0], ["JP", 1, 1, 2000]],
+    continent: [["EU", 2, 1, 4000], [null, 1, 0, 0], ["AS", 1, 1, 2000]],
     city: [[null, 2, 1, 2000], ["London", 2, 1, 4000]],
-    page_origin: [[null, 1, 0, 0], ["https://example.com", 2, 1, 4000], ["https://other.example", 1, 1, 2000]],
-    page_path: [[null, 1, 0, 0], ["/other", 1, 1, 2000], ["/watch/é", 2, 1, 4000]],
+    page_origin: [["https://example.com", 2, 1, 4000], [null, 1, 0, 0], ["https://other.example", 1, 1, 2000]],
+    page_path: [["/watch/é", 2, 1, 4000], [null, 1, 0, 0], ["/other", 1, 1, 2000]],
   };
   for (const [group_by, groups] of Object.entries(expected)) {
     const summary = await query("summary", { group_by });

@@ -16,11 +16,11 @@ const chrome = { schema_version: 1, browser_name: "Chrome", os_name: "Linux", de
 const firefox = { schema_version: 1, browser_name: "Firefox", os_name: "Windows", device_type: "desktop" };
 const safari = { schema_version: 1, browser_name: "Safari", os_name: "iOS", device_type: "mobile" };
 
-async function collector(t, separateReads) {
+async function collector(t, separateReads, settings = {}) {
   const directory = await mkdtemp(join(tmpdir(), "chunkify-context-filters-"));
   const env = { ...process.env, "data_dir": directory, "server.bind": "127.0.0.1:0",
     "retention.seconds": "0", "server.trusted_proxies": "",
-    "experimental.read_worker": String(separateReads) };
+    "experimental.read_worker": String(separateReads), ...settings };
   let child;
   let exited;
   let errors = "";
@@ -95,6 +95,68 @@ const totals = (views, playingTime, uniqueViewers = views ? 1 : 0) => ({
 
 for (const separateReads of [false, true]) {
   const reader = separateReads ? "separate reader" : "shared worker";
+
+  test(`audience breakdowns rank views across pages rather than labels (${reader})`, async t => {
+    const server = await collector(t, separateReads, {
+      "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
+      "rate_limits.export_downloads_per_minute": "1000",
+    });
+    for (const [browser_name, os_name, device_type, count] of [
+      ["Alpha", "iOS", "mobile", 1], ["Zulu", "macOS", "desktop", 8],
+      ["Beta", "Android", "tablet", 2],
+    ]) {
+      for (let i = 0; i < count; i++) {
+        const start = view("ranked-video", { schema_version: 1, browser_name, os_name, device_type,
+          page_origin: `https://${browser_name.toLowerCase()}.example`, page_path: `/${browser_name}` })[0];
+        await server.send(start);
+        await server.send({ ...start, event_id: randomUUID(), sequence: 2,
+          event_name: "chunkify.video.playback_error", error_code: browser_name,
+          error_category: "network", error_fatal: false });
+      }
+    }
+    for (const [group_by, expected] of [
+      ["browser_name", ["Zulu", "Beta", "Alpha"]], ["os_name", ["macOS", "Android", "iOS"]],
+      ["device_type", ["desktop", "tablet", "mobile"]],
+      ["page_origin", ["https://zulu.example", "https://beta.example", "https://alpha.example"]],
+      ["page_path", ["/Zulu", "/Beta", "/Alpha"]],
+    ]) {
+      for (const route of ["summary", "quality", "engagement"]) {
+        const groups = [];
+        let cursor;
+        do {
+          const page = await server.get(`/v1/${route}`, {group_by,limit:"1",...(cursor && {cursor})});
+          groups.push(...page.groups);
+          cursor = page.next_cursor;
+        } while (cursor);
+        assert.deepEqual(groups.map(group => group.value), expected, `${route} ${group_by}`);
+        assert.deepEqual(groups.map(group => group.data.views), [8,2,1]);
+      }
+      const options = await server.get(`/v1/dimensions/${group_by}`, {limit:"1"});
+      assert.deepEqual(options.values, [{value:expected[0],views:8}]);
+      assert.ok(options.next_cursor);
+    }
+    const errors = [];
+    let cursor;
+    do {
+      const page = await server.get("/v1/errors", {limit:"1",...(cursor && {cursor})});
+      errors.push(...page.errors);
+      cursor = page.next_cursor;
+    } while (cursor);
+    assert.deepEqual(errors.map(row => [row.error_code,row.affected_views]), [["Zulu",8],["Beta",2],["Alpha",1]]);
+    for (const resource of ["summary","quality","engagement","dimensions","errors"]) {
+      const query = resource === "dimensions" ? {dimension:"browser_name"} : resource === "errors" ? {} : {group_by:"browser_name"};
+      const columns = resource === "errors" ? ["error_code","affected_views"]
+        : resource === "dimensions" ? ["value","views"] : ["value","data/views"];
+      const grant = await fetch(`${server.url}/v1/exports`, {method:"POST",headers:{
+        Authorization:`Bearer ${server.keys.secret_key}`,"Content-Type":"application/json",
+      },body:JSON.stringify({resource,query,columns})});
+      assert.equal(grant.status,201,`${resource}: ${await grant.clone().text()}`);
+      const download = await fetch((await grant.json()).download_url);
+      const csv = await download.text();
+      assert.equal(download.status,200,`${resource}: ${csv}`);
+      assert.deepEqual(csv.trim().split(/\r?\n/).slice(1), ["Zulu,8","Beta,2","Alpha,1"],resource);
+    }
+  });
 
   test(`context filters select each event's strings without coercing missing or null values (${reader})`, async (t) => {
     const server = await collector(t, separateReads);

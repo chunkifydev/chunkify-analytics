@@ -1916,7 +1916,6 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
                 let mut page =
                     call_metrics(&client, kind, json!({"group_by":field,"limit":1}), false).await;
                 let mut groups = page["data"]["groups"].as_array().unwrap().clone();
-                assert_eq!(groups[0]["value"], Value::Null);
                 while page["coverage"]["has_more"] == true {
                     page = call_metrics(
                         &client,
@@ -1927,6 +1926,11 @@ async fn location_queries_and_exports_match_http_on_both_transports() {
                     .await;
                     groups.extend(page["data"]["groups"].as_array().unwrap().clone());
                 }
+                assert!(groups.iter().any(|group| group["value"].is_null()));
+                assert!(groups.windows(2).all(|pair| {
+                    pair[0]["data"]["views"].as_i64().unwrap()
+                        >= pair[1]["data"]["views"].as_i64().unwrap()
+                }));
                 assert_eq!(
                     json!(groups),
                     collector

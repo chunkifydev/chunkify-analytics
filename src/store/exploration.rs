@@ -1,6 +1,6 @@
 use super::metrics::{CohortMetrics, score_json, utc_timestamp, view_cohort};
 use super::*;
-use crate::query::{Dimension, ViewsQuery};
+use crate::query::{Dimension, GroupPosition, ViewsQuery};
 
 const VIEW_COLUMNS: &str = "view_id, video_id, viewer_id, occurred_at_ms,
     context_browser_name, context_os_name, context_device_type, playing_time_ms,
@@ -218,33 +218,31 @@ impl Store {
     ) -> Result<Value, ApiError> {
         validate(&query)?;
         if query.order.is_some() {
-            return Err(ApiError::bad("Dimension values sort ascending, null first"));
+            return Err(ApiError::bad("Dimension values sort by views descending"));
         }
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
-        let kind = format!("dimension_{}", dimension.column());
+        let kind = format!("dimension_{}_views_desc", dimension.column());
         let cursor = query
             .cursor
             .as_deref()
-            .map(|c| Cursor::<Option<String>>::decode(c, &kind, &filters, &project))
+            .map(|c| Cursor::<GroupPosition>::decode(c, &kind, &filters, &project))
             .transpose()?;
         self.read_report("dimension", project.clone(), (&query, dimension.column()), export.is_some(), move |db| {
             let through = match &cursor { Some(c) => c.through, None => watermark(db, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
             let column = dimension.column();
-            let continuation = match cursor { None => "TRUE".into(), Some(c) => match c.after {
-                None => format!("{column} IS NOT NULL"), Some(value) => { values.push(SqlValue::Text(value)); format!("{column} > ?") }
-            }};
+            let continuation = match cursor { None => "TRUE".into(), Some(c) => c.after.continuation(column, &mut values) };
             values.push(SqlValue::BigInt((limit + 1) as i64));
-            let mut statement = db.prepare(&format!("{sql} SELECT {column}, COUNT(*) FROM view_metrics GROUP BY {column} HAVING {continuation} ORDER BY {column} ASC NULLS FIRST LIMIT ?"))?;
+            let mut statement = db.prepare(&format!("{sql} SELECT {column}, COUNT(*) FROM view_metrics GROUP BY {column} HAVING {continuation} ORDER BY COUNT(*) DESC, {column} ASC NULLS FIRST LIMIT ?"))?;
             let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)));
             let mut rows_out = Vec::new(); let mut last = None; let mut next_cursor = None;
             for row in rows {
                 if rows_out.len() == limit {
-                    next_cursor = Some(Cursor {version:1, project_id:project.clone(), kind:kind.clone(), after:last, through, filters:filters.clone()}.encode()?); break;
+                    next_cursor = Some(Cursor {version:1, project_id:project.clone(), kind:kind.clone(), after:last.expect("nonempty page"), through, filters:filters.clone()}.encode()?); break;
                 }
-                let (value, views) = row?; last = value.clone(); crate::exports::emit(&export,&mut rows_out,json!({"value":value,"views":views}))?;
+                let (value, views) = row?; last = Some(GroupPosition {views, value:value.clone()}); crate::exports::emit(&export,&mut rows_out,json!({"value":value,"views":views}))?;
             }
             Ok(json!({"dimension":dimension,"values":rows_out,"next_cursor":next_cursor}))
         }).await
@@ -254,7 +252,7 @@ impl Store {
         validate(&query)?;
         if query.order.is_some() {
             return Err(ApiError::bad(
-                "Error groups sort by code and fatal status ascending",
+                "Error groups sort by affected views descending",
             ));
         }
         let export = query.export.clone();
@@ -263,15 +261,17 @@ impl Store {
         let cursor = query
             .cursor
             .as_deref()
-            .map(|c| Cursor::<(String, String)>::decode(c, "errors", &filters, &project))
+            .map(|c| {
+                Cursor::<(i64, String, String)>::decode(c, "errors_views_desc", &filters, &project)
+            })
             .transpose()?;
         self.read_report("errors", project.clone(), &query, export.is_some(), move |db| {
             let through = match &cursor { Some(c) => c.through, None => watermark(db, &project)? };
             let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
             values.extend([SqlValue::Text(project.clone()), SqlValue::BigInt(through)]);
             let continuation: String = match cursor { None => "TRUE".into(), Some(c) => {
-                values.extend([SqlValue::Text(c.after.0.clone()), SqlValue::Text(c.after.0), SqlValue::Text(c.after.1)]);
-                "(code > ? OR (code = ? AND fatal > ?))".into()
+                values.extend([SqlValue::BigInt(c.after.0), SqlValue::BigInt(c.after.0), SqlValue::Text(c.after.1.clone()), SqlValue::Text(c.after.1), SqlValue::Text(c.after.2)]);
+                "(affected_views < ? OR (affected_views = ? AND (code > ? OR (code = ? AND fatal > ?))))".into()
             }};
             values.push(SqlValue::BigInt((limit + 1) as i64));
             let mut statement = db.prepare(&format!("{sql}, error_groups AS (
@@ -283,15 +283,15 @@ impl Store {
                     AND e.viewer_id IS NOT DISTINCT FROM v.viewer_id
                 WHERE e.project_id = ? AND e.ingest_id <= ? AND e.event_name = 'chunkify.video.playback_error'
                 GROUP BY code, fatal)
-                SELECT code, fatal, error_events, affected_views FROM error_groups WHERE {continuation} ORDER BY code, fatal LIMIT ?"))?;
+                SELECT code, fatal, error_events, affected_views FROM error_groups WHERE {continuation} ORDER BY affected_views DESC, code, fatal LIMIT ?"))?;
             let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?)));
             let mut errors = Vec::new(); let mut last = None; let mut next_cursor = None;
             for row in rows {
-                if errors.len() == limit { next_cursor = Some(Cursor {version:1, project_id:project.clone(), kind:"errors".into(), after:last.expect("nonempty page"), through, filters:filters.clone()}.encode()?); break; }
+                if errors.len() == limit { next_cursor = Some(Cursor {version:1, project_id:project.clone(), kind:"errors_views_desc".into(), after:last.expect("nonempty page"), through, filters:filters.clone()}.encode()?); break; }
                 let (code, fatal, count, views) = row?;
                 let code_value: Value = serde_json::from_str(&code).map_err(|_| ApiError::internal())?;
                 let fatal_value: Value = serde_json::from_str(&fatal).map_err(|_| ApiError::internal())?;
-                last = Some((code, fatal)); crate::exports::emit(&export,&mut errors,json!({"error_code":code_value,"fatal":fatal_value,"error_events":count,"affected_views":views}))?;
+                last = Some((views, code, fatal)); crate::exports::emit(&export,&mut errors,json!({"error_code":code_value,"fatal":fatal_value,"error_events":count,"affected_views":views}))?;
             }
             Ok(json!({"errors":errors,"next_cursor":next_cursor}))
         }).await

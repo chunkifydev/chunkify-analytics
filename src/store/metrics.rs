@@ -1,5 +1,5 @@
 use super::*;
-use crate::query::{TimeseriesQuery, VideoSort};
+use crate::query::{GroupPosition, TimeseriesQuery, VideoSort};
 
 use crate::query::MetricKind as MetricSet;
 
@@ -29,11 +29,15 @@ impl Store {
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
-        let kind = format!("breakdown_{}_{}", group_by.column(), metrics.name());
+        let kind = format!(
+            "breakdown_{}_{}_views_desc",
+            group_by.column(),
+            metrics.name()
+        );
         let cursor = query
             .cursor
             .as_deref()
-            .map(|value| Cursor::<Option<String>>::decode(value, &kind, &filters, &project))
+            .map(|value| Cursor::<GroupPosition>::decode(value, &kind, &filters, &project))
             .transpose()?;
         self.read_report(
             "breakdown",
@@ -54,13 +58,7 @@ impl Store {
                 let column = group_by.column();
                 let continuation = match cursor {
                     None => "TRUE".to_owned(),
-                    Some(cursor) => match cursor.after {
-                        None => format!("{column} IS NOT NULL"),
-                        Some(value) => {
-                            values.push(SqlValue::Text(value));
-                            format!("{column} > ?")
-                        }
-                    },
+                    Some(cursor) => cursor.after.continuation(column, &mut values),
                 };
                 values.push(SqlValue::BigInt((limit + 1) as i64));
                 let (samples, source) = match metrics {
@@ -72,12 +70,13 @@ impl Store {
                 let mut statement = connection.prepare(&format!(
                     "{sql}{samples} SELECT {column}, {} FROM {source}
                 GROUP BY {column} HAVING {continuation}
-                ORDER BY {column} ASC NULLS FIRST LIMIT ?",
+                ORDER BY COUNT(*) DESC, {column} ASC NULLS FIRST LIMIT ?",
                     metric_columns(metrics)
                 ))?;
                 let rows = query_rows(&mut statement, &values, export.is_some())?.mapped(|row| {
                     Ok((
                         row.get::<_, Option<String>>(0)?,
+                        row.get::<_, i64>(1)?,
                         read_metrics(row, 1, metrics)?,
                     ))
                 });
@@ -85,14 +84,14 @@ impl Store {
                 let mut last = None;
                 let mut next_cursor = None;
                 for row in rows {
-                    let (value, data) = row?;
+                    let (value, views, data) = row?;
                     if groups.len() == limit {
                         next_cursor = Some(
                             Cursor {
                                 version: 1,
                                 project_id: project.clone(),
                                 kind: kind.clone(),
-                                after: last,
+                                after: last.expect("nonempty page"),
                                 through,
                                 filters: filters.clone(),
                             }
@@ -100,7 +99,10 @@ impl Store {
                         );
                         break;
                     }
-                    last = value.clone();
+                    last = Some(GroupPosition {
+                        views,
+                        value: value.clone(),
+                    });
                     crate::exports::emit(
                         &export,
                         &mut groups,

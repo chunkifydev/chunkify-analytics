@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.1](https://github.com/chunkifydev/chunkify-analytics/compare/v0.12.0...v0.12.1) (2026-11-02)
+
+
+### Bug Fixes
+
+* **reports:** rank analytics breakdowns by views ([#60](https://github.com/chunkifydev/chunkify-analytics/issues/60)) ([da04a1a](https://github.com/chunkifydev/chunkify-analytics/commit/da04a1a7463ee60d060bc27d418f5437d4a228be))
+
 ## [0.12.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.11.0...v0.12.0) (2026-11-01)
 
 

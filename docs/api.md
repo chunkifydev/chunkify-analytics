@@ -229,12 +229,17 @@ null and nonstring context forms a `null` group. The literal device type
 Filters apply to the start cohort before grouping. Unique viewers can appear
 in several groups; use ungrouped summary for the overall unique-viewer count.
 
-Groups sort by value ascending, with `null` first. HTTP accepts `limit=1..1000`,
+Groups sort by views descending, then value ascending with `null` first for
+ties. HTTP accepts `limit=1..1000`,
 defaulting to 100. Follow `next_cursor` with the same route, `group_by` and
 filters; changing them returns 400. The first page's ingestion watermark
 excludes later arrivals from that pagination sequence. Expiration can still
 remove records between pages. `order`, `sort_by` and `event_name` are rejected
 for grouped queries. Events, videos and timeseries do not accept `group_by`.
+
+After upgrading from value-sorted groups, restart pagination for breakdowns,
+dimension values and errors. Their previous cursors do not match view-count
+ordering.
 
 Examples:
 
@@ -613,7 +618,8 @@ status remains null. Event counts use distinct event IDs per group; affected
 views use distinct view IDs. A view can appear under several codes, so these
 counts must not be added to calculate a global affected-view count.
 
-Groups sort by canonical JSON code and fatal status ascending. HTTP pages use
+Groups sort by affected views descending, then canonical JSON code and fatal
+status ascending for ties. HTTP pages use
 `limit=1..1000`, default 100. Continue with the same filters and cursor. Cursors
 bind the project and filters and exclude later arrivals. The MCP equivalent is
 `get_metrics` with `kind=errors`.
@@ -624,7 +630,8 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
 `country`, `city`, `page_origin`, `page_path`, `video_id` and `viewer_id`. Each value has `value` and `views`;
 values and counts come from first retained starts after applying the usual date, identity and context filters.
-Values sort ascending with null first. Literal `unknown` remains distinct from
+Values sort by views descending, then value ascending with null first for ties.
+Literal `unknown` remains distinct from
 missing context. HTTP page sizes are 1 to 1000, default 100. Cursors bind the
 dimension, project, filters and ingestion watermark.
 

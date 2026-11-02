@@ -513,6 +513,27 @@ impl Filters {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupPosition {
+    pub views: i64,
+    pub value: Option<String>,
+}
+
+impl GroupPosition {
+    pub fn continuation(&self, column: &str, values: &mut Vec<SqlValue>) -> String {
+        values.extend([SqlValue::BigInt(self.views), SqlValue::BigInt(self.views)]);
+        let tie = match &self.value {
+            None => format!("{column} IS NOT NULL"),
+            Some(value) => {
+                values.push(SqlValue::Text(value.clone()));
+                format!("{column} > ?")
+            }
+        };
+        format!("(COUNT(*) < ? OR (COUNT(*) = ? AND {tie}))")
+    }
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Cursor<T> {
     pub version: u8,
     #[serde(default = "crate::projects::default_project")]

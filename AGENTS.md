@@ -42,3 +42,8 @@ the timed workload, using the deployed storage lifecycle and resource limits.
 Report offered and completed write rates, write failures and latency alongside
 cold and cached reads. Seeding a dataset before reads does not establish mixed
 read/write capacity.
+
+Rank audience and page breakdowns and dimension-value lists by view count
+descending before pagination. Rank error groups by affected views descending.
+Use deterministic tie breakers and include the ranking position in cursors so
+HTTP, MCP, exports and dashboard consumers share the same ordering.

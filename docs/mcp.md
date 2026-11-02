@@ -183,8 +183,8 @@ totals.
 
 Grouped results use page coverage and `data.next_cursor`. Keep `kind`,
 `group_by` and filters unchanged with each cursor. Groups use the first retained
-start's context and sort by value ascending, with missing context in a `null`
-group first. The literal device type `unknown` stays separate. Unique-viewer
+start's context and sort by views descending, then value ascending with `null`
+first for ties. The literal device type `unknown` stays separate. Unique-viewer
 counts must not be summed across groups. See [breakdown semantics](api.md#breakdowns-by-browser-os-device-and-location).
 
 Use summary totals rather than adding unique viewers across videos or days.

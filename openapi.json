@@ -725,7 +725,7 @@
       "get": {
         "operationId": "getSummary",
         "summary": "Read totals for a view cohort",
-        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
+        "description": "Get views, unique viewer IDs, and playing time for matching playback attempts. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by views descending. Equal view counts sort by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups.",
         "tags": [
           "Queries"
         ],
@@ -1351,7 +1351,7 @@
       "get": {
         "operationId": "getQuality",
         "summary": "Read playback quality for a view cohort",
-        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes mutually exclusive startup outcomes; unknown outcomes remain explicit.",
+        "description": "Get startup time, buffering, and observed fatal errors for matching playback attempts. Null means unavailable. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by views descending. Equal view counts sort by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes mutually exclusive startup outcomes; unknown outcomes remain explicit.",
         "tags": [
           "Queries"
         ],
@@ -1592,7 +1592,7 @@
       "get": {
         "operationId": "getEngagement",
         "summary": "Read average watch time and reached-end rate",
-        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes furthest-progress milestones and measured watch-time distribution. Progress can include seeking and is not retention.",
+        "description": "Get average watch time per attempt and the observed reached-end rate. Reaching the end does not prove the whole video was watched. Optionally group the full filtered view-start cohort with group_by=browser_name, os_name, device_type, continent, country or city. Without group_by the totals response is unchanged. With group_by, return paginated groups sorted by views descending. Equal view counts sort by value ascending, null first. Context comes from the first retained start; missing, null and nonstring values form a null group. Keep group_by and filters unchanged with each cursor. Unique viewers must not be summed across groups. Includes furthest-progress milestones and measured watch-time distribution. Progress can include seeking and is not retention.",
         "tags": [
           "Queries"
         ],
@@ -3303,7 +3303,7 @@
       "get": {
         "operationId": "getErrors",
         "summary": "Group observed playback errors",
-        "description": "Filters select first retained starts. Error events from the selected view identity contribute even after to. Group by exact JSON error_code and fatal status, distinguishing numeric codes from text and missing from false. Sort by the canonical JSON code and fatal status ascending. error_events counts distinct event IDs per group, affected_views counts distinct view IDs. Groups are not additive across codes. Cursors exclude later arrivals.",
+        "description": "Filters select first retained starts. Error events from the selected view identity contribute even after to. Group by exact JSON error_code and fatal status, distinguishing numeric codes from text and missing from false. Sort by affected_views descending, then canonical JSON code and fatal status ascending for ties. error_events counts distinct event IDs per group, affected_views counts distinct view IDs. Groups are not additive across codes. Cursors exclude later arrivals.",
         "tags": [
           "Queries"
         ],
@@ -3493,7 +3493,7 @@
       "get": {
         "operationId": "listDimensionValues",
         "summary": "Discover available filter values",
-        "description": "Values and view counts come from the first retained view starts, after applying the same cohort filters as summary. Values sort ascending, null first; missing context is separate from the literal unknown. Cursors bind the dimension, filters, project and ingestion watermark.",
+        "description": "Values and view counts come from the first retained view starts, after applying the same cohort filters as summary. Values sort by views descending, then value ascending with null first for ties; missing context is separate from the literal unknown. Cursors bind the dimension, filters, project and ingestion watermark.",
         "tags": [
           "Queries"
         ],
@@ -4822,7 +4822,7 @@
             "page_path"
           ]
         },
-        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by value ascending, null first. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites."
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites."
       },
       "view_id": {
         "name": "view_id",

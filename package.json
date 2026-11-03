@@ -19,8 +19,8 @@
     "demo:pack": "node examples/demo/pack.mjs"
   },
   "devDependencies": {
-    "@chunkify/analytics": "0.4.0",
     "@apidevtools/swagger-parser": "13.1.0",
+    "@chunkify/player-analytics": "0.9.0",
     "@playwright/test": "1.63.0",
     "ajv": "8.20.0",
     "ajv-formats": "3.0.1"

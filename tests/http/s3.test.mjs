@@ -9,8 +9,8 @@ import { request as httpsRequest } from "node:https";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
-import { attachAnalytics } from "@chunkify/analytics";
-import { createHttpAdapter } from "@chunkify/analytics/http";
+import { attachAnalytics } from "@chunkify/player-analytics";
+import { createHttpAdapter } from "@chunkify/player-analytics/http";
 import { assertResponse } from "./openapi-support.mjs";
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");

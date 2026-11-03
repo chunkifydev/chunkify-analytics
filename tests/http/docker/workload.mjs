@@ -6,8 +6,8 @@ import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { attachAnalytics } from "@chunkify/analytics";
-import { createHttpAdapter } from "@chunkify/analytics/http";
+import { attachAnalytics } from "@chunkify/player-analytics";
+import { createHttpAdapter } from "@chunkify/player-analytics/http";
 
 // Record a real SDK playback and the HTTP adapter's wire output before timing.
 // Load generation replays these templates with new identities and timestamps.

@@ -9,13 +9,13 @@ try {
   config = await response.json();
   const modules = await Promise.all([
     import('https://cdn.jsdelivr.net/npm/@chunkify/player@1.3.1/+esm'),
-    import('https://cdn.jsdelivr.net/npm/@chunkify/analytics@0.4.0/+esm'),
-    import('https://cdn.jsdelivr.net/npm/@chunkify/analytics@0.4.0/chunkify/+esm'),
+    import('https://cdn.jsdelivr.net/npm/@chunkify/player-analytics@0.9.0/+esm'),
+    import('https://cdn.jsdelivr.net/npm/@chunkify/player-analytics@0.9.0/chunkify/+esm'),
   ]);
   ({ monitor } = modules[1]); ({ createChunkifyAdapter } = modules[2]);
   await customElements.whenDefined('chunkify-player');
-  $('integration-code').textContent = `import { monitor } from "https://cdn.jsdelivr.net/npm/@chunkify/analytics@0.4.0/+esm";
-import { createChunkifyAdapter } from "https://cdn.jsdelivr.net/npm/@chunkify/analytics@0.4.0/chunkify/+esm";
+  $('integration-code').textContent = `import { monitor } from "https://cdn.jsdelivr.net/npm/@chunkify/player-analytics@0.9.0/+esm";
+import { createChunkifyAdapter } from "https://cdn.jsdelivr.net/npm/@chunkify/player-analytics@0.9.0/chunkify/+esm";
 
 const session = monitor(document.querySelector("#player"), {
   videoId: "live-demo-video",

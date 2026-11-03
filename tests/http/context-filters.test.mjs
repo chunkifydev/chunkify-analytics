@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { attachAnalytics } from "@chunkify/analytics";
+import { attachAnalytics } from "@chunkify/player-analytics";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");

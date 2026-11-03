@@ -67,13 +67,12 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
         .ok_or_else(|| ApiError::bad("Expected a Chunkify event object"))?;
     field(object, "schema_version", |v| v == 1)?;
     field(object, "event_name", |v| one_of(v, &EVENT_NAMES))?;
-    field(object, "sdk_name", |v| v == "@chunkify/analytics")?;
     for key in ["event_id", "view_id"] {
         field(object, key, |v| {
             v.as_str().is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
         })?;
     }
-    for key in ["video_id", "sdk_version", "connector_name"] {
+    for key in ["video_id", "sdk_name", "sdk_version", "connector_name"] {
         field(object, key, |v| {
             v.as_str().is_some_and(|s| !s.trim().is_empty())
         })?;

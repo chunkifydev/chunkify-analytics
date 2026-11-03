@@ -348,7 +348,7 @@
                 "occurred_at": "2026-10-19T12:00:00.000Z",
                 "view_id": "616992d2-6db6-4578-8361-3f8813e963be",
                 "video_id": "demo-video",
-                "sdk_name": "@chunkify/analytics",
+                "sdk_name": "@chunkify/player-analytics",
                 "sdk_version": "0.3.0",
                 "connector_name": "html-media",
                 "connector_version": null,
@@ -5041,7 +5041,9 @@
             "pattern": "\\S"
           },
           "sdk_name": {
-            "const": "@chunkify/analytics"
+            "type": "string",
+            "pattern": "\\S",
+            "description": "Name of the SDK or integration that produced the event. Informational metadata, preserved as received. Must contain at least one non-whitespace character."
           },
           "sdk_version": {
             "type": "string",

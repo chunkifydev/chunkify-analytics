@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { attachAnalytics } from "@chunkify/analytics";
-import { createHttpAdapter } from "@chunkify/analytics/http";
+import { attachAnalytics } from "@chunkify/player-analytics";
+import { createHttpAdapter } from "@chunkify/player-analytics/http";
 import { containerCollector, docker } from "./support.mjs";
 
 test("the bundled City MMDB locates forwarded public addresses without storing them", { timeout: 120000 }, async t => {

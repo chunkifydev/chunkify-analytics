@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.12.1...v0.13.0) (2026-11-03)
+
+
+### Features
+
+* **collector:** accept SDK names as event metadata ([0598cd9](https://github.com/chunkifydev/chunkify-analytics/commit/0598cd9b2b2994e4e36903e45299acb72b46f5c4))
+
 ## [0.12.1](https://github.com/chunkifydev/chunkify-analytics/compare/v0.12.0...v0.12.1) (2026-11-02)
 
 

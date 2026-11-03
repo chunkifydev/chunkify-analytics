@@ -54,10 +54,16 @@ See [project creation](administration.md#create-projects-through-the-api),
 ### Ingestion and storage
 
 `POST /v1/events` is the analytics server's only ingestion endpoint. Use
-`createChunkifyAdapter` from `@chunkify/analytics/chunkify` to send events.
+`createChunkifyAdapter` from `@chunkify/player-analytics/chunkify` to send events.
 Each request contains one complete JSON event. Request batching and gzip are
 not supported; the analytics server can still group concurrent requests into database
 transactions.
+
+`sdk_name` is required informational metadata identifying the SDK or integration
+that produced the event. It must be a string containing at least one
+non-whitespace character and is stored and returned unchanged. The server
+validates the event format through `schema_version`, supported event names, and
+their fields; the SDK name does not select a different event format.
 
 Local storage deduplicates event IDs within each project. The first accepted
 payload and context win; later duplicates do not enrich or replace them.

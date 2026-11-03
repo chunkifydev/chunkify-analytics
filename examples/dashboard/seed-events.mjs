@@ -1,4 +1,4 @@
-import { attachAnalytics } from '@chunkify/analytics';
+import { attachAnalytics } from '@chunkify/player-analytics';
 import { createHash } from 'node:crypto';
 
 // Synthetic engine measurements, including native playback without rendition tracking.

@@ -244,14 +244,14 @@ updating the executable.
 Install the analytics SDK in your player application:
 
 ```sh
-npm install @chunkify/analytics
+npm install @chunkify/player-analytics
 ```
 
 Connect it to a video element:
 
 ```js
-import { monitor } from "@chunkify/analytics";
-import { createChunkifyAdapter } from "@chunkify/analytics/chunkify";
+import { monitor } from "@chunkify/player-analytics";
+import { createChunkifyAdapter } from "@chunkify/player-analytics/chunkify";
 
 const session = monitor(document.querySelector("video"), {
   videoId: "video-123",

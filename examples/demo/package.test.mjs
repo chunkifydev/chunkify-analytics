@@ -9,7 +9,7 @@ import { root } from './start.mjs';
 const exec = promisify(execFile);
 test('shared archive excludes data and credentials even when stored under the example tree', { timeout: 60000, skip: !['darwin', 'linux'].includes(process.platform) }, async () => {
   const canary = await mkdtemp(path.join(root, 'examples/demo/.private-package-test-'));
-  const dependencyCanary = await mkdtemp(path.join(root, 'node_modules/@chunkify/analytics/dist/.private-package-test-'));
+  const dependencyCanary = await mkdtemp(path.join(root, 'node_modules/@chunkify/player-analytics/dist/.private-package-test-'));
   try {
     await writeFile(path.join(dependencyCanary, 'keys.json'), 'SYNTHETIC-PRIVATE-CANARY');
     await writeFile(path.join(canary, 'demo.json'), JSON.stringify({ secret_key: 'SYNTHETIC-PRIVATE-CANARY' }));

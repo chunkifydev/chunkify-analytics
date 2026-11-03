@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import test from "node:test";
-import { attachAnalytics } from "@chunkify/analytics";
+import { attachAnalytics } from "@chunkify/player-analytics";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
 import { collectorEnvironment, writeConfig } from "./configuration.mjs";
 
@@ -124,6 +124,34 @@ const browserContext = {
   language_prefix: "en", timezone: "Europe/Paris", timezone_offset_minutes: -120,
   screen_width_px: 1920, screen_height_px: 1080, viewport_width_px: 1280, viewport_height_px: 720, pixel_ratio: 2,
 };
+
+test("SDK names are required metadata and are preserved in stored events", async t => {
+  const server = await collector(t);
+  const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const names = ["@chunkify/player-analytics", "@chunkify/analytics", "custom-playback-client", "  custom client  "];
+  for (const sdk_name of names) {
+    const event = { ...sample, event_id: randomUUID(), view_id: randomUUID(), sdk_name };
+    assertRequest("/v1/events", "post", event);
+    await server.post("/v1/events", JSON.stringify(event), 201);
+    const response = await fetch(`${server.url}/v1/views/${event.view_id}`, {
+      headers: { Authorization: `Bearer ${server.keys.secret_key}` },
+    });
+    const detail = await assertResponse("/v1/views/{view_id}", "get", response, 200);
+    assert.equal(detail.events[0].event.sdk_name, sdk_name);
+  }
+  const stored = await server.get("/v1/events");
+  assert.deepEqual(stored.events.map(record => record.event.sdk_name), names);
+  for (const sdk_name of [undefined, null, "", " \t\n", 1, false, {}, []]) {
+    const invalid = { ...sample, event_id: randomUUID(), view_id: randomUUID(), sdk_name };
+    assert.throws(() => assertRequest("/v1/events", "post", invalid), assert.AssertionError);
+    await server.post("/v1/events", JSON.stringify(invalid), 400);
+  }
+  for (const fields of [{ schema_version: 2 }, { event_name: "custom.event" }, { playing_time_ms: -1 }]) {
+    const invalid = { ...sample, event_id: randomUUID(), view_id: randomUUID(), sdk_name: "custom-playback-client", ...fields };
+    assert.throws(() => assertRequest("/v1/events", "post", invalid), assert.AssertionError);
+    await server.post("/v1/events", JSON.stringify(invalid), 400);
+  }
+});
 
 test("tab visibility survives ingestion and view history without changing playback states", async t => {
   const server = await collector(t);

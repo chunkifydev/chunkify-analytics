@@ -45,10 +45,10 @@ try {
     await copyFile(path.join(root, file), path.join(bundle, file));
   }
   // The fixture generator uses the installed SDK; it has no runtime dependencies.
-  const sdk = path.join(root, 'node_modules/@chunkify/analytics');
+  const sdk = path.join(root, 'node_modules/@chunkify/player-analytics');
   const metadata = JSON.parse(await readFile(path.join(sdk, 'package.json'), 'utf8'));
   if (Object.keys(metadata.dependencies || {}).length) throw new Error('Update the bundle packer for the SDK runtime dependencies before packaging.');
-  const sdkDestination = path.join(bundle, 'node_modules/@chunkify/analytics');
+  const sdkDestination = path.join(bundle, 'node_modules/@chunkify/player-analytics');
   await mkdir(sdkDestination, { recursive: true });
   await mkdir(path.join(sdkDestination, 'dist'));
   for (const name of ['browser-context', 'chunkify', 'core', 'datadog', 'event-types', 'hlsjs', 'http', 'index', 'mapper', 'monitor', 'options', 'otlp', 'player', 'posthog', 'shaka', 'videojs']) {

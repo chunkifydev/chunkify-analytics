@@ -30,6 +30,20 @@ jobs:
       CARGO_BUILD_JOBS: 2
       RUSTUP_TOOLCHAIN: "1.99.0"
       CHUNKIFY_BINARY: ${{ github.workspace }}/target/ci/chunkify-analytics
+    services:
+      # Disposable ClickHouse for the ClickHouse storage checks.
+      clickhouse:
+        image: clickhouse/clickhouse-server:25.8
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        ports:
+          - 18123:8123
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "wget --spider --quiet http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -66,6 +80,12 @@ jobs:
         run: npx playwright install --only-shell chromium
       - name: Test native demo, HTTP API and browser adapters
         run: node --test examples/demo/*.test.mjs tests/http/*.test.mjs
+      - name: Test the same API on ClickHouse storage
+        env:
+          CHUNKIFY_TEST_CLICKHOUSE_URL: http://127.0.0.1:18123
+        run: |
+          node --test tests/http/clickhouse.test.mjs tests/http/openapi.test.mjs tests/http/context-filters.test.mjs
+          cargo test --locked --profile ci --test mcp
       - name: Prepare tested executable for Docker
         run: |
           mkdir -p target/container/usr/local/bin target/container/opt/duckdb

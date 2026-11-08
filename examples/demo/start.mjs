@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createWriteStream } from 'node:fs';
 import { spawn, execFile } from 'node:child_process';
@@ -26,13 +27,42 @@ async function saveState(dir, state) {
   await writeFile(temporary, JSON.stringify(saved, null, 2) + '\n', { mode: 0o600 });
   await rename(temporary, path.join(dir, 'demo.json'));
 }
-async function prepareData(dir, binary, env, signal) {
+// Analytics settings for this demo directory. Commands run in the directory, so
+// they and the demo server use the same ClickHouse database.
+async function writeConfig(dir, clickhouse, database, origins = []) {
+  await writeFile(path.join(dir, 'config.toml'), `server.allowed_origins = ${JSON.stringify(origins)}
+server.ingest_per_second = 10000
+retention.seconds = 0
+clickhouse.url = ${JSON.stringify(clickhouse)}
+clickhouse.database = ${JSON.stringify(database)}
+clickhouse.registry_refresh_seconds = 1
+`, { mode: 0o600 });
+}
+// One running demo per directory: a second launch would rotate the first one's keys.
+const running = new Set();
+async function lock(dir) {
+  const busy = new Error('A demo is already running for this data directory. Stop it first.');
+  if (running.has(dir)) throw busy;
+  const file = path.join(dir, 'demo.lock');
+  try {
+    const pid = Number(await readFile(file, 'utf8'));
+    if (pid && pid !== process.pid) {
+      try { process.kill(pid, 0); throw busy; }
+      catch (error) { if (error.code !== 'ESRCH') throw error; }
+    }
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  running.add(dir);
+  await writeFile(file, String(process.pid), { mode: 0o600 });
+  return async () => { running.delete(dir); await rm(file, { force: true }); };
+}
+async function prepareData(dir, binary, env, signal, clickhouse) {
   try {
     const content = await readFile(path.join(dir, 'demo.json'), 'utf8');
     let state;
     try { state = JSON.parse(content); } catch { throw new Error('Invalid demo.json. Restore the saved demo state or choose a new data directory.'); }
     const hasProject = id => typeof state.projects?.[id]?.project_id === 'string' && /^[0-9a-f-]{36}$/.test(state.projects[id].project_id);
     if (state.version !== 1 || typeof state.seeded !== 'boolean' || !hasProject('demo') || !hasProject('player') ||
+      typeof state.database !== 'string' || !/^chunkify_demo_[0-9a-f]{16}$/.test(state.database) ||
       !/^\d{4}-\d{2}-\d{2}T00:00:00\.000Z$/.test(state.seedDate) || !Number.isFinite(Date.parse(state.seedDate))) throw new Error('Invalid demo state.');
     return state;
   } catch (error) {
@@ -44,14 +74,15 @@ async function prepareData(dir, binary, env, signal) {
   await mkdir(path.dirname(dir), { recursive: true });
   const staging = await mkdtemp(dir + '.setup-');
   try {
-    const adminEnv = { ...env, CHUNKIFY_DATA_DIR: staging };
+    const database = `chunkify_demo_${createHash('sha256').update(`${dir}:${Date.now()}:${Math.random()}`).digest('hex').slice(0, 16)}`;
+    await writeConfig(staging, clickhouse, database);
     const run = async args => {
       signal.throwIfAborted();
-      try { return (await exec(binary, args, { env: adminEnv, cwd: staging, signal, timeout: 30000 })).stdout; }
-      catch { throw new Error(`Collector ${args[0]} failed. Check that the executable matches your OS and this repository version.`); }
+      try { return (await exec(binary, args, { env, cwd: staging, signal, timeout: 30000 })).stdout; }
+      catch { throw new Error(`Collector ${args[0]} failed. Check that ClickHouse is running at ${clickhouse} and that the executable matches your OS and this repository version.`); }
     };
     await run(['init']);
-    const state = { version: 1, seedDate: new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString(), seeded: false, projects: {} };
+    const state = { version: 1, database, seedDate: new Date(new Date().setUTCHours(0, 0, 0, 0)).toISOString(), seeded: false, projects: {} };
     for (const [id, name] of [['demo', 'Synthetic demo data'], ['player', 'Player test']]) {
       state.projects[id] = JSON.parse(await run(['project', 'create', name]));
     }
@@ -65,7 +96,7 @@ async function refreshKeys(dir, binary, env, signal, state) {
   // Keep runtime credentials in memory. Each launch replaces the demo's keys.
   const run = async args => {
     signal.throwIfAborted();
-    try { return JSON.parse((await exec(binary, args, { env: { ...env, CHUNKIFY_DATA_DIR: dir }, cwd: dir, signal, timeout: 30000 })).stdout); }
+    try { return JSON.parse((await exec(binary, args, { env, cwd: dir, signal, timeout: 30000 })).stdout); }
     catch { throw new Error('Could not refresh demo credentials. Stop any running demo using this directory and try again.'); }
   };
   const projects = await run(['project', 'list']);
@@ -101,12 +132,13 @@ async function seed(url, state, signal) {
     }));
   }
 }
-export async function launchDemo({ collector, dataDir = path.join(root, 'demo-data'), port = 8787, open = true, signal = new AbortController().signal, log = console.log } = {}) {
+export async function launchDemo({ collector, clickhouse = process.env.CHUNKIFY_CLICKHOUSE_URL ?? 'http://127.0.0.1:8123',
+  dataDir = path.join(root, 'demo-data'), port = 8787, open = true, signal = new AbortController().signal, log = console.log } = {}) {
   if (Number(process.versions.node.split('.')[0]) !== 24) throw new Error('Use Node.js 24 for this demo.');
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('--port must be between 0 and 65535.');
   const binary = await findCollector(collector || process.env.CHUNKIFY_BINARY);
   const dir = path.resolve(dataDir);
-  let handler, child, collectorLog, stopping;
+  let handler, child, collectorLog, stopping, unlock;
   const server = createServer((req, res) => {
     if (handler) return handler(req, res);
     res.writeHead(503, { 'Content-Type': 'text/plain' }); res.end('Preparing the local demo.');
@@ -121,6 +153,7 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
       await closed; clearTimeout(timer);
     }
     collectorLog?.end();
+    await unlock?.();
   })();
   signal.addEventListener('abort', stop, { once: true });
   try {
@@ -130,12 +163,11 @@ export async function launchDemo({ collector, dataDir = path.join(root, 'demo-da
     catch { throw new Error(`Dashboard port ${port} is unavailable. Stop the other demo, or use --port 0 to choose a free port.`); }
     const dashboardUrl = `http://127.0.0.1:${server.address().port}`;
     const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('CHUNKIFY_')));
-    Object.assign(env, {
-      CHUNKIFY_DATA_DIR: dir, CHUNKIFY_BIND: '127.0.0.1:0',
-    });
-    const state = await prepareData(dir, binary, env, signal);
+    Object.assign(env, { CHUNKIFY_BIND: '127.0.0.1:0' });
+    const state = await prepareData(dir, binary, env, signal, clickhouse);
+    unlock = await lock(dir);
     const origins = [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'];
-    await writeFile(path.join(dir, 'config.toml'), `server.allowed_origins = ${JSON.stringify(origins)}\nserver.ingest_per_second = 10000\nduckdb.threads = 1\nretention.seconds = 0\n`, { mode: 0o600 });
+    await writeConfig(dir, clickhouse, state.database, origins);
     signal.throwIfAborted();
     collectorLog = createWriteStream(path.join(dir, 'collector.log'), { flags: 'a', mode: 0o600 });
     child = spawn(binary, ['serve'], { env, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -175,10 +207,10 @@ function options(args) {
   const result = {};
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--no-open') result.open = false;
-    else if (['--collector', '--data-dir', '--port'].includes(args[i]) && args[i + 1] && !args[i + 1].startsWith('--')) {
-      const key = { '--collector': 'collector', '--data-dir': 'dataDir', '--port': 'port' }[args[i]];
+    else if (['--collector', '--clickhouse', '--data-dir', '--port'].includes(args[i]) && args[i + 1] && !args[i + 1].startsWith('--')) {
+      const key = { '--collector': 'collector', '--clickhouse': 'clickhouse', '--data-dir': 'dataDir', '--port': 'port' }[args[i]];
       result[key] = key === 'port' ? Number(args[++i]) : args[++i];
-    } else throw new Error('Usage: npm run demo -- [--collector PATH] [--data-dir PATH] [--port NUMBER] [--no-open]');
+    } else throw new Error('Usage: npm run demo -- [--collector PATH] [--clickhouse URL] [--data-dir PATH] [--port NUMBER] [--no-open]');
   }
   return result;
 }

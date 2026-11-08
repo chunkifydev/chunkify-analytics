@@ -31,13 +31,13 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.99.0"
       CHUNKIFY_BINARY: ${{ github.workspace }}/target/ci/chunkify-analytics
     services:
-      # Disposable ClickHouse for the ClickHouse storage checks.
+      # Disposable ClickHouse for every test that starts an analytics server.
       clickhouse:
         image: clickhouse/clickhouse-server:25.8
         env:
           CLICKHOUSE_SKIP_USER_SETUP: "1"
         ports:
-          - 18123:8123
+          - 127.0.0.1:8123:8123
         options: >-
           --ulimit nofile=262144:262144
           --health-cmd "wget --spider --quiet http://127.0.0.1:8123/ping"
@@ -61,12 +61,10 @@ jobs:
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: linked-duckdb-ci-ubuntu22-v1
+          key: clickhouse-ci-ubuntu22-v1
           cache-on-failure: true
       - name: Install local geolocation database for the native demo
         run: sh scripts/install-geolocation.sh
-      - name: Install prebuilt DuckDB
-        run: sh scripts/install-duckdb.sh
       # cargo test also builds the real executable for integration tests. Build
       # that dependency graph first so later checks reuse the same artifacts.
       - name: Build analytics server and test executables
@@ -80,17 +78,10 @@ jobs:
         run: npx playwright install --only-shell chromium
       - name: Test native demo, HTTP API and browser adapters
         run: node --test examples/demo/*.test.mjs tests/http/*.test.mjs
-      - name: Test the same API on ClickHouse storage
-        env:
-          CHUNKIFY_TEST_CLICKHOUSE_URL: http://127.0.0.1:18123
-        run: |
-          node --test tests/http/clickhouse.test.mjs tests/http/openapi.test.mjs tests/http/context-filters.test.mjs
-          cargo test --locked --profile ci --test mcp
       - name: Prepare tested executable for Docker
         run: |
-          mkdir -p target/container/usr/local/bin target/container/opt/duckdb
+          mkdir -p target/container/usr/local/bin
           cp "$CHUNKIFY_BINARY" target/container/usr/local/bin/chunkify-analytics
-          cp target/lib/libduckdb.so target/container/opt/duckdb/libduckdb.so
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Validate Dockerfile

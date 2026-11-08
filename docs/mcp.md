@@ -76,8 +76,8 @@ to check the connection. See the
 
 For clients without Streamable HTTP support, install the Chunkify binary on the
 client machine and let the client launch `chunkify-analytics mcp`. This optional
-adapter connects to the running analytics server over HTTP and needs no database volume
-or `init` command.
+adapter connects to the running analytics server over HTTP and needs no
+ClickHouse connection or `init` command.
 For a client using `mcpServers` JSON:
 
 ```json

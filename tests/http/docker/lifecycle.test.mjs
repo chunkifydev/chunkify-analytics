@@ -3,7 +3,7 @@ import test from "node:test";
 import { randomUUID } from "node:crypto";
 import { attachAnalytics } from "@chunkify/player-analytics";
 import { createHttpAdapter } from "@chunkify/player-analytics/http";
-import { containerCollector, docker } from "./support.mjs";
+import { containerCollector, docker, eventually } from "./support.mjs";
 
 test("the bundled City MMDB locates forwarded public addresses without storing them", { timeout: 120000 }, async t => {
   const server = await containerCollector({ settings: {
@@ -66,11 +66,11 @@ test("the admin environment key provisions a project that survives container rep
   for (const key of [adminKey, project.public_key, project.secret_key]) assert.ok(!logs.includes(key));
 });
 
-test("a non-root container keeps SDK events and keys when replaced, and stops gracefully", { timeout: 120000 }, async (t) => {
+test("a non-root container keeps no state, so a replacement serves the same events and keys", { timeout: 120000 }, async (t) => {
   const server = await containerCollector();
   t.after(() => server.close());
   assert.notEqual(await docker(["exec", server.name, "id", "-u"]), "0");
-  assert.equal(await docker(["exec", server.name, "stat", "-c", "%a", "/data/keys.json"]), "600");
+  assert.equal(await docker(["exec", server.name, "ls", "/data"]), "config.toml", "servers keep no local state");
   assert.deepEqual(await (await fetch(`${server.url}/healthz`)).json(), { status: "ok" });
   assert.equal((await fetch(`${server.url}/v1/events`)).status, 401);
 
@@ -118,19 +118,18 @@ test("docker exec manages live projects and keys in a non-root read-only contain
   assert.deepEqual((await projectRead.json()).events, []);
   const token = await command("key", "create", "default", "secret", "Dashboard");
   assert.equal(token.restart_required, false);
-  assert.equal(await docker(["exec", server.name, "stat", "-c", "%a", "/data/admin.sock"]), "600");
   const status = async (secret) => (await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${secret}` } })).status;
   assert.equal(await status(token.key), 200);
   const rotated = await command("key", "rotate", "default", token.key_id);
   assert.equal(rotated.key_id, token.key_id);
-  assert.equal(await status(token.key), 401);
+  await eventually(async () => await status(token.key) === 401, "a rotated key must stop working");
   assert.equal(await status(rotated.key), 200);
   await server.stop("kill");
   await server.start();
   assert.equal(await status(token.key), 401);
   assert.equal(await status(rotated.key), 200);
   await command("key", "revoke", "default", token.key_id);
-  assert.equal(await status(rotated.key), 401);
+  await eventually(async () => await status(rotated.key) === 401, "a revoked key must stop working");
   assert.equal((await command("project", "list"))[0].keys.length, 2);
   const logs = await docker(["logs", server.name]);
   assert.ok(!logs.includes(token.key) && !logs.includes(rotated.key));

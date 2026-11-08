@@ -24,22 +24,17 @@ assert.ok(Number.isInteger(duration) && duration >= 10 && duration <= 300);
 const views = Number(process.env.CHUNKIFY_READ_LOAD_VIEWS ?? 100);
 assert.ok(Number.isInteger(views) && views >= 1 && views <= 10000);
 assert.ok(!distinct || views >= 10, "Distinct-query comparison needs ten seeded views per tenant");
-const endpoint = process.env.CHUNKIFY_S3_TEST_ENDPOINT;
-assert.ok(endpoint, "Set CHUNKIFY_S3_TEST_ENDPOINT to an endpoint reachable from Docker");
 const admin = randomUUID();
 const server = await containerCollector({
   resources: ["--platform=linux/arm64", `--cpus=${cpus}`, `--memory=${memory}m`, `--memory-swap=${memory}m`],
   environment: { CHUNKIFY_ADMIN_KEY: admin },
-  settings: { profile: true, "logging.level": "warn", "duckdb.threads": 1,
+  settings: { "logging.level": "warn",
     "server.ingest_per_second": 10000, "retention.seconds": 0,
-    "storage.backend": "s3", "storage.url": `s3://${process.env.CHUNKIFY_S3_TEST_BUCKET ?? "chunkify-analytics-test"}/read-load-${randomUUID()}/`,
-    "storage.endpoint": endpoint, "storage.region": "us-east-1", "storage.access_key_id": "test",
-    "storage.secret_access_key": "test", "storage.use_ssl": false, "storage.flush_interval_seconds": 0,
     "cache.report_ttl_seconds": 60, "rate_limits.read_concurrent": concurrent, "rate_limits.read_concurrent_per_project": perProject },
 });
 let phase = "seed", stopped = false, stopWrites = false, writer;
 const tenants = [server.keys];
-const report = { users, projects, write_target_rps: 100, duration_seconds: duration, flush_interval_seconds: 0, views_per_project: views, seed_events: null, cpu: cpus, memory_mib: memory, architecture: "arm64", max_http_connections: users, max_write_connections: 128, max_outstanding_writes: 256, concurrent, per_project: perProject, rounds: [] };
+const report = { users, projects, write_target_rps: 100, duration_seconds: duration, storage: "clickhouse", views_per_project: views, seed_events: null, cpu: cpus, memory_mib: memory, architecture: "arm64", max_http_connections: users, max_write_connections: 128, max_outstanding_writes: 256, concurrent, per_project: perProject, rounds: [] };
 function read(path, tenant, body, ingest = false) {
   return new Promise((resolve, reject) => {
     const encoded = body && JSON.stringify(body);
@@ -91,7 +86,7 @@ try {
       }
     }));
   }
-  // Raw event reads bypass the report cache. Wait for all buffered files to publish.
+  // Raw event reads bypass the report cache. Confirm every tenant's events are stored.
   phase = "seed-publication";
   console.log(JSON.stringify({ phase, projects, views_per_project: views }));
   const deadline = Date.now() + 15000;
@@ -214,15 +209,10 @@ try {
   assert.match(memory, /oom_kill 0/);
   assert.equal((await server.stop()).ExitCode, 0);
   stopped = true;
-  const profiles = server.lastLogs.split("\n").filter(line => line.startsWith('{"type":"collector_profile"')).map(line => JSON.parse(line));
-  report.report_queries = profiles.filter(p => p.worker === "reader").reduce((sum, p) => sum + Object.values(p.jobs).reduce((n, job) => n + job.execution.count, 0), 0);
-  // Eight cached keys per tenant at most, plus the uncached seed-publication checks.
-  assert.ok(report.report_queries <= projects * 10 * (Math.ceil(duration / 60) + 1) + (distinct ? users : 0), `Reports were not coalesced: ${report.report_queries}`);
-  assert.ok(report.report_queries > 0);
   const destination = process.env.CHUNKIFY_LOAD_REPORT ?? "target/benchmarks/read-load.json";
   await mkdir(dirname(destination), { recursive: true });
   await writeFile(destination, JSON.stringify(report, null, 2) + "\n");
-  console.log(JSON.stringify({ report: destination, report_queries: report.report_queries, memory_peak_mib: Math.ceil(report.memory_peak_bytes / 1048576) }));
+  console.log(JSON.stringify({ report: destination, memory_peak_mib: Math.ceil(report.memory_peak_bytes / 1048576) }));
 } catch (error) {
   report.failure = { phase, error: error.message };
   const destination = process.env.CHUNKIFY_LOAD_REPORT ?? "target/benchmarks/read-load.json";

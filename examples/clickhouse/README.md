@@ -59,5 +59,5 @@ docker build -t chunkify-analytics:local .
 echo 'CHUNKIFY_IMAGE=chunkify-analytics:local' >> examples/clickhouse/.env
 ```
 
-See [ClickHouse storage](../../docs/clickhouse.md) for settings, replication and
+See [storage](../../docs/storage.md) for settings, replication and
 backups.

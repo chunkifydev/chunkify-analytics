@@ -13,7 +13,7 @@ test('shared archive excludes data and credentials even when stored under the ex
   try {
     await writeFile(path.join(dependencyCanary, 'keys.json'), 'SYNTHETIC-PRIVATE-CANARY');
     await writeFile(path.join(canary, 'demo.json'), JSON.stringify({ secret_key: 'SYNTHETIC-PRIVATE-CANARY' }));
-    await writeFile(path.join(canary, 'analytics.duckdb'), 'synthetic data');
+    await writeFile(path.join(canary, 'config.toml'), 'clickhouse.password = "SYNTHETIC-PRIVATE-CANARY"');
     await exec(process.execPath, ['examples/demo/pack.mjs'], { cwd: root, timeout: 50000 });
     const prefix = `chunkify-analytics-demo-${process.platform}-${process.arch}`;
     const archive = path.join(root, 'dist', prefix + '.tar.gz');
@@ -24,13 +24,13 @@ test('shared archive excludes data and credentials even when stored under the ex
     assert.ok(stdout.includes(prefix + '/docs/licenses/db-ip.txt'));
     assert.equal(stdout.includes(path.basename(canary)), false);
     assert.equal(stdout.includes(path.basename(dependencyCanary)), false);
-    assert.equal(/(?:demo\.json|keys\.json|\.duckdb|\.env|demo-data)/.test(stdout), false);
+    assert.equal(/(?:demo\.json|demo\.lock|\.env|demo-data)/.test(stdout), false);
     const { stdout: readme } = await exec('tar', ['-xOzf', archive, prefix + '/README.md']);
     assert.ok(readme.includes('Node.js 24'));
     const extracted = await mkdtemp(path.join(root, 'target', 'demo-package-test-'));
     try {
       await exec('tar', ['-xzf', archive, '-C', extracted]);
-      // A relocated bundle must load DuckDB without Cargo or loader environment variables.
+      // A relocated bundle must start without Cargo or loader environment variables.
       const { stdout: help } = await exec(path.join(extracted, prefix, 'bin/chunkify-analytics'), ['--help'],
         { cwd: extracted, env: { PATH: process.env.PATH } });
       assert.ok(help.includes('Usage:'));

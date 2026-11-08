@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { statfs } from "node:fs/promises";
 import { monitorEventLoopDelay } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
-import { containerCollector, docker, image } from "./support.mjs";
+import { clickhouseQuery, containerCollector, docker } from "./support.mjs";
 import { captureWorkload } from "./workload.mjs";
 import { containerMemoryGuardMiB, parseMemoryStats, resources } from "./resources.mjs";
 
@@ -34,17 +34,22 @@ export async function hostFreeBytes() {
 
 // One Docker exec per sample. cgroup v2 memory includes filesystem cache; RSS
 // does not. These are sampled values, not continuous profiling or exact peaks.
+// Stored bytes of this server's ClickHouse database, including indexes.
+async function storedBytes(server) {
+  return Number(await clickhouseQuery(`SELECT sum(bytes_on_disk) FROM system.parts WHERE active AND database = '${server.database}'`));
+}
+
 async function sample(server) {
   const raw = await docker(["exec", server.name, "sh", "-c",
-    "cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.stat /proc/1/status /sys/fs/cgroup/memory.stat /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.pressure; du -sb /data; df -Pk /data; find /data -name '*.wal' -printf 'wal_bytes %s\\n'"]);
-  const disk = raw.split("\n").find((line) => /^\S+\s+\d+\s+\d+\s+\d+\s+\d+%\s/.test(line))?.trim().split(/\s+/);
-  assert.ok(disk, "container disk measurement must be available");
+    "cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/cpu.stat /proc/1/status /sys/fs/cgroup/memory.stat /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.pressure"]);
+  const df = await docker(["exec", server.clickhouse.name, "df", "-Pk", "/var/lib/clickhouse"]);
+  const disk = df.split("\n").find((line) => /^\S+\s+\d+\s+\d+\s+\d+\s+\d+%\s/.test(line))?.trim().split(/\s+/);
+  assert.ok(disk, "ClickHouse disk measurement must be available");
   const memory = process.memoryUsage();
   const point = { container_memory_bytes: Number(raw.split("\n")[0]),
     cpu_usage_usec: Number(raw.match(/^usage_usec (\d+)/m)?.[1]),
     process_rss_bytes: Number(raw.match(/^VmRSS:\s+(\d+) kB$/m)?.[1]) * 1024,
-    data_bytes: Number(raw.match(/^(\d+)\s+\/data$/m)?.[1]),
-    wal_bytes: [...raw.matchAll(/^wal_bytes (\d+)/gm)].reduce((sum, match) => sum + Number(match[1]), 0),
+    data_bytes: await storedBytes(server),
     volume_free_bytes: Number(disk[3]) * 1024, host_free_bytes: await hostFreeBytes(),
     generator_rss_bytes: memory.rss, generator_heap_used_bytes: memory.heapUsed,
     generator_heap_total_bytes: memory.heapTotal, generator_external_bytes: memory.external,
@@ -56,7 +61,7 @@ async function sample(server) {
 }
 
 function checkSafety(point) {
-  if (point.data_bytes > safety.max_data_mib * mib) return "data directory size limit";
+  if (point.data_bytes > safety.max_data_mib * mib) return "stored data size limit";
   if (Math.min(point.volume_free_bytes, point.host_free_bytes) < safety.min_free_disk_mib * mib) return "free disk floor";
   if (point.container_memory_bytes > safety.max_container_memory_mib * mib) return "container memory threshold";
   if (point.generator_rss_bytes > safety.max_generator_rss_mib * mib) return "load generator memory threshold";
@@ -159,7 +164,7 @@ export async function verify(server, sent, acknowledged, preloadIds, workload, o
 
 export async function measure(input, workload, { signal, fixture, onProgress = async () => {} } = {}) {
   const config = { duplicate_every: 0, large_every: 0,
-    preload: 0, concurrency: 128, shutdown: "stop", rate_limit: 10000, queries: true, profile: false, ...input };
+    preload: 0, concurrency: 128, shutdown: "stop", rate_limit: 10000, queries: true, ...input };
   if (config.preload > safety.max_unique_events) throw new Error("Preload exceeds the unique-event safety limit");
   if (fixture?.volume) {
     assert.equal(fixture.count, config.preload, "fixture must match preload count");
@@ -170,8 +175,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     // The monitor issues three concurrent reads for the same project.
     "rate_limits.read_concurrent_per_project": "3",
-    "retention.seconds": "2592000", "retention.interval_seconds": "5",
-    "profile": String(config.profile), ...config.write_settings };
+    "retention.seconds": "2592000", "retention.interval_seconds": "5", ...config.write_settings };
   const server = await containerCollector({ resources, settings, seed: fixture?.volume });
   const sent = new Map();
   const acknowledged = new Set();
@@ -385,11 +389,14 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
     abortReason ??= checkSafety(after);
     const stopStart = performance.now();
     const stopped = await server.stop(config.shutdown);
-    const profiles = server.lastLogs.split("\n").filter((line) => line.startsWith('{"type":"collector_profile"')).map((line) => JSON.parse(line));
-    const collectorProfile = profiles.find((profile) => !profile.worker || profile.worker === "writer") ?? null;
-    const readerProfile = profiles.find((profile) => profile.worker === "reader") ?? null;
-    if (config.profile && config.shutdown === "stop") assert.ok(collectorProfile, "collector profile must be available after graceful shutdown");
-    if (config.profile && config.shutdown === "stop" && settings["experimental.read_worker"] === "true") assert.ok(readerProfile, "separate reader profile must be available after graceful shutdown");
+    // Totals from the server's INFO batch_saved lines, one per saved batch.
+    const batches = { count: 0, requests: 0, received: 0, inserted: 0, duplicates: 0 };
+    for (const line of (server.lastLogs ?? "").split("\n").filter((line) => line.includes("batch_saved"))) {
+      batches.count++;
+      for (const name of ["requests", "received", "inserted", "duplicates"]) {
+        batches[name] += Number(line.match(new RegExp(`${name}=(\\d+)`))?.[1] ?? 0);
+      }
+    }
     const shutdownMs = performance.now() - stopStart;
     assert.equal(stopped.OOMKilled, false, "benchmark must stay within memory limits");
     assert.equal(stopped.ExitCode, config.shutdown === "kill" ? 137 : 0);
@@ -406,8 +413,7 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
       if (count % 100000 === 0) console.error(`Verified ${count} events...`);
     });
     await server.stop();
-    const dataBytes = Number((await docker(["run", "--rm", "--mount", `type=volume,src=${server.volume},dst=/data,readonly`,
-      "--entrypoint", "du", image, "-sb", "/data"])).split(/\s/)[0]);
+    const dataBytes = await storedBytes(server);
     const queries = Object.fromEntries(Object.entries(queryResults).map(([key, value]) => [key,
       { latency: distribution(value.latency), failures: value.failures }]));
     const latency = distribution(latencies);
@@ -433,13 +439,13 @@ export async function measure(input, workload, { signal, fixture, onProgress = a
         newly_acknowledged_per_second: +((acknowledged.size - preloadIds.size) / elapsed).toFixed(2),
         persisted_new: checked.persisted_new, persisted_without_ack: checked.persisted_without_ack },
       request_latency: latency, successful_request_latency: successfulLatency, schedule_lag: lag,
-      preparation_latency: distribution(preparation), queries, collector_profile: collectorProfile, reader_profile: readerProfile, max_inflight: maxInflight,
+      preparation_latency: distribution(preparation), queries, batches, max_inflight: maxInflight,
       payload: { total_wire_bytes: wireBytes, total_decoded_bytes: decodedBytes,
         mean_wire_bytes_per_request: requests.sent ? Math.round(wireBytes / requests.sent) : null },
       resources: { samples, peak_process_rss_mib: +(peak("process_rss_bytes") / mib).toFixed(2),
         peak_container_memory_mib: +(peak("container_memory_bytes") / mib).toFixed(2),
         peak_generator_rss_mib: +(peak("generator_rss_bytes") / mib).toFixed(2),
-        peak_wal_bytes: peak("wal_bytes"), checkpointed_data_bytes: dataBytes,
+        stored_data_bytes: dataBytes,
         mean_container_cpu_cores: +((after.cpu_usage_usec - before.cpu_usage_usec) / 1e6 / (samples.at(-1).at_seconds)).toFixed(2),
         generator_cpu_cores: +((generatorCpu.user + generatorCpu.system) / 1e6 / elapsed).toFixed(2),
         generator_event_loop_p99_ms: +(loopDelay.percentile(99) / 1e6).toFixed(2) },

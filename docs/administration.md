@@ -1,21 +1,22 @@
 # Administration
 
-Run commands with the analytics server's configuration and data directory:
+Run commands with the analytics servers' `[clickhouse]` configuration:
 
 ```sh
 chunkify-analytics --config /path/to/config.toml project list
 ```
 
-In Docker, run them inside the active container:
+With Docker Compose, run them in an analytics container:
 
 ```sh
-docker exec chunkify-analytics chunkify-analytics project list
+docker compose exec analytics chunkify-analytics project list
 ```
 
-On Linux and macOS, project creation, key management and retention changes work
-while the analytics server runs. Stop it before renaming projects or replacing
-project settings.
-Other platforms require stopping the analytics server for all administration.
+Commands change the project registry in ClickHouse directly, while servers run.
+Every server checks the registry every `clickhouse.registry_refresh_seconds`
+(5 seconds by default) and applies changes without a restart. A new key works
+on every server at once. Ingestion limits from `project configure` apply when a
+server starts.
 
 ## Projects and named keys
 
@@ -51,18 +52,21 @@ Private keys created without the flag keep full project access, including
 project and key management. Existing keys remain full-access. Key creation,
 rotation and listings include a `read_only` boolean, and rotation preserves it.
 Create a new key to choose a different access level.
-Rotation keeps the key ID and immediately replaces its secret. For an update
-without interruption, create a second key, switch clients, then revoke the old key.
+Rotation keeps the key ID and replaces its secret. For an update without
+interruption, create a second key, switch clients, then revoke the old key.
 
-Changes take effect before a successful live command returns. Requests already
-authenticated may finish. If a command times out, check `project list` before
-retrying. If you lose a new key's secret, rotate or revoke it.
+A rotated or revoked key stops working on the server that made the change
+immediately, and on other servers at their next registry refresh. Requests
+already authenticated may finish. If a command times out, check `project list`
+before retrying. If you lose a new key's secret, rotate or revoke it. When two
+servers or commands change projects at the same time, each change is applied to
+the newest registry, so none is lost.
 
 All project credentials, including the default project's keys, are stored only
-as hashes. The registry contains project IDs, settings and key hashes in
-`data_dir/keys.json` for local storage or `<prefix>keys.json` in S3. S3 mode does
-not write a local credential cache. Do not edit the registry while the server runs.
-`init` returns the default keys once as JSON; save them in your secret manager.
+as hashes. The registry contains project IDs, settings and key hashes in the
+ClickHouse `registry` table. No server writes a local credential cache. Do not
+edit the registry table by hand. `init` returns the default keys once as JSON;
+save them in your secret manager.
 
 To replace a default primary credential:
 
@@ -93,7 +97,8 @@ To replace a project's overrides, save a JSON file:
 }
 ```
 
-Then stop the analytics server and apply it:
+Then apply it and restart the analytics servers so they use the new ingestion
+limits. Origins and retention apply without a restart:
 
 ```sh
 chunkify-analytics project configure PROJECT_ID /path/to/settings.json
@@ -253,9 +258,8 @@ keys and do not count toward the active project limit.
 ## Retention
 
 Expiration uses server receipt time, not the client's event timestamp. The
-default is 30 days. Cleanup runs at startup and hourly while serving.
-S3 reads hide expired rows before cleanup; local reads can include them until
-the next sweep. Expired events stop contributing to reports.
+default is 30 days. Reports hide expired events immediately. Cleanup deletes
+them at startup and hourly while serving, on every server.
 
 Change a project's duration without replacing its other settings:
 
@@ -269,10 +273,10 @@ chunkify-analytics project retention PROJECT_ID inherit
 ```
 
 Changes apply to existing and new events. Shortening retention makes older data
-eligible for cleanup; extending it cannot recover removed data. Changing the
-installation default or cleanup interval in TOML requires a restart.
-A failed scheduled cleanup retries at the next interval; a failed startup cleanup
-prevents startup. See [storage](storage.md) for S3 file expiration.
+eligible for cleanup; extending it does not bring back events that had already
+expired. Changing the installation default or cleanup interval in TOML requires
+a restart; give every server the same values. A failed scheduled cleanup
+retries at the next interval; a failed startup cleanup prevents startup.
 
 Your backend can change retention through the API with the project's full-access
 secret key:
@@ -292,57 +296,30 @@ cannot change retention through this endpoint.
 
 ## Backup and restore
 
-Stop the analytics server before taking or restoring a backup. Save the TOML configuration
-and deployment credentials separately. Keep backups private.
+All events, projects and credential hashes are in the ClickHouse database.
+Analytics servers keep no data, so back up the database with ClickHouse's
+[`BACKUP`](https://clickhouse.com/docs/operations/backup) command. Save the TOML
+configuration and deployment credentials separately, and keep backups private.
 
-For local storage, copy the complete data directory. Include a custom
-`[storage].path` database and its WAL if they live elsewhere:
+For example, with a backup disk named `backups` configured in ClickHouse:
 
-```sh
-cp -a ./data /srv/backups/analytics-backup
+```sql
+BACKUP DATABASE chunkify_analytics TO Disk('backups', 'analytics-2026-11-08.zip');
 ```
 
-Restore to a new directory, adjust any custom database path, and start without
+Restore into a new database and point the analytics servers at it, without
 running `init`:
 
-```sh
-cp -a /srv/backups/analytics-backup /srv/analytics-restored
-chunkify-analytics --data-dir /srv/analytics-restored serve
+```sql
+RESTORE DATABASE chunkify_analytics AS chunkify_restored
+FROM Disk('backups', 'analytics-2026-11-08.zip');
 ```
 
-For S3, back up and restore the complete prefix, including `keys.json`. A local
-credential cache alone is not a backup. Start the replacement with the same S3
-configuration.
+Include both the `events` and `registry` tables. Use the same analytics server
+version or a newer one. Check `/healthz`, events and summaries before sending
+traffic. A restore also restores old credentials and retention settings;
+reapply later changes as needed. Startup expiration still applies to restored
+data.
 
-Use the same analytics server version or one supporting the saved database schema.
-Check `/healthz`, events and summaries before sending traffic. A restore also
-restores old credentials and retention settings; reapply later changes as needed.
-Startup expiration still applies to restored data.
-
-### Docker volumes
-
-Back up a stopped local installation:
-
-```sh
-docker stop --time 20 chunkify-analytics
-umask 077
-docker run --rm \
-  --mount type=volume,src=chunkify-analytics-data,dst=/data,readonly \
-  --entrypoint tar chunkify-analytics:local -C /data -czf - . \
-  > analytics-backup.tar.gz
-docker start chunkify-analytics
-```
-
-Restore into a new volume:
-
-```sh
-docker volume create chunkify-analytics-restored
-docker run --rm -i \
-  --mount type=volume,src=chunkify-analytics-restored,dst=/data \
-  --entrypoint tar chunkify-analytics:local -C /data -xzpf - \
-  < analytics-backup.tar.gz
-```
-
-Start with the restored volume and the saved TOML file, without running `init`.
-A separately mounted TOML file and databases outside `/data` are not included
-in this volume backup.
+With Docker Compose, the `clickhouse-data` volume holds the database. Stop the
+stack before copying the volume itself.

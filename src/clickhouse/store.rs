@@ -460,7 +460,12 @@ async fn flush(
             counts[*request] += 1;
         }
         let insert: &[(&str, &str)] = if settings.async_insert {
-            &[("async_insert", "1"), ("wait_for_async_insert", "1")]
+            &[
+                ("async_insert", "1"),
+                ("wait_for_async_insert", "1"),
+                ("async_insert_busy_timeout_min_ms", "10"),
+                ("async_insert_busy_timeout_max_ms", "50"),
+            ]
         } else {
             &[("async_insert", "0")]
         };

@@ -27,7 +27,7 @@ user = "chunkify"
 | `clickhouse.database` | `CHUNKIFY_CLICKHOUSE_DATABASE` | `chunkify_analytics` | Database for events and the project registry. `init` creates it if missing. Letters, digits and underscores. |
 | `clickhouse.user` | `CHUNKIFY_CLICKHOUSE_USER` | ClickHouse default user | ClickHouse user. |
 | `clickhouse.password` | `CHUNKIFY_CLICKHOUSE_PASSWORD` | Empty | ClickHouse password. |
-| `clickhouse.async_insert` | — | `true` | Let ClickHouse combine inserts from all servers into fewer parts. Each request still waits until its events are stored. |
+| `clickhouse.async_insert` | — | `true` | Let ClickHouse combine inserts from all servers into fewer parts, buffering each batch for 10 to 50 ms. Each request still waits until its events are stored. `false` writes each batch directly, which suits a single server. |
 | `clickhouse.registry_refresh_seconds` | — | `5` | How often each server checks the shared registry for project and key changes. 1 to 3600. |
 | `clickhouse.deduplication_window_seconds` | — | `604800` (7 days) | Repeated event IDs received within this window are reported as duplicates and not stored again. `0` stores every delivery. |
 | `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Random | 0 to 63. Part of each event's internal order. Give each server a different value for strict uniqueness. |
@@ -39,6 +39,14 @@ server.
 Each server applies its own `server.ingest_per_second`, `[batch]` and
 `[rate_limits]` settings, so installation-wide limits grow with the number of
 servers.
+
+Reports and inserts share ClickHouse's CPU. Each server runs up to
+`rate_limits.read_concurrent` report queries at once, so the total across
+servers should stay near the number of ClickHouse cores. On a 4-core host, a
+limit of 8 instead of the default 32 kept ingestion three times higher while
+dashboards were saturated, with similar report throughput. See the
+[capacity benchmark](development.md#ingestion-and-read-capacity) to measure
+your own host.
 
 ## How servers share work
 

@@ -127,13 +127,15 @@ It runs three timed phases and writes `target/benchmarks/capacity.json`:
 3. **Mixed saturation**: ingestion and reads both run as fast as possible.
 
 Each phase reports offered and completed requests per second, failures by
-status, and p50/p95/p99 latency. Controls: `CHUNKIFY_CAPACITY_SERVERS` (number
+status, and p50/p95/p99 latency. Each phase starts with an untimed two-second
+warm-up. Controls: `CHUNKIFY_CAPACITY_SERVERS` (number
 of analytics servers, default 1), `CHUNKIFY_CAPACITY_SECONDS` (per phase,
 default 30), `CHUNKIFY_CAPACITY_WRITERS` and `CHUNKIFY_CAPACITY_READERS`
-(concurrent clients, default 64), `CHUNKIFY_CAPACITY_WRITE_RATE` (offered events
+(concurrent clients, default 512 and 64), `CHUNKIFY_CAPACITY_WRITE_RATE` (offered events
 per second during the read phases, default 200), `CHUNKIFY_CAPACITY_VIEWS`
 (seeded playback attempts per project, default 1000), and
-`CHUNKIFY_TEST_CLICKHOUSE_URL`. The load generator, servers and ClickHouse share
+`CHUNKIFY_TEST_CLICKHOUSE_URL`. `CHUNKIFY_CAPACITY_SETTINGS` adds `config.toml`
+fields as JSON, for example `{"clickhouse.async_insert": "false"}`. The load generator, servers and ClickHouse share
 the machine unless you point the benchmark at a remote ClickHouse server, so
 results describe that machine, not a production capacity guarantee.
 

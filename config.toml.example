@@ -28,6 +28,18 @@ backend = "local"
 # flush_interval_seconds = 60
 # Omit or set 0 to wait for each upload before acknowledging events.
 # See docs/storage.md for setup, expiration and single-writer operation.
+# For several servers sharing one ClickHouse database, set backend = "clickhouse"
+# and configure the [clickhouse] section below. See docs/clickhouse.md.
+
+# [clickhouse]
+# url = "http://127.0.0.1:8123"
+# database = "chunkify_analytics"
+# user = "chunkify"
+# password = "..."                   # Prefer CHUNKIFY_CLICKHOUSE_PASSWORD.
+# async_insert = true
+# registry_refresh_seconds = 5
+# deduplication_window_seconds = 604800
+# node_id = 1                        # 0..63, distinct for each server.
 
 [server]
 # External base URL for CSV download links behind an ingress or URL prefix:

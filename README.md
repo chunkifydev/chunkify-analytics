@@ -13,7 +13,8 @@ Chunkify Analytics includes:
 - Local or S3-compatible storage with configurable expiration.
 
 One `chunkify-analytics serve` process runs ingestion, queries, and MCP. You do
-not need to install or run a separate database server.
+not need to install or run a separate database server. To run several analytics
+servers side by side, use the optional [ClickHouse storage](#scale-out-with-clickhouse).
 
 Choose [Docker](#install-with-docker) for a packaged deployment, or
 [install the executable directly](#install-without-docker) on your computer.
@@ -392,6 +393,22 @@ Local storage is the default. Set `backend = "s3"` under `[storage]` for S3-comp
 storage, including Cloudflare R2. S3 keeps events and credentials when a container
 is replaced. Run one analytics server per bucket prefix.
 
+### Scale out with ClickHouse
+
+Set `backend = "clickhouse"` to keep events and projects in a ClickHouse database
+that several analytics servers share. Add servers behind a load balancer to handle
+more traffic. The API, MCP endpoint and dashboard stay the same. ClickHouse is
+open source and runs as one more container:
+
+```sh
+cd examples/clickhouse
+cp .env.example .env            # set CLICKHOUSE_PASSWORD
+docker compose run --rm analytics init
+docker compose up -d --scale analytics=3
+```
+
+See [ClickHouse storage](docs/clickhouse.md) for settings and behavior.
+
 Expiration defaults to 30 days by receipt time. Projects can override it.
 Expired events stop contributing to reports. Local database files can reuse
 freed space without shrinking.
@@ -414,6 +431,7 @@ See [storage](docs/storage.md) for configuration and
 ## Further documentation
 
 - [Storage backends and R2 setup](docs/storage.md)
+- [ClickHouse storage for multiple servers](docs/clickhouse.md)
 - [Configuration reference](docs/configuration.md)
 - [HTTP API and metric definitions](docs/api.md)
 - [Projects, credentials, retention, and backups](docs/administration.md)

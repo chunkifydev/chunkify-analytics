@@ -24,10 +24,13 @@ for deployment overrides, or set these variables directly in your container:
 | `CHUNKIFY_DATA_DIR` | `data_dir` | Container state directory. |
 | `CHUNKIFY_GEOIP_DATABASE` | `server.geoip_database` | Replace the bundled City MMDB with a local file. |
 | `CHUNKIFY_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
-| `CHUNKIFY_STORAGE_BACKEND` | `storage.backend` | Select `local` or `s3` storage. |
+| `CHUNKIFY_STORAGE_BACKEND` | `storage.backend` | Select `local`, `s3` or `clickhouse` storage. |
 | `CHUNKIFY_S3_URL`, `CHUNKIFY_S3_ENDPOINT`, `CHUNKIFY_S3_REGION` | Corresponding `storage` fields | S3 deployment connection. |
 | `CHUNKIFY_S3_ACCESS_KEY_ID`, `CHUNKIFY_S3_SECRET_ACCESS_KEY`, `CHUNKIFY_S3_SESSION_TOKEN` | Corresponding `storage` fields | Inject credentials without putting them in TOML. |
 | `CHUNKIFY_S3_URL_STYLE`, `CHUNKIFY_S3_USE_SSL` | Corresponding `storage` fields | Provider addressing and TLS. |
+| `CHUNKIFY_CLICKHOUSE_URL`, `CHUNKIFY_CLICKHOUSE_DATABASE` | `clickhouse.url`, `clickhouse.database` | ClickHouse connection. |
+| `CHUNKIFY_CLICKHOUSE_USER`, `CHUNKIFY_CLICKHOUSE_PASSWORD` | `clickhouse.user`, `clickhouse.password` | ClickHouse credentials, without putting the password in TOML. |
+| `CHUNKIFY_CLICKHOUSE_NODE_ID` | `clickhouse.node_id` | Optional distinct number for each server sharing a ClickHouse database. |
 | `CHUNKIFY_MCP_URL`, `CHUNKIFY_MCP_SECRET_KEY` | `mcp.url`, `mcp.secret_key` | Optional stdio adapter connection and secret. |
 
 The analytics server also loads `.env` from the working directory. Use `--env-file` to
@@ -47,11 +50,12 @@ settings or CLI flags.
 
 ## Storage
 
-See [storage](storage.md) for local and S3/R2 examples.
+See [storage](storage.md) for local and S3/R2 examples, and
+[ClickHouse storage](clickhouse.md) for the `[clickhouse]` section.
 
 | TOML field | Default | Meaning |
 | --- | --- | --- |
-| `storage.backend` | `local` | `local` or `s3`. |
+| `storage.backend` | `local` | `local`, `s3` or `clickhouse`. |
 | `storage.path` | `data_dir/analytics.duckdb` | Local database file. Relative paths resolve beside the configuration file. |
 | `storage.url` | Required for S3 | `s3://bucket/optional-prefix/`, without wildcards, credentials or escapes. |
 | `storage.endpoint` | AWS regional endpoint | Hostname and optional port, without a scheme or path. R2 uses `ACCOUNT_ID.r2.cloudflarestorage.com`. |
@@ -84,15 +88,15 @@ See [storage](storage.md) for local and S3/R2 examples.
 | --- | --- | --- |
 | `server.max_body_bytes` | `65536` | Maximum JSON request body size in bytes. Must be positive. |
 | `server.ingest_per_second` | `100` | Global ingestion token bucket. Capacity and refill rate both use this value. Must be positive. |
-| `batch.queue_max_bytes` | `16777216`; `33554432` for buffered S3 | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
-| `batch.queue_max_requests` | `256`; `4096` for buffered S3 | Writer channel capacity for writes and maintenance, also shared by local reads unless the separate reader is enabled. Also bounds per-project outstanding writes. Range 1..4096. The byte budget also applies to writes. |
+| `batch.queue_max_bytes` | `16777216`; `33554432` for buffered S3 and ClickHouse | Maximum bytes held by admitted prepared write buffers, including the active batch. Must be at least the batch byte limit, at most 268435456. |
+| `batch.queue_max_requests` | `256`; `4096` for buffered S3 and ClickHouse | Writer channel capacity for writes and maintenance, also shared by local reads unless the separate reader is enabled. Also bounds per-project outstanding writes. Range 1..4096. The byte budget also applies to writes. |
 
 ### Advanced performance settings
 
 | TOML field | Default | Meaning |
 | --- | --- | --- |
-| `batch.max_events` | `100`; `10000` for buffered S3 | Maximum records per write batch, including duplicates. Range 1..10000. A whole request must fit. |
-| `batch.max_bytes` | `1048576`; `10485760` for buffered S3 | Maximum prepared request-buffer bytes per batch. Range 1..67108864. See write batching below. |
+| `batch.max_events` | `100`; `10000` for buffered S3 and ClickHouse | Maximum records per write batch, including duplicates. Range 1..10000. A whole request must fit. |
+| `batch.max_bytes` | `1048576`; `10485760` for buffered S3 and ClickHouse | Maximum prepared request-buffer bytes per batch. Range 1..67108864. See write batching below. |
 | `batch.delay_ms` | `10` | Maximum time the worker spends collecting a batch. Range 0..1000 ms. `0` gives each request its own batch. |
 | `duckdb.threads` | Automatic | Optional DuckDB execution thread count, from 1..256. Applies to the shared database used by writes and reads. HTTP runs separately. |
 | `duckdb.checkpoint_threshold_mib` | `16` | DuckDB's automatic checkpoint threshold, in MiB. Integer from 1..1024. Local storage only. Larger values allow a larger write-ahead log between checkpoints; see below. |

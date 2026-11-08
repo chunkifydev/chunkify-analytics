@@ -48,6 +48,28 @@ path addressing and HTTP. Override these with `CHUNKIFY_S3_TEST_BUCKET`,
 Without an endpoint, remote tests skip; the custom local-path test still runs.
 
 
+## ClickHouse integration checks
+
+The ClickHouse tests need a disposable ClickHouse server. They create one
+database per test server, named `chunkify_test_*` or `chunkify_mcp_test_*`.
+
+```sh
+docker run -d --name chunkify-clickhouse-test -p 127.0.0.1:18123:8123 \
+  -e CLICKHOUSE_SKIP_USER_SETUP=1 --ulimit nofile=262144:262144 \
+  clickhouse/clickhouse-server:25.8
+export CHUNKIFY_TEST_CLICKHOUSE_URL=http://127.0.0.1:18123
+node --test tests/http/clickhouse.test.mjs tests/http/openapi.test.mjs tests/http/context-filters.test.mjs
+cargo test --locked --test mcp
+docker rm -f chunkify-clickhouse-test
+```
+
+With `CHUNKIFY_TEST_CLICKHOUSE_URL` set, test servers that would use default local
+storage use ClickHouse instead, so the OpenAPI, context-filter and MCP suites check
+the same API on both backends. `clickhouse.test.mjs` compares every report with
+local storage for one dataset and runs two servers against one database. Without
+the variable, it skips. Some `collector.test.mjs` tests inspect local files such
+as `keys.json` and do not apply to ClickHouse.
+
 ## DuckDB build and extensions
 
 Local builds, CI, and Docker link the official DuckDB 2.0.0 shared library.

@@ -1,7 +1,11 @@
 # Storage
 
-Choose `local` or `s3` in the `[storage]` section of `config.toml`, or set
-`CHUNKIFY_STORAGE_BACKEND` in the environment.
+Choose `local`, `s3` or `clickhouse` in the `[storage]` section of `config.toml`,
+or set `CHUNKIFY_STORAGE_BACKEND` in the environment.
+
+Local and S3 storage support one analytics server per database or prefix.
+[ClickHouse storage](clickhouse.md) lets several analytics servers share one
+database, so you can add servers as traffic grows.
 
 ## Local
 

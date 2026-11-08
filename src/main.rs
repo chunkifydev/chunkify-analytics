@@ -2,6 +2,7 @@ mod admin;
 mod api;
 mod backend;
 mod cli;
+mod clickhouse;
 mod config;
 mod settings;
 
@@ -63,13 +64,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "Cannot initialize server logging")?;
             let geolocation =
                 std::sync::Arc::new(geolocation::Database::open(&config.geoip_database)?);
+            // Every server holds its own data directory. With ClickHouse, many
+            // servers, each with its own directory, can share one database.
             let _lock = config.lock()?;
             let keys = config.keys()?;
             let config = std::sync::Arc::new(config);
             let projects = std::sync::Arc::new(projects::Registry::new(&keys, &config)?);
             let admin = admin::Server::bind(config.clone(), projects.clone(), keys)?;
             let controller = admin.controller();
-            let (store, worker) = store::Store::from_config(&config, projects.clone())?;
+            let (store, worker) = store::Store::connect(&config, projects.clone()).await?;
+            let refresh = admin::refresh_registry(config.clone(), controller.clone());
             let removed = store
                 .purge_expired(projects.clone())
                 .await
@@ -125,6 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .with_graceful_shutdown(shutdown)
             .await;
             admin.stop().await;
+            if let Some(refresh) = refresh {
+                refresh.abort();
+                let _ = refresh.await;
+            }
             maintenance.abort();
             let _ = maintenance.await;
             drop(store);

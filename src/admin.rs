@@ -112,6 +112,7 @@ pub struct Controller {
     config: Arc<Config>,
     registry: Arc<Registry>,
     keys: Mutex<Keys>,
+    missed: Mutex<Option<std::time::Instant>>,
 }
 
 pub enum ProjectAction {
@@ -144,6 +145,68 @@ impl Controller {
         Ok(())
     }
 
+    /// Adopt a newer project registry saved by another analytics server.
+    /// Only ClickHouse storage shares a registry between running servers.
+    pub fn sync(&self) -> Result<()> {
+        let crate::backend::Backend::ClickHouse(settings) = &self.config.backend else {
+            return Ok(());
+        };
+        let Some((version, bytes)) = crate::clickhouse::load_registry(settings)? else {
+            return Ok(());
+        };
+        let mut keys = self.keys.lock().map_err(|_| "Administration lock failed")?;
+        if version <= settings.loaded_version() {
+            return Ok(());
+        }
+        let next: Keys = serde_json::from_slice(&bytes)?;
+        projects::validate(&next.projects)?;
+        let mut policy = self
+            .registry
+            .retention
+            .write()
+            .map_err(|_| "Retention policy lock failed")?;
+        *policy = crate::retention::Policy::new(self.config.retention_seconds, &next.projects);
+        self.registry.replace_keys(&next, &self.config);
+        for project in next.projects.iter().filter(|project| !project.deleted) {
+            self.registry.replace_origins(
+                &project.id,
+                projects::effective_origins(
+                    &self.config.allowed_origins,
+                    project.settings.allowed_origins.as_deref(),
+                ),
+            );
+        }
+        drop(policy);
+        *keys = next;
+        settings.set_loaded_version(version);
+        Ok(())
+    }
+
+    /// Whether credentials can change on another server sharing this storage.
+    pub fn shares_registry(&self) -> bool {
+        self.config.is_clickhouse()
+    }
+
+    /// Refresh after an unknown credential, at most once per second, so a key
+    /// created through another server works here without waiting for a poll.
+    pub fn sync_after_miss(&self) -> bool {
+        {
+            let Ok(mut missed) = self.missed.lock() else {
+                return false;
+            };
+            if missed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
+                return false;
+            }
+            *missed = Some(std::time::Instant::now());
+        }
+        self.sync().is_ok()
+    }
+
+    // Mutations start from the newest shared registry to avoid stale writes.
+    fn sync_before_change(&self) -> std::result::Result<(), crate::api::ApiError> {
+        self.sync().map_err(|_| crate::api::ApiError::unavailable())
+    }
+
     pub fn create_project(
         &self,
         secret: &str,
@@ -153,6 +216,7 @@ impl Controller {
     ) -> std::result::Result<Value, crate::api::ApiError> {
         use crate::api::ApiError;
         self.authorize_admin(secret)?;
+        self.sync_before_change()?;
         projects::validate_retention(retention_seconds).map_err(ApiError::bad)?;
         let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
         if keys
@@ -184,10 +248,14 @@ impl Controller {
             config,
             registry,
             keys: Mutex::new(keys),
+            missed: Mutex::new(None),
         }
     }
 
     fn execute(&self, request: &Request) -> Reply {
+        if request.command != "project-list" {
+            self.sync().map_err(|error| error.to_string())?;
+        }
         let mut keys = self.keys.lock().map_err(|_| "Administration lock failed")?;
         execute(&self.config, &mut keys, Some(&self.registry), request)
             .map_err(|error| error.to_string())
@@ -199,6 +267,7 @@ impl Controller {
         action: ProjectAction,
     ) -> std::result::Result<Value, crate::api::ApiError> {
         use crate::{api::ApiError, projects::Permission};
+        self.sync_before_change()?;
         let mut keys = self.keys.lock().map_err(|_| ApiError::unavailable())?;
         // Recheck under the mutation lock so a revoked or rotated token cannot
         // authorize another queued change.
@@ -214,6 +283,7 @@ impl Controller {
         action: KeyAction,
     ) -> std::result::Result<Value, crate::api::ApiError> {
         self.authorize_admin(secret)?;
+        self.sync_before_change()?;
         let mut keys = self
             .keys
             .lock()
@@ -294,13 +364,47 @@ impl Controller {
     }
 }
 
+/// Poll the shared ClickHouse registry so changes made through any analytics
+/// server, or the CLI, apply to this server without a restart.
+pub fn refresh_registry(
+    config: Arc<Config>,
+    controller: Arc<Controller>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let crate::backend::Backend::ClickHouse(settings) = &config.backend else {
+        return None;
+    };
+    let interval = settings.registry_refresh;
+    Some(tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let controller = controller.clone();
+            match tokio::task::spawn_blocking(move || controller.sync().map_err(|e| e.to_string()))
+                .await
+            {
+                Ok(Ok(())) => {}
+                _ => eprintln!("Project registry refresh failed; will retry"),
+            }
+        }
+    }))
+}
+
 pub async fn command(config: &Config, command: &str, args: &[String]) -> Result<()> {
     let request = Request {
         command: command.into(),
         args: args.to_vec(),
     };
     let output = if let Some(_lock) = config.try_lock()? {
-        execute(config, &mut config.keys()?, None, &request)?
+        let mut output = execute(config, &mut config.keys()?, None, &request)?;
+        // Running servers poll the ClickHouse registry and apply keys, origins
+        // and retention live. Ingestion limits still apply at server startup.
+        if config.is_clickhouse()
+            && command != "project-configure"
+            && let Some(object) = output.as_object_mut()
+            && object.contains_key("restart_required")
+        {
+            object.insert("restart_required".into(), false.into());
+        }
+        output
     } else if live_command(command) {
         live::send(config, &request).await?
     } else {

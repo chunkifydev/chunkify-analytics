@@ -126,6 +126,24 @@ async fn call_query(client: &Mcp, tool: &str, args: Value, is_error: bool) -> Va
     }
 }
 
+/// CHUNKIFY_TEST_CLICKHOUSE_URL runs these collectors on ClickHouse, with one
+/// database per data directory, instead of default local storage.
+fn storage_environment(directory: &std::path::Path) -> Vec<(String, String)> {
+    let Ok(url) = std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL") else {
+        return Vec::new();
+    };
+    let name = directory
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .replace('-', "_");
+    vec![
+        ("CHUNKIFY_STORAGE_BACKEND".into(), "clickhouse".into()),
+        ("CHUNKIFY_CLICKHOUSE_URL".into(), url),
+        ("CHUNKIFY_CLICKHOUSE_DATABASE".into(), name),
+    ]
+}
+
 struct Collector {
     child: Child,
     directory: PathBuf,
@@ -143,9 +161,11 @@ impl Collector {
         let directory =
             std::env::temp_dir().join(format!("chunkify-mcp-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
+        let storage = storage_environment(&directory);
         let command = |args: &[&str]| {
             let result = clean_command()
                 .args(args)
+                .envs(storage.iter().cloned())
                 .env("CHUNKIFY_DATA_DIR", &directory)
                 .output()
                 .unwrap();
@@ -186,6 +206,7 @@ impl Collector {
             .arg("--config")
             .arg(config_file)
             .arg("serve")
+            .envs(storage.iter().cloned())
             .env(
                 "CHUNKIFY_GEOIP_DATABASE",
                 concat!(
@@ -223,6 +244,7 @@ impl Collector {
     fn admin(&self, args: &[&str]) -> Value {
         let output = clean_command()
             .args(args)
+            .envs(storage_environment(&self.directory))
             .env("CHUNKIFY_DATA_DIR", &self.directory)
             .output()
             .unwrap();

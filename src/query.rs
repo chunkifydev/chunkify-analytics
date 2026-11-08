@@ -512,6 +512,92 @@ impl Filters {
     }
 }
 
+impl Filters {
+    /// The same conditions for ClickHouse. Column names match both the events
+    /// table and the view cohort, where context values are extracted columns.
+    pub fn clickhouse(&self, params: &mut crate::clickhouse::Params) -> String {
+        let mut conditions = vec!["1".to_owned()];
+        if let Some(value) = self.from_ms {
+            conditions.push(format!("occurred_at_ms >= {}", params.int(value)));
+        }
+        if let Some(value) = self.to_ms {
+            conditions.push(format!("occurred_at_ms < {}", params.int(value)));
+        }
+        for (value, column) in [
+            (&self.video_id, "video_id"),
+            (&self.viewer_id, "viewer_id"),
+            (&self.view_id, "view_id"),
+            (&self.event_name, "event_name"),
+            (&self.browser_name, "context_browser_name"),
+            (&self.os_name, "context_os_name"),
+            (&self.device_type, "context_device_type"),
+            (&self.continent, "ctx_continent"),
+            (&self.country, "ctx_country"),
+            (&self.city, "ctx_city"),
+            (&self.page_origin, "ctx_page_origin"),
+            (&self.page_path, "ctx_page_path"),
+        ] {
+            if let Some(value) = value {
+                conditions.push(format!("{column} = {}", params.text(value)));
+            }
+        }
+        conditions.join(" AND ")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self
+            == Self {
+                from_ms: None,
+                to_ms: None,
+                video_id: None,
+                viewer_id: None,
+                view_id: None,
+                event_name: None,
+                browser_name: None,
+                os_name: None,
+                device_type: None,
+                continent: None,
+                country: None,
+                city: None,
+                page_origin: None,
+                page_path: None,
+            }
+    }
+}
+
+impl Dimension {
+    /// ClickHouse cohort column for this dimension.
+    pub fn clickhouse_column(self) -> &'static str {
+        match self {
+            Self::BrowserName => "context_browser_name",
+            Self::OsName => "context_os_name",
+            Self::DeviceType => "context_device_type",
+            Self::Continent => "ctx_continent",
+            Self::Country => "ctx_country",
+            Self::City => "ctx_city",
+            Self::PageOrigin => "ctx_page_origin",
+            Self::PagePath => "ctx_page_path",
+            Self::VideoId => "video_id",
+            Self::ViewerId => "viewer_id",
+        }
+    }
+}
+
+impl BreakdownBy {
+    pub fn clickhouse_column(self) -> &'static str {
+        match self {
+            Self::BrowserName => Dimension::BrowserName.clickhouse_column(),
+            Self::OsName => Dimension::OsName.clickhouse_column(),
+            Self::DeviceType => Dimension::DeviceType.clickhouse_column(),
+            Self::Continent => Dimension::Continent.clickhouse_column(),
+            Self::Country => Dimension::Country.clickhouse_column(),
+            Self::City => Dimension::City.clickhouse_column(),
+            Self::PageOrigin => Dimension::PageOrigin.clickhouse_column(),
+            Self::PagePath => Dimension::PagePath.clickhouse_column(),
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GroupPosition {
@@ -530,6 +616,19 @@ impl GroupPosition {
             }
         };
         format!("(COUNT(*) < ? OR (COUNT(*) = ? AND {tie}))")
+    }
+
+    pub fn clickhouse_continuation(
+        &self,
+        column: &str,
+        params: &mut crate::clickhouse::Params,
+    ) -> String {
+        let views = params.int(self.views);
+        let tie = match &self.value {
+            None => format!("{column} IS NOT NULL"),
+            Some(value) => format!("{column} > {}", params.text(value)),
+        };
+        format!("(count() < {views} OR (count() = {views} AND {tie}))")
     }
 }
 

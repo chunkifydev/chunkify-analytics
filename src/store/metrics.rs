@@ -121,6 +121,9 @@ impl Store {
         query: Query,
         per_video: bool,
     ) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.summary(project, query, per_video).await;
+        }
         if query.group_by.is_some() {
             if per_video {
                 return Err(ApiError::bad("group_by is not supported by videos"));
@@ -242,6 +245,9 @@ impl Store {
     }
 
     pub async fn engagement(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.engagement(project, query).await;
+        }
         if query.group_by.is_some() {
             return self.breakdown(project, query, MetricSet::Engagement).await;
         }
@@ -278,6 +284,9 @@ impl Store {
     }
 
     pub async fn quality(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.quality(project, query).await;
+        }
         if query.group_by.is_some() {
             return self.breakdown(project, query, MetricSet::Quality).await;
         }
@@ -317,6 +326,9 @@ impl Store {
         project: String,
         query: TimeseriesQuery,
     ) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.timeseries(project, query).await;
+        }
         let metrics = query.kind;
         let cache_query = serde_json::to_value(&query).map_err(|_| ApiError::internal())?;
         let export = query.export.clone();

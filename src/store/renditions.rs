@@ -3,6 +3,9 @@ use super::*;
 
 impl Store {
     pub async fn renditions(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.renditions(project, query).await;
+        }
         if query.event_name.is_some()
             || query.group_by.is_some()
             || query.sort_by.is_some()

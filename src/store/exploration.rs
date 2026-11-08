@@ -43,6 +43,9 @@ enum ViewSortValue {
 
 impl Store {
     pub async fn views(&self, project: String, input: ViewsQuery) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.views(project, input).await;
+        }
         let query = input.query;
         validate(&query)?;
         let export = query.export.clone();
@@ -115,6 +118,9 @@ impl Store {
         view_id: String,
         mut query: Query,
     ) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.view(project, view_id, query).await;
+        }
         // A detail page accepts only timeline pagination. Its identity comes from the path.
         if query.from.is_some()
             || query.to.is_some()
@@ -216,6 +222,9 @@ impl Store {
         dimension: Dimension,
         query: Query,
     ) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.dimension(project, dimension, query).await;
+        }
         validate(&query)?;
         if query.order.is_some() {
             return Err(ApiError::bad("Dimension values sort by views descending"));
@@ -249,6 +258,9 @@ impl Store {
     }
 
     pub async fn errors(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.errors(project, query).await;
+        }
         validate(&query)?;
         if query.order.is_some() {
             return Err(ApiError::bad(

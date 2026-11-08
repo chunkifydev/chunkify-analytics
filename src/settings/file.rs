@@ -16,6 +16,7 @@ struct FileConfig {
     batch: Batch,
     duckdb: Duckdb,
     storage: Storage,
+    clickhouse: ClickHouse,
     experimental: Experimental,
     mcp: Mcp,
     rate_limits: crate::limits::Config,
@@ -85,6 +86,19 @@ struct Storage {
     session_token: Option<String>,
     url_style: Option<String>,
     use_ssl: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ClickHouse {
+    url: Option<String>,
+    database: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+    async_insert: Option<bool>,
+    registry_refresh_seconds: Option<u64>,
+    node_id: Option<u16>,
+    deduplication_window_seconds: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -166,6 +180,37 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         (
             "storage.use_ssl",
             storage.use_ssl.map(|value| value.to_string()),
+        ),
+    ] {
+        if let Some(value) = value {
+            settings.values.insert(name.into(), value.into());
+        }
+    }
+    let clickhouse = config.clickhouse;
+    for (name, value) in [
+        ("clickhouse.url", clickhouse.url),
+        ("clickhouse.database", clickhouse.database),
+        ("clickhouse.user", clickhouse.user),
+        ("clickhouse.password", clickhouse.password),
+        (
+            "clickhouse.async_insert",
+            clickhouse.async_insert.map(|value| value.to_string()),
+        ),
+        (
+            "clickhouse.registry_refresh_seconds",
+            clickhouse
+                .registry_refresh_seconds
+                .map(|value| value.to_string()),
+        ),
+        (
+            "clickhouse.node_id",
+            clickhouse.node_id.map(|value| value.to_string()),
+        ),
+        (
+            "clickhouse.deduplication_window_seconds",
+            clickhouse
+                .deduplication_window_seconds
+                .map(|value| value.to_string()),
         ),
     ] {
         if let Some(value) = value {

@@ -4,6 +4,9 @@ use super::*;
 impl Store {
     /// Count each attempt once per media-position bucket, independent of replays.
     pub async fn retention(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.retention(project, query).await;
+        }
         validate_query(&query)?;
         let export = query.export.clone();
         let filters = query.filters()?;

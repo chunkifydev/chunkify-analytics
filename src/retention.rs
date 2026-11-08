@@ -35,6 +35,16 @@ impl Policy {
         cutoff(now_ms, self.project_seconds(project))
     }
 
+    pub fn overrides(&self) -> impl Iterator<Item = (&str, u64)> {
+        self.overrides
+            .iter()
+            .map(|(id, seconds)| (id.as_str(), *seconds))
+    }
+
+    pub fn default_cutoff(&self, now_ms: i64) -> i64 {
+        cutoff(now_ms, self.default_seconds)
+    }
+
     pub fn project_seconds(&self, project: &str) -> u64 {
         self.overrides
             .iter()

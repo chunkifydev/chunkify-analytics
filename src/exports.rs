@@ -338,7 +338,8 @@ impl Sink {
             .await
             .map_err(|_| ApiError::unavailable())
     }
-    pub fn push(&self, row: Value) -> Result<(), ApiError> {
+    // Format one row into the buffer and return a full chunk to send, if any.
+    fn append(&self, row: Value) -> Result<Option<Vec<u8>>, ApiError> {
         if self.sender.is_closed() {
             return Err(ApiError::unavailable());
         }
@@ -353,9 +354,22 @@ impl Sink {
                     .unwrap_or(Value::Null)
             }),
         );
-        if buffer.len() >= 64 * 1024 {
+        Ok((buffer.len() >= 64 * 1024).then(|| std::mem::take(&mut *buffer)))
+    }
+    pub fn push(&self, row: Value) -> Result<(), ApiError> {
+        if let Some(chunk) = self.append(row)? {
             self.sender
-                .blocking_send(Ok(std::mem::take(&mut *buffer)))
+                .blocking_send(Ok(chunk))
+                .map_err(|_| ApiError::unavailable())?;
+        }
+        Ok(())
+    }
+    /// The same as `push`, for rows produced on an async task.
+    pub async fn push_async(&self, row: Value) -> Result<(), ApiError> {
+        if let Some(chunk) = self.append(row)? {
+            self.sender
+                .send(Ok(chunk))
+                .await
                 .map_err(|_| ApiError::unavailable())?;
         }
         Ok(())
@@ -371,6 +385,19 @@ impl Sink {
 pub fn emit(sink: &Option<Arc<Sink>>, rows: &mut Vec<Value>, row: Value) -> Result<(), ApiError> {
     if let Some(sink) = sink {
         sink.push(row)
+    } else {
+        rows.push(row);
+        Ok(())
+    }
+}
+
+pub async fn emit_async(
+    sink: &Option<Arc<Sink>>,
+    rows: &mut Vec<Value>,
+    row: Value,
+) -> Result<(), ApiError> {
+    if let Some(sink) = sink {
+        sink.push_async(row).await
     } else {
         rows.push(row);
         Ok(())

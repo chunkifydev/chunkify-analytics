@@ -11,10 +11,11 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::Arc, thread};
 
 pub struct DatabaseWorker {
-    database: thread::JoinHandle<Result<(), String>>,
+    // ClickHouse storage runs no local database threads.
+    database: Option<thread::JoinHandle<Result<(), String>>>,
     readers: Vec<thread::JoinHandle<()>>,
     // Keep the writer alive until readers finish.
-    writer: Writer,
+    writer: Option<Writer>,
 }
 impl DatabaseWorker {
     pub fn join(self) -> thread::Result<Result<(), String>> {
@@ -24,7 +25,10 @@ impl DatabaseWorker {
             .map(|worker| worker.join())
             .collect();
         drop(self.writer);
-        let database = self.database.join();
+        let database = match self.database {
+            Some(database) => database.join(),
+            None => Ok(Ok(())),
+        };
         for reader in readers {
             reader?;
         }
@@ -34,10 +38,11 @@ impl DatabaseWorker {
 
 #[derive(Clone)]
 pub struct Store {
-    writer: Writer,
+    writer: Option<Writer>,
     reader: Option<Reader>,
     remote: Option<Arc<RemoteReads>>,
     limits: Option<Arc<crate::limits::Reads>>,
+    clickhouse: Option<Arc<crate::clickhouse::Store>>,
 }
 
 struct RemoteReads {
@@ -48,10 +53,56 @@ struct RemoteReads {
 }
 
 impl Store {
+    /// Open the configured storage backend.
+    pub async fn connect(
+        config: &crate::config::Config,
+        projects: Arc<crate::projects::Registry>,
+    ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
+        let crate::backend::Backend::ClickHouse(settings) = &config.backend else {
+            return Self::from_config(config, projects);
+        };
+        let clickhouse = crate::clickhouse::Store::open(config, settings, projects).await?;
+        Ok((
+            Self {
+                writer: None,
+                reader: None,
+                remote: None,
+                limits: None,
+                clickhouse: Some(clickhouse),
+            },
+            DatabaseWorker {
+                database: None,
+                readers: Vec::new(),
+                writer: None,
+            },
+        ))
+    }
+
+    fn writer(&self) -> Result<&Writer, ApiError> {
+        self.writer.as_ref().ok_or_else(ApiError::internal)
+    }
+
+    /// Confirm that storage can serve requests.
+    pub async fn health(&self) -> Result<(), ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.health().await;
+        }
+        self.check_read_index()?;
+        self.call("health", |db| {
+            db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;
+            Ok(())
+        })
+        .await?;
+        self.check_read_index()
+    }
+
     pub fn from_config(
         config: &crate::config::Config,
         projects: Arc<crate::projects::Registry>,
     ) -> Result<(Self, DatabaseWorker), Box<dyn std::error::Error>> {
+        if config.is_clickhouse() {
+            return Err("ClickHouse storage opens asynchronously; use Store::connect".into());
+        }
         let crate::backend::Backend::S3(settings) = &config.backend else {
             let (mut store, worker) = Self::open(
                 &config.database_path(),
@@ -118,8 +169,9 @@ impl Store {
         )?;
         Ok((
             Self {
-                writer: writer.clone(),
+                writer: Some(writer.clone()),
                 reader: None,
+                clickhouse: None,
                 limits: Some(Arc::new(crate::limits::Reads::new(
                     &config.rate_limits,
                     projects.clone(),
@@ -132,9 +184,9 @@ impl Store {
                 })),
             },
             DatabaseWorker {
-                database,
+                database: Some(database),
                 readers,
-                writer,
+                writer: Some(writer),
             },
         ))
     }
@@ -164,15 +216,16 @@ impl Store {
         let (writer, worker) = Writer::start(connection, batch.clone(), profile)?;
         Ok((
             Self {
-                writer: writer.clone(),
+                writer: Some(writer.clone()),
                 reader,
                 remote: None,
                 limits: None,
+                clickhouse: None,
             },
             DatabaseWorker {
-                database: worker,
+                database: Some(worker),
                 readers: reader_worker.into_iter().collect(),
-                writer,
+                writer: Some(writer),
             },
         ))
     }
@@ -188,7 +241,7 @@ impl Store {
         name: &'static str,
         operation: impl FnOnce(&mut Connection) -> Result<T, ApiError> + Send + 'static,
     ) -> Result<T, ApiError> {
-        self.writer.call(name, operation).await
+        self.writer()?.call(name, operation).await
     }
 
     pub async fn insert(
@@ -245,7 +298,7 @@ impl Store {
                 })
                 .await;
         }
-        self.writer
+        self.writer()?
             .call(name, move |connection| {
                 crate::reader::snapshot(connection, operation)
             })
@@ -284,6 +337,10 @@ impl Store {
     }
 
     pub async fn export_reader(&self, project: String) -> Result<Self, ApiError> {
+        if self.clickhouse.is_some() {
+            // Each ClickHouse query is an independent HTTP request.
+            return Ok(self.clone());
+        }
         let connection = self
             .call("export_connection", |db| Ok(db.try_clone()?))
             .await?;
@@ -308,6 +365,7 @@ impl Store {
             reader: Some(reader),
             remote: self.remote.clone(),
             limits: None,
+            clickhouse: None,
         })
     }
 
@@ -315,6 +373,9 @@ impl Store {
         &self,
         projects: std::sync::Arc<crate::projects::Registry>,
     ) -> Result<usize, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.purge_expired().await;
+        }
         let remote = self.remote.as_ref().map(|remote| remote.store.clone());
         self.call("retention", move |connection| {
             // Read the current policy when the writer runs this job, and hold it
@@ -343,12 +404,20 @@ impl Store {
         events: Vec<IncomingEvent>,
         request_context: Option<Location>,
     ) -> Result<usize, ApiError> {
-        self.writer
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse
+                .insert(project, key_id, events, request_context)
+                .await;
+        }
+        self.writer()?
             .insert(project, key_id, events, request_context)
             .await
     }
 
     pub async fn events(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        if let Some(clickhouse) = &self.clickhouse {
+            return clickhouse.events(project, query).await;
+        }
         let export = query.export.clone();
         if query.sort_by.is_some() || query.group_by.is_some() {
             return Err(ApiError::bad(

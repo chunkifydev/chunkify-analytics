@@ -114,7 +114,7 @@ const BASE: &[(&str, &str)] = &[
     ("context_device_type", "VARCHAR"),
 ];
 
-static COLUMNS: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
+pub static COLUMNS: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
     let mut columns: Vec<_> = BASE
         .iter()
         .map(|(name, kind)| (name.to_string(), *kind))
@@ -322,21 +322,80 @@ pub fn encode(
     Ok(values)
 }
 
-fn put(
-    row: &Row<'_>,
+/// Typed access to one stored event row, independent of the database driver.
+pub trait StoredRow {
+    fn text(&self, index: usize) -> Result<Option<String>, ApiError>;
+    fn integer(&self, index: usize) -> Result<Option<i64>, ApiError>;
+    fn number(&self, index: usize) -> Result<Option<f64>, ApiError>;
+    fn boolean(&self, index: usize) -> Result<Option<bool>, ApiError>;
+}
+
+impl StoredRow for Row<'_> {
+    fn text(&self, index: usize) -> Result<Option<String>, ApiError> {
+        Ok(self.get(index)?)
+    }
+    fn integer(&self, index: usize) -> Result<Option<i64>, ApiError> {
+        Ok(self.get(index)?)
+    }
+    fn number(&self, index: usize) -> Result<Option<f64>, ApiError> {
+        Ok(self.get(index)?)
+    }
+    fn boolean(&self, index: usize) -> Result<Option<bool>, ApiError> {
+        Ok(self.get(index)?)
+    }
+}
+
+impl StoredRow for [Value] {
+    fn text(&self, index: usize) -> Result<Option<String>, ApiError> {
+        match self.get(index) {
+            Some(Value::Null) => Ok(None),
+            Some(Value::String(value)) => Ok(Some(value.clone())),
+            _ => Err(ApiError::internal()),
+        }
+    }
+    fn integer(&self, index: usize) -> Result<Option<i64>, ApiError> {
+        match self.get(index) {
+            Some(Value::Null) => Ok(None),
+            Some(value) => value.as_i64().map(Some).ok_or_else(ApiError::internal),
+            None => Err(ApiError::internal()),
+        }
+    }
+    fn number(&self, index: usize) -> Result<Option<f64>, ApiError> {
+        match self.get(index) {
+            Some(Value::Null) => Ok(None),
+            Some(value) => value.as_f64().map(Some).ok_or_else(ApiError::internal),
+            None => Err(ApiError::internal()),
+        }
+    }
+    fn boolean(&self, index: usize) -> Result<Option<bool>, ApiError> {
+        match self.get(index) {
+            Some(Value::Null) => Ok(None),
+            Some(Value::Bool(value)) => Ok(Some(*value)),
+            Some(Value::Number(value)) => match value.as_u64() {
+                Some(0) => Ok(Some(false)),
+                Some(1) => Ok(Some(true)),
+                _ => Err(ApiError::internal()),
+            },
+            _ => Err(ApiError::internal()),
+        }
+    }
+}
+
+fn put<R: StoredRow + ?Sized>(
+    row: &R,
     index: usize,
     object: &mut Map<String, Value>,
     key: &str,
     kind: Kind,
-) -> duckdb::Result<()> {
+) -> Result<(), ApiError> {
     if object.contains_key(key) {
         return Ok(());
     }
     let value = match kind {
-        Text => row.get::<_, Option<String>>(index)?.map(Value::String),
-        Integer => row.get::<_, Option<i64>>(index)?.map(|v| json!(v)),
-        Boolean => row.get::<_, Option<bool>>(index)?.map(Value::Bool),
-        Number => row.get::<_, Option<f64>>(index)?.map(|v| {
+        Text => row.text(index)?.map(Value::String),
+        Integer => row.integer(index)?.map(|v| json!(v)),
+        Boolean => row.boolean(index)?.map(Value::Bool),
+        Number => row.number(index)?.map(|v| {
             if v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0 {
                 json!(v as i64)
             } else {
@@ -351,10 +410,10 @@ fn put(
 }
 
 /// SELECT ingest_id, all storage columns, original OTLP payload, in that order.
-pub fn decode(row: &Row<'_>) -> Result<(i64, Value), ApiError> {
-    let id = row.get::<_, i64>(0)?;
-    let mut event: Value =
-        serde_json::from_str(&row.get::<_, String>(10)?).map_err(|_| ApiError::internal())?;
+pub fn decode<R: StoredRow + ?Sized>(row: &R) -> Result<(i64, Value), ApiError> {
+    let id = row.integer(0)?.ok_or_else(ApiError::internal)?;
+    let mut event: Value = serde_json::from_str(&row.text(10)?.ok_or_else(ApiError::internal)?)
+        .map_err(|_| ApiError::internal())?;
     let object = event.as_object_mut().ok_or_else(ApiError::internal)?;
     for (index, key) in ["event_id", "view_id", "video_id", "viewer_id", "event_name"]
         .iter()
@@ -379,11 +438,11 @@ pub fn decode(row: &Row<'_>) -> Result<(i64, Value), ApiError> {
         index += 1;
     }
     let stored = row
-        .get::<_, Option<String>>(11)?
+        .text(11)?
         .map(|s| serde_json::from_str::<Value>(&s))
         .transpose()
         .map_err(|_| ApiError::internal())?;
-    let context = match row.get::<_, i32>(12)? {
+    let context = match row.integer(12)?.ok_or_else(ApiError::internal)? {
         0 => stored,
         1 => {
             let mut base = event_context_v1(&event, None)
@@ -398,15 +457,15 @@ pub fn decode(row: &Row<'_>) -> Result<(i64, Value), ApiError> {
         }
         _ => return Err(ApiError::internal()),
     };
-    let received: i64 = row.get(9)?;
+    let received = row.integer(9)?.ok_or_else(ApiError::internal)?;
     let mut record =
         json!({"received_at": chrono::DateTime::from_timestamp_millis(received), "event": event});
     if let Some(context) = context {
         record["event_context"] = context;
     }
-    record["project_id"] = json!(row.get::<_, String>(index)?);
-    record["ingest_key_id"] = json!(row.get::<_, Option<String>>(index + 1)?);
-    if let Some(otlp) = row.get::<_, Option<String>>(index + 2)? {
+    record["project_id"] = json!(row.text(index)?.ok_or_else(ApiError::internal)?);
+    record["ingest_key_id"] = json!(row.text(index + 1)?);
+    if let Some(otlp) = row.text(index + 2)? {
         record["otlp"] = serde_json::from_str(&otlp).map_err(|_| ApiError::internal())?;
     }
     Ok((id, record))

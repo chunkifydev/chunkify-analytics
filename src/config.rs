@@ -42,6 +42,10 @@ pub struct Keys {
 }
 
 impl Config {
+    pub fn is_clickhouse(&self) -> bool {
+        matches!(self.backend, crate::backend::Backend::ClickHouse(_))
+    }
+
     pub fn lock(&self) -> Result<fs::File> {
         self.try_lock()?.ok_or_else(|| {
             "Data directory is in use. Stop the collector and any administration command first."
@@ -50,7 +54,10 @@ impl Config {
     }
 
     pub fn try_lock(&self) -> Result<Option<fs::File>> {
-        if matches!(self.backend, crate::backend::Backend::S3(_)) {
+        if matches!(
+            self.backend,
+            crate::backend::Backend::S3(_) | crate::backend::Backend::ClickHouse(_)
+        ) {
             self.create_data_directory()?;
         }
         let mut options = fs::OpenOptions::new();
@@ -158,7 +165,10 @@ impl Config {
         let backend = crate::backend::Backend::load(settings)?;
         let batch = crate::writer::BatchConfig::load(
             settings,
-            matches!(&backend, crate::backend::Backend::S3(s3) if !s3.flush_interval.is_zero()),
+            // ClickHouse batches adaptively: requests queued during one insert
+            // form the next batch, so it uses the larger buffered limits.
+            matches!(&backend, crate::backend::Backend::S3(s3) if !s3.flush_interval.is_zero())
+                || matches!(&backend, crate::backend::Backend::ClickHouse(_)),
         )?;
         let report_cache_seconds = settings
             .var("cache.report_ttl_seconds")
@@ -299,6 +309,18 @@ impl Config {
             "public_key": public_key,
             "secret_key": secret_key,
         });
+        if let crate::backend::Backend::ClickHouse(clickhouse) = &self.backend {
+            crate::clickhouse::prepare(clickhouse)?;
+            if crate::clickhouse::load_registry(clickhouse)?.is_some() {
+                return Err(
+                    "ClickHouse installation is already initialized; run serve to use it".into(),
+                );
+            }
+            if let Some(warning) = self.save_keys(&keys)? {
+                eprintln!("{warning}");
+            }
+            return Ok(output);
+        }
         if let crate::backend::Backend::S3(remote) = &self.backend {
             if remote.read_keys()?.is_some() {
                 return Err("S3 installation is already initialized; run serve to use it".into());
@@ -332,6 +354,14 @@ impl Config {
 
     pub fn keys(&self) -> Result<Keys> {
         let bytes = match &self.backend {
+            crate::backend::Backend::ClickHouse(clickhouse) => {
+                let (version, bytes) = crate::clickhouse::load_registry(clickhouse)?
+                    .ok_or("ClickHouse installation is not initialized; run init first")?;
+                let keys: Keys = serde_json::from_slice(&bytes)?;
+                crate::projects::validate(&keys.projects)?;
+                clickhouse.set_loaded_version(version);
+                return Ok(keys);
+            }
             crate::backend::Backend::S3(remote) => remote
                 .read_keys()?
                 .ok_or("S3 installation is not initialized; run init first")?,
@@ -345,6 +375,17 @@ impl Config {
     }
 
     pub(crate) fn save_keys(&self, keys: &Keys) -> Result<Option<String>> {
+        if let crate::backend::Backend::ClickHouse(clickhouse) = &self.backend {
+            // Compare-and-set against the version this process last loaded,
+            // so concurrent administration on another server is never lost.
+            let version = crate::clickhouse::save_registry(
+                clickhouse,
+                clickhouse.loaded_version(),
+                &serde_json::to_vec_pretty(keys)?,
+            )?;
+            clickhouse.set_loaded_version(version);
+            return Ok(None);
+        }
         if let crate::backend::Backend::S3(remote) = &self.backend {
             remote.write_keys(&serde_json::to_vec_pretty(keys)?)?;
             return Ok(None);

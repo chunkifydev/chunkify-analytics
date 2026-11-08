@@ -7,6 +7,8 @@ use std::{fmt::Write as _, sync::atomic::Ordering, time::Duration};
 
 pub mod reports;
 pub mod store;
+#[cfg(test)]
+mod tests;
 
 pub use store::Store;
 
@@ -20,6 +22,9 @@ const QUERY_SETTINGS: &[(&str, &str)] = &[
     ("output_format_json_quote_denormals", "0"),
     ("precise_float_parsing", "1"),
     ("join_use_nulls", "1"),
+    // A read whose caller went away stops, so it no longer holds resources
+    // after its admission permit is released.
+    ("cancel_http_readonly_queries_on_client_close", "1"),
 ];
 
 /// Typed query parameters, rendered as `{pN:Type}` placeholders.

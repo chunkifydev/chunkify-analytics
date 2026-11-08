@@ -51,7 +51,7 @@ fn json_number(source: &str, field: &str) -> String {
 // Weighted geometric mean: 30% startup (8 / (8 + seconds)), 70% smoothness
 // (exp(-10 * buffering ratio)). Applying the smoothness weight gives exp(-7 * ratio).
 // Missing inputs remain NULL; observed failures are measured zero scores.
-const PLAYBACK_SCORE: &str = ", multiIf(
+pub(super) const PLAYBACK_SCORE: &str = ", multiIf(
     has_fatal_error OR m_startup_outcome = 'failed_before_start', 0.0,
     m_playing_time_ms > 0
         AND m_startup_time_ms IS NOT NULL
@@ -230,7 +230,9 @@ fn metric_columns(metrics: MetricSet) -> &'static str {
             countIf(startup_outcome = 'failed_before_start'),
             countIf(startup_outcome = 'ended_before_start'),
             countIf(startup_outcome = 'unknown'),
-            avg(playback_score), count(playback_score)"
+            if(count(playback_score) = 0, NULL,
+                arraySum(arraySort(groupArray(playback_score))) / count(playback_score)),
+            count(playback_score)"
         }
     }
 }

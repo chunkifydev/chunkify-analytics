@@ -1887,8 +1887,8 @@ test("read-only private keys read analytics live and cannot manage projects or k
   assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
 });
 
-for (const readers of [false, true]) test(`retention reports watched sections and exports CSV (readers=${readers})`, async t => {
-  const server = await collector(t, { "experimental.read_worker": String(readers) });
+test("retention reports watched sections and exports CSV", async t => {
+  const server = await collector(t);
   const records = sdkEvents("retention-video");
   const last = { ...records.at(-1), media_duration_seconds: 5,
     played_ranges: [{ start_seconds: 0, end_seconds: 1 }, { start_seconds: 3, end_seconds: 4 }], playhead_seconds: 4 };

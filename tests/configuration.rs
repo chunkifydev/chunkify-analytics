@@ -279,10 +279,6 @@ fn application_settings_are_toml_only_except_deployment_overrides() {
         "CHUNKIFY_BATCH_DELAY_MS",
         "CHUNKIFY_QUEUE_MAX_BYTES",
         "CHUNKIFY_QUEUE_MAX_REQUESTS",
-        "CHUNKIFY_INSERT_MODE",
-        "CHUNKIFY_DUCKDB_THREADS",
-        "CHUNKIFY_CHECKPOINT_THRESHOLD_MIB",
-        "CHUNKIFY_EXPERIMENTAL_READ_WORKER",
         "CHUNKIFY_MCP_ENABLED",
         "CHUNKIFY_MCP_ALLOWED_HOSTS",
     ];

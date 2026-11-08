@@ -373,14 +373,7 @@ fn clickhouse_type(name: &str, kind: &str) -> String {
             | "event_remainder"
             | "context_format"
     );
-    let base = match kind {
-        "VARCHAR" => "String",
-        "BIGINT" => "Int64",
-        "DOUBLE" => "Float64",
-        "BOOLEAN" => "Bool",
-        "INTEGER" => "Int32",
-        _ => unreachable!("storage column type"),
-    };
+    let base = kind;
     let low_cardinality = matches!(
         name,
         "event_name"
@@ -503,6 +496,14 @@ async fn latest(client: &Client) -> std::result::Result<Option<(u64, Vec<u8>)>, 
         .transpose()
 }
 
+const CONFLICT: &str =
+    "The project registry changed on another analytics server. Retry the command.";
+
+/// Whether a registry save lost a compare-and-set race.
+pub fn is_conflict(error: &(dyn std::error::Error + 'static)) -> bool {
+    error.to_string() == CONFLICT
+}
+
 /// Compare-and-set the registry. Inserts are deduplicated by version, so when
 /// two servers race only one document is stored for that version.
 pub fn save_registry(config: &ClickHouseConfig, expected: u64, document: &[u8]) -> Result<u64> {
@@ -560,5 +561,48 @@ impl ClickHouseConfig {
     }
     pub fn set_loaded_version(&self, version: u64) {
         self.registry_version.fetch_max(version, Ordering::AcqRel);
+    }
+}
+
+#[cfg(test)]
+pub mod testing {
+    /// Configuration for a new, empty database on the ClickHouse server at
+    /// CHUNKIFY_TEST_CLICKHOUSE_URL (default `http://127.0.0.1:8123`).
+    pub fn config(extra: &str) -> crate::config::Config {
+        let directory =
+            std::env::temp_dir().join(format!("chunkify-unit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let url = std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8123".into());
+        let database = format!("chunkify_unit_{}", uuid::Uuid::new_v4().simple());
+        let file = directory.join("config.toml");
+        let env = directory.join("empty.env");
+        std::fs::write(&env, "").unwrap();
+        std::fs::write(
+            &file,
+            format!("clickhouse.url = {url:?}\nclickhouse.database = {database:?}\n{extra}\n"),
+        )
+        .unwrap();
+        let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();
+        let config = crate::config::Config::load_with(&settings, None).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+        config
+    }
+
+    pub fn drop_database(config: &crate::backend::ClickHouseConfig) {
+        let config = config.clone();
+        let _ = super::block_on(move || async move {
+            let client = super::Client::new(config.clone())?;
+            client
+                .send(
+                    format!("DROP DATABASE IF EXISTS {}", config.database),
+                    &super::Params::default(),
+                    &[],
+                    false,
+                )
+                .await
+                .map_err(|_| "drop failed")?;
+            Ok(())
+        });
     }
 }

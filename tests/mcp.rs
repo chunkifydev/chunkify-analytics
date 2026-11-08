@@ -41,7 +41,7 @@ async fn connect(url: &str, token: &str, modern: bool) -> Mcp {
         .env("CHUNKIFY_MCP_SECRET_KEY", token)
         // This would make normal collector configuration fail. MCP must not load it.
         .env("CHUNKIFY_BIND", "invalid")
-        .env("CHUNKIFY_DATA_DIR", "/unused-mcp-data");
+        .env("CHUNKIFY_CLICKHOUSE_URL", "invalid");
     let transport = TokioChildProcess::new(tokio::process::Command::from(command)).unwrap();
     let mode = if modern {
         ClientLifecycleMode::Discover {
@@ -126,22 +126,36 @@ async fn call_query(client: &Mcp, tool: &str, args: Value, is_error: bool) -> Va
     }
 }
 
-/// CHUNKIFY_TEST_CLICKHOUSE_URL runs these collectors on ClickHouse, with one
-/// database per data directory, instead of default local storage.
+/// One ClickHouse database per test server, on the server at
+/// CHUNKIFY_TEST_CLICKHOUSE_URL (default `http://127.0.0.1:8123`).
 fn storage_environment(directory: &std::path::Path) -> Vec<(String, String)> {
-    let Ok(url) = std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL") else {
-        return Vec::new();
-    };
+    let url = std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8123".into());
     let name = directory
         .file_name()
         .unwrap()
         .to_string_lossy()
         .replace('-', "_");
     vec![
-        ("CHUNKIFY_STORAGE_BACKEND".into(), "clickhouse".into()),
         ("CHUNKIFY_CLICKHOUSE_URL".into(), url),
         ("CHUNKIFY_CLICKHOUSE_DATABASE".into(), name),
     ]
+}
+
+/// Wait for a server to adopt a registry change made through the CLI.
+async fn eventually<F, Fut>(mut condition: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !condition().await {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "registry change was not applied"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 struct Collector {
@@ -166,7 +180,6 @@ impl Collector {
             let result = clean_command()
                 .args(args)
                 .envs(storage.iter().cloned())
-                .env("CHUNKIFY_DATA_DIR", &directory)
                 .output()
                 .unwrap();
             assert!(
@@ -179,7 +192,9 @@ impl Collector {
         let keys = serde_json::from_slice(&command(&["init"])).unwrap();
         let live =
             serde_json::from_slice(&command(&["project", "create", "Live website"])).unwrap();
-        let mut config = "retention.seconds = 0\n".to_owned();
+        // Servers adopt CLI registry changes at their next refresh.
+        let mut config =
+            "retention.seconds = 0\nclickhouse.registry_refresh_seconds = 1\n".to_owned();
         let defaults = [
             ("rate_limits.read_per_minute", "1000000"),
             ("rate_limits.read_burst", "1000000"),
@@ -214,7 +229,6 @@ impl Collector {
                     "/tests/fixtures/GeoIP2-City-Test.mmdb"
                 ),
             )
-            .env("CHUNKIFY_DATA_DIR", &directory)
             .env("CHUNKIFY_BIND", "127.0.0.1:0")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -245,7 +259,6 @@ impl Collector {
         let output = clean_command()
             .args(args)
             .envs(storage_environment(&self.directory))
-            .env("CHUNKIFY_DATA_DIR", &self.directory)
             .output()
             .unwrap();
         assert!(
@@ -1389,7 +1402,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
     ]);
     assert_eq!(rotated["read_only"], true);
     assert_eq!(rotated["restart_required"], false);
-    assert!(client.list_tools(None).await.is_err());
+    eventually(|| async { client.list_tools(None).await.is_err() }).await;
     client.cancel().await.unwrap();
     let client = connect_http(&collector.url, rotated["key"].as_str().unwrap(), false).await;
     assert_eq!(
@@ -1402,7 +1415,7 @@ async fn embedded_http_rechecks_credentials_after_live_rotation_and_revocation()
         "default",
         created["key_id"].as_str().unwrap(),
     ]);
-    assert!(client.list_tools(None).await.is_err());
+    eventually(|| async { client.list_tools(None).await.is_err() }).await;
     client.cancel().await.unwrap();
 }
 
@@ -1811,7 +1824,7 @@ async fn exploration_tools_and_export_links_match_http_on_both_transports() {
         client.cancel().await.unwrap();
     }
     collector.admin(&["key", "rotate", "default", key["key_id"].as_str().unwrap()]);
-    assert_eq!(http.get(last_url).send().await.unwrap().status(), 404);
+    eventually(|| async { http.get(&last_url).send().await.unwrap().status() == 404 }).await;
 }
 
 #[tokio::test]

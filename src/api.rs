@@ -72,11 +72,6 @@ impl ApiError {
         }
     }
 }
-impl From<duckdb::Error> for ApiError {
-    fn from(_: duckdb::Error) -> Self {
-        Self::internal()
-    }
-}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut response = (self.status, Json(json!({"error": self.message}))).into_response();
@@ -168,13 +163,14 @@ pub fn router(
         .with_state(app)
 }
 
-// With shared ClickHouse storage, an unknown key may have just been created
-// through another analytics server; refresh the registry once before refusing.
+// An unknown key may have just been created through another analytics server
+// or the CLI; refresh the shared registry once before refusing it.
 async fn authorize(app: &App, secret: &str, permission: Permission) -> Result<Resolved, ApiError> {
     match app.projects.authorize(secret, permission) {
-        Err(error) if error.status == StatusCode::UNAUTHORIZED && app.admin.shares_registry() => {
+        Err(error) if error.status == StatusCode::UNAUTHORIZED => {
             let admin = app.admin.clone();
-            if tokio::task::spawn_blocking(move || admin.sync_after_miss())
+            let arrived = std::time::Instant::now();
+            if tokio::task::spawn_blocking(move || admin.sync_after_miss(arrived))
                 .await
                 .unwrap_or(false)
             {
@@ -360,7 +356,12 @@ async fn ingest(
     event::validate(&event)?;
     let inserted = app
         .store
-        .insert(&resolved.project, &resolved.key_id, event, Some(context))
+        .insert(
+            &resolved.project,
+            &resolved.key_id,
+            vec![event::IncomingEvent { event, otlp: None }],
+            Some(context),
+        )
         .await?
         > 0;
     Ok((

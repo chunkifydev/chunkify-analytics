@@ -20,7 +20,8 @@ async function collector(t, settings = {}) {
   const configuration = { ...inherited, "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
     "rate_limits.export_downloads_per_minute": "1000", "data_dir": directory, "server.bind": "127.0.0.1:0",
-    "server.allowed_origins": "https://player.example", "retention.seconds": "0", ...settings };
+    "server.allowed_origins": "https://player.example", "retention.seconds": "0",
+    "clickhouse.registry_refresh_seconds": "1", ...settings };
   await writeConfig(directory, configuration);
   const env = collectorEnvironment(inherited);
   let child;
@@ -1052,7 +1053,11 @@ for (const separateReads of [false, true])
     await create({ resource: "events" }, 401, server.keys.public_key);
     const link = await create({ resource: "events" });
     await server.admin(["key", "rotate", "default", key.key_id]);
-    assert.equal((await fetch(link.download_url)).status, 404);
+    // Running servers adopt CLI changes at their next registry refresh.
+    const deadline = Date.now() + 10000;
+    let status;
+    while ((status = (await fetch(link.download_url)).status) !== 404 && Date.now() < deadline) await delay(200);
+    assert.equal(status, 404);
     assert.equal(
       (await fetch(`${server.url}/v1/exports/${"A".repeat(43)}`)).status,
       404,

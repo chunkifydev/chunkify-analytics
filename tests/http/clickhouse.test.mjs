@@ -1,5 +1,4 @@
-// ClickHouse storage checks. Set CHUNKIFY_TEST_CLICKHOUSE_URL to a disposable
-// ClickHouse HTTP endpoint, for example http://127.0.0.1:8123, to run them.
+// Several analytics servers sharing one ClickHouse database.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -9,11 +8,9 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { buildDemoEvents } from "../../examples/dashboard/seed-events.mjs";
-import { collectorEnvironment, writeConfig } from "./configuration.mjs";
+import { clickhouseQuery, clickhouseUrl, collectorEnvironment, writeConfig } from "./configuration.mjs";
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
-const clickhouse = process.env.CHUNKIFY_TEST_CLICKHOUSE_URL;
-const skip = clickhouse ? false : "set CHUNKIFY_TEST_CLICKHOUSE_URL to run ClickHouse storage tests";
 
 async function run(args, directory, env) {
   const child = spawn(binary, args, { cwd: directory, env: collectorEnvironment(env), stdio: "pipe" });
@@ -79,11 +76,6 @@ function database(name) {
   return `chunkify_test_${name}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-async function sql(query) {
-  const response = await fetch(clickhouse, { method: "POST", body: query });
-  assert.equal(response.status, 200, await response.clone().text());
-  return response.text();
-}
 
 // Demo playback, plus location, page, watched-range and error-code variety.
 function dataset() {
@@ -107,17 +99,7 @@ function dataset() {
   });
 }
 
-async function ingest(server, records) {
-  for (const { event, address, duplicate } of records) {
-    const headers = address ? { "X-Forwarded-For": address } : {};
-    for (const attempt of duplicate ? [1, 2] : [1]) {
-      const response = await server.post(event, headers);
-      assert.equal(response.status, attempt === 1 ? 201 : 200, await response.text());
-    }
-  }
-}
-
-// Receipt times differ between installations; floating sums may differ in the last bits.
+// Receipt times differ between servers.
 function comparable(value) {
   if (Array.isArray(value)) return value.map(comparable);
   if (value && typeof value === "object") {
@@ -127,96 +109,9 @@ function comparable(value) {
   return value;
 }
 
-function assertClose(actual, expected, path = "$") {
-  if (typeof expected === "number" && typeof actual === "number") {
-    const tolerance = 1e-9 * Math.max(1, Math.abs(expected));
-    assert.ok(Math.abs(actual - expected) <= tolerance, `${path}: ${actual} != ${expected}`);
-    return;
-  }
-  if (Array.isArray(expected)) {
-    assert.ok(Array.isArray(actual), `${path}: expected an array`);
-    assert.equal(actual.length, expected.length, `${path}: length`);
-    expected.forEach((item, index) => assertClose(actual[index], item, `${path}[${index}]`));
-    return;
-  }
-  if (expected && typeof expected === "object") {
-    assert.deepEqual(Object.keys(actual).sort(), Object.keys(expected).sort(), `${path}: keys`);
-    for (const key of Object.keys(expected)) assertClose(actual[key], expected[key], `${path}.${key}`);
-    return;
-  }
-  assert.deepEqual(actual, expected, path);
-}
-
-// Follow cursors independently on each server and compare every page.
-async function pages(server, path) {
-  const result = [];
-  let cursor = null;
-  for (let page = 0; page < 50; page++) {
-    const separator = path.includes("?") ? "&" : "?";
-    const body = await server.get(cursor ? `${path}${separator}cursor=${encodeURIComponent(cursor)}` : path);
-    result.push(body);
-    cursor = body.next_cursor;
-    if (!cursor) break;
-  }
-  return result;
-}
-
-const REPORTS = [
-  "/v1/summary", "/v1/quality", "/v1/engagement", "/v1/renditions", "/v1/renditions?limit=2",
-  "/v1/summary?browser_name=Chrome", "/v1/quality?device_type=mobile", "/v1/engagement?country=GB",
-  "/v1/summary?from=2026-10-28T00:00:00Z&to=2026-10-30T00:00:00Z", "/v1/quality?page_origin=https%3A%2F%2Fsite-1.example",
-  "/v1/retention?video_id=product-tour", "/v1/retention?video_id=launch-film&browser_name=Safari",
-  "/v1/timeseries?from=2026-10-25T00:00:00Z&to=2026-11-02T00:00:00Z&interval=day",
-  "/v1/timeseries?kind=quality&from=2026-10-30T00:00:00Z&to=2026-11-01T00:00:00Z&interval=hour",
-  "/v1/timeseries?kind=engagement&from=2026-10-25T00:00:00Z&to=2026-11-02T00:00:00Z&interval=day&os_name=iOS",
-];
-const PAGED = [
-  "/v1/events?limit=50", "/v1/events?limit=40&order=desc&event_name=chunkify.video.view_ended",
-  "/v1/events?limit=25&city=London", "/v1/videos?limit=3", "/v1/videos?limit=2&sort_by=views&order=desc",
-  "/v1/videos?limit=4&sort_by=total_playing_time_ms&order=desc", "/v1/videos?limit=3&sort_by=playback_score&order=asc",
-  "/v1/videos?limit=3&sort_by=unique_viewers&order=desc", "/v1/views?limit=40",
-  "/v1/views?limit=30&sort_by=playback_score&order=asc", "/v1/views?limit=30&sort_by=startup_time_ms",
-  "/v1/views?limit=25&sort_by=device_type&has_fatal_error=false", "/v1/views?limit=10&has_fatal_error=true",
-  "/v1/errors?limit=1", "/v1/errors?browser_name=Chrome",
-  ...["browser_name", "os_name", "device_type", "continent", "country", "city", "page_origin", "page_path", "video_id", "viewer_id"]
-    .map(dimension => `/v1/dimensions/${dimension}?limit=2`),
-  ...["browser_name", "country", "city", "page_path"].flatMap(group =>
-    ["summary", "quality", "engagement"].map(kind => `/v1/${kind}?group_by=${group}&limit=2`)),
-];
-
-test("ClickHouse reports match local storage for the same events", { skip }, async t => {
-  const local = await collector(t, { "storage.backend": "local" });
-  const remote = await collector(t, { "storage.backend": "clickhouse", "clickhouse.url": clickhouse,
-    "clickhouse.database": database("parity") });
-  const records = dataset();
-  await Promise.all([ingest(local, records), ingest(remote, records)]);
-  for (const path of REPORTS) {
-    assertClose(comparable(await remote.get(path)), comparable(await local.get(path)), path);
-  }
-  for (const path of PAGED) {
-    const [expected, actual] = await Promise.all([pages(local, path), pages(remote, path)]);
-    assert.ok(expected.length > 0);
-    assertClose(comparable(actual), comparable(expected), path);
-  }
-  const view = (await local.get("/v1/views?limit=1")).views[0].view_id;
-  assertClose(comparable(await pages(remote, `/v1/views/${view}?limit=1`)),
-    comparable(await pages(local, `/v1/views/${view}?limit=1`)), "view detail");
-  for (const resource of ["videos", "views", "errors", "renditions", "timeseries"]) {
-    const query = resource === "timeseries" ? { from: "2026-10-25T00:00:00Z", to: "2026-11-02T00:00:00Z", interval: "day" } : {};
-    const csv = await Promise.all([local, remote].map(async server => {
-      const response = await fetch(`${server.url}/v1/exports`, { method: "POST", body: JSON.stringify({ resource, query }),
-        headers: { Authorization: `Bearer ${server.keys.secret_key}`, "Content-Type": "application/json" } });
-      assert.equal(response.status, 201, await response.clone().text());
-      return (await fetch((await response.json()).download_url)).text();
-    }));
-    assert.equal(csv[1].split("\n").length, csv[0].split("\n").length, `${resource} CSV rows`);
-    assert.equal(csv[1].split("\n")[0], csv[0].split("\n")[0], `${resource} CSV header`);
-  }
-});
-
-test("servers sharing one ClickHouse database serve the same projects and events", { skip }, async t => {
+test("servers sharing one ClickHouse database serve the same projects and events", async t => {
   const adminKey = `admin-${Math.random()}`;
-  const storage = { "storage.backend": "clickhouse", "clickhouse.url": clickhouse,
+  const storage = { "clickhouse.url": clickhouseUrl,
     "clickhouse.database": database("shared"), "clickhouse.registry_refresh_seconds": "1",
     CHUNKIFY_ADMIN_KEY: adminKey };
   const first = await collector(t, { ...storage, "clickhouse.node_id": "1" });
@@ -267,9 +162,9 @@ test("servers sharing one ClickHouse database serve the same projects and events
   assert.equal(status, 401, "the old public key stops working on every server");
 
   // The shared registry stores credential hashes, never the keys themselves.
-  const registry = await sql(`SELECT document FROM ${storage["clickhouse.database"]}.registry FORMAT TSVRaw`);
+  const registry = await clickhouseQuery(`SELECT document FROM ${storage["clickhouse.database"]}.registry FORMAT TSVRaw`);
   for (const secret of [first.keys.public_key, first.keys.secret_key, project.public_key, project.secret_key]) {
     assert.ok(!registry.includes(secret));
   }
-  await sql(`DROP DATABASE IF EXISTS ${storage["clickhouse.database"]}`);
+  await clickhouseQuery(`DROP DATABASE IF EXISTS ${storage["clickhouse.database"]}`);
 });

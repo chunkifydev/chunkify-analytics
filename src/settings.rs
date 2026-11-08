@@ -6,18 +6,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const ENVIRONMENT_OVERRIDES: &[(&str, &str)] = &[
     ("CHUNKIFY_ADMIN_KEY", "admin_key"),
-    ("CHUNKIFY_DATA_DIR", "data_dir"),
     ("CHUNKIFY_BIND", "server.bind"),
     ("CHUNKIFY_GEOIP_DATABASE", "server.geoip_database"),
-    ("CHUNKIFY_STORAGE_BACKEND", "storage.backend"),
-    ("CHUNKIFY_S3_URL", "storage.url"),
-    ("CHUNKIFY_S3_ENDPOINT", "storage.endpoint"),
-    ("CHUNKIFY_S3_REGION", "storage.region"),
-    ("CHUNKIFY_S3_ACCESS_KEY_ID", "storage.access_key_id"),
-    ("CHUNKIFY_S3_SECRET_ACCESS_KEY", "storage.secret_access_key"),
-    ("CHUNKIFY_S3_SESSION_TOKEN", "storage.session_token"),
-    ("CHUNKIFY_S3_URL_STYLE", "storage.url_style"),
-    ("CHUNKIFY_S3_USE_SSL", "storage.use_ssl"),
     ("CHUNKIFY_CLICKHOUSE_URL", "clickhouse.url"),
     ("CHUNKIFY_CLICKHOUSE_DATABASE", "clickhouse.database"),
     ("CHUNKIFY_CLICKHOUSE_USER", "clickhouse.user"),

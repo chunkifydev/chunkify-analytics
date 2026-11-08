@@ -286,7 +286,7 @@ impl Exports {
             .limits
             .downloads
             .admit(&self.downloads, "export download")?;
-        let store = self.store.export_reader(project.clone()).await?;
+        let store = self.store.clone();
         let (sender, chunks) = mpsc::channel(2);
         let filename = format!("chunkify-{}.csv", grant.request.resource);
         let sink = Arc::new(Sink {
@@ -300,7 +300,7 @@ impl Exports {
                 sink.header().await?;
                 let result = run(&store, project, grant.request, sink.clone()).await?;
                 for row in table_rows(&result)? {
-                    sink.push(row)?;
+                    sink.push_async(row).await?;
                 }
                 sink.finish().await
             }
@@ -356,15 +356,6 @@ impl Sink {
         );
         Ok((buffer.len() >= 64 * 1024).then(|| std::mem::take(&mut *buffer)))
     }
-    pub fn push(&self, row: Value) -> Result<(), ApiError> {
-        if let Some(chunk) = self.append(row)? {
-            self.sender
-                .blocking_send(Ok(chunk))
-                .map_err(|_| ApiError::unavailable())?;
-        }
-        Ok(())
-    }
-    /// The same as `push`, for rows produced on an async task.
     pub async fn push_async(&self, row: Value) -> Result<(), ApiError> {
         if let Some(chunk) = self.append(row)? {
             self.sender
@@ -382,15 +373,6 @@ impl Sink {
             .map_err(|_| ApiError::unavailable())
     }
 }
-pub fn emit(sink: &Option<Arc<Sink>>, rows: &mut Vec<Value>, row: Value) -> Result<(), ApiError> {
-    if let Some(sink) = sink {
-        sink.push(row)
-    } else {
-        rows.push(row);
-        Ok(())
-    }
-}
-
 pub async fn emit_async(
     sink: &Option<Arc<Sink>>,
     rows: &mut Vec<Value>,
@@ -715,16 +697,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_grants_expire_and_follow_issuer_revocation() {
-        let directory =
-            std::env::temp_dir().join(format!("chunkify-export-grants-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let config_file = directory.join("config.toml");
-        let env_file = directory.join("empty.env");
-        std::fs::write(&env_file, "").unwrap();
-        std::fs::write(&config_file, "retention.seconds=0\n").unwrap();
-        let settings =
-            crate::settings::Settings::load(Some(&env_file), Some(&config_file)).unwrap();
-        let config = crate::config::Config::load_with(&settings, Some(&directory), None).unwrap();
+        let config = crate::clickhouse::testing::config("retention.seconds = 0");
         let keys = crate::config::Keys {
             projects: vec![crate::projects::primary_project(
                 "test-public",
@@ -735,15 +708,9 @@ mod tests {
         let owner = registry
             .authorize("test-secret", crate::projects::Permission::Secret)
             .unwrap();
-        let (store, worker) = Store::open(
-            &directory.join("test.duckdb"),
-            config.batch.clone(),
-            false,
-            64,
-            false,
-            Some(1),
-        )
-        .unwrap();
+        let store = crate::clickhouse::Store::open(&config, registry.clone())
+            .await
+            .unwrap();
         let service = Exports::new(store, registry.clone(), &config.rate_limits);
         let base = reqwest::Url::parse("https://analytics.example.com/base/").unwrap();
         let create = || {
@@ -796,9 +763,6 @@ mod tests {
             service.filename(&token(&b)).unwrap_err().status,
             axum::http::StatusCode::NOT_FOUND
         );
-        drop(service);
-        worker.join().unwrap().unwrap();
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

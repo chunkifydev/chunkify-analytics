@@ -1,6 +1,5 @@
 use crate::{api::ApiError, event};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use duckdb::types::Value as SqlValue;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -115,8 +114,8 @@ impl ViewSort {
             Self::ViewId => "view_id",
             Self::DeviceType => "context_device_type",
             Self::PlayingTimeMs => "playing_time_ms",
-            Self::StartupTimeMs => "measurement.startup_time_ms",
-            Self::RebufferDurationMs => "measurement.rebuffer_duration_ms",
+            Self::StartupTimeMs => "m_startup_time_ms",
+            Self::RebufferDurationMs => "m_rebuffer_duration_ms",
             Self::PlaybackScore => "playback_score",
         }
     }
@@ -174,33 +173,6 @@ pub enum Dimension {
     ViewerId,
 }
 
-impl Dimension {
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::BrowserName => "context_browser_name",
-            Self::OsName => "context_os_name",
-            Self::DeviceType => "context_device_type",
-            Self::Continent => {
-                "CASE WHEN json_type(context_remainder, '$.continent') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.continent') END"
-            }
-            Self::Country => {
-                "CASE WHEN json_type(context_remainder, '$.country') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.country') END"
-            }
-            Self::City => {
-                "CASE WHEN json_type(context_remainder, '$.city') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.city') END"
-            }
-            Self::PageOrigin => {
-                "CASE WHEN json_type(context_remainder, '$.page_origin') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_origin') END"
-            }
-            Self::PagePath => {
-                "CASE WHEN json_type(context_remainder, '$.page_path') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_path') END"
-            }
-            Self::VideoId => "video_id",
-            Self::ViewerId => "viewer_id",
-        }
-    }
-}
-
 impl MetricKind {
     pub fn name(self) -> &'static str {
         match self {
@@ -224,21 +196,6 @@ pub enum BreakdownBy {
     City,
     PageOrigin,
     PagePath,
-}
-
-impl BreakdownBy {
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::BrowserName => "context_browser_name",
-            Self::OsName => "context_os_name",
-            Self::DeviceType => "context_device_type",
-            Self::Continent => Dimension::Continent.column(),
-            Self::Country => Dimension::Country.column(),
-            Self::City => Dimension::City.column(),
-            Self::PageOrigin => Dimension::PageOrigin.column(),
-            Self::PagePath => Dimension::PagePath.column(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -464,56 +421,7 @@ impl Query {
 }
 
 impl Filters {
-    pub fn sql(&self) -> (String, Vec<SqlValue>) {
-        let mut conditions = vec!["TRUE".to_owned()];
-        let mut values = Vec::new();
-        if let Some(value) = self.from_ms {
-            conditions.push("occurred_at_ms >= ?".into());
-            values.push(SqlValue::BigInt(value));
-        }
-        if let Some(value) = self.to_ms {
-            conditions.push("occurred_at_ms < ?".into());
-            values.push(SqlValue::BigInt(value));
-        }
-        if let Some(value) = &self.video_id {
-            conditions.push("video_id = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.viewer_id {
-            conditions.push("viewer_id = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.view_id {
-            conditions.push("view_id = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.event_name {
-            conditions.push("event_name = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        // Compare only strings. Missing/null fields and other JSON primitives
-        // are not normalized browser, device or location values.
-        for (value, column) in [
-            (&self.browser_name, Dimension::BrowserName.column()),
-            (&self.os_name, Dimension::OsName.column()),
-            (&self.device_type, Dimension::DeviceType.column()),
-            (&self.continent, Dimension::Continent.column()),
-            (&self.country, Dimension::Country.column()),
-            (&self.city, Dimension::City.column()),
-            (&self.page_origin, Dimension::PageOrigin.column()),
-            (&self.page_path, Dimension::PagePath.column()),
-        ] {
-            if let Some(value) = value {
-                conditions.push(format!("{column} = ?"));
-                values.push(SqlValue::Text(value.clone()));
-            }
-        }
-        (conditions.join(" AND "), values)
-    }
-}
-
-impl Filters {
-    /// The same conditions for ClickHouse. Column names match both the events
+    /// SQL conditions with bound values. Column names match both the events
     /// table and the view cohort, where context values are extracted columns.
     pub fn clickhouse(&self, params: &mut crate::clickhouse::Params) -> String {
         let mut conditions = vec!["1".to_owned()];
@@ -566,8 +474,8 @@ impl Filters {
 }
 
 impl Dimension {
-    /// ClickHouse cohort column for this dimension.
-    pub fn clickhouse_column(self) -> &'static str {
+    /// Cohort column for this dimension.
+    pub fn column(self) -> &'static str {
         match self {
             Self::BrowserName => "context_browser_name",
             Self::OsName => "context_os_name",
@@ -584,16 +492,16 @@ impl Dimension {
 }
 
 impl BreakdownBy {
-    pub fn clickhouse_column(self) -> &'static str {
+    pub fn column(self) -> &'static str {
         match self {
-            Self::BrowserName => Dimension::BrowserName.clickhouse_column(),
-            Self::OsName => Dimension::OsName.clickhouse_column(),
-            Self::DeviceType => Dimension::DeviceType.clickhouse_column(),
-            Self::Continent => Dimension::Continent.clickhouse_column(),
-            Self::Country => Dimension::Country.clickhouse_column(),
-            Self::City => Dimension::City.clickhouse_column(),
-            Self::PageOrigin => Dimension::PageOrigin.clickhouse_column(),
-            Self::PagePath => Dimension::PagePath.clickhouse_column(),
+            Self::BrowserName => Dimension::BrowserName.column(),
+            Self::OsName => Dimension::OsName.column(),
+            Self::DeviceType => Dimension::DeviceType.column(),
+            Self::Continent => Dimension::Continent.column(),
+            Self::Country => Dimension::Country.column(),
+            Self::City => Dimension::City.column(),
+            Self::PageOrigin => Dimension::PageOrigin.column(),
+            Self::PagePath => Dimension::PagePath.column(),
         }
     }
 }
@@ -606,23 +514,7 @@ pub struct GroupPosition {
 }
 
 impl GroupPosition {
-    pub fn continuation(&self, column: &str, values: &mut Vec<SqlValue>) -> String {
-        values.extend([SqlValue::BigInt(self.views), SqlValue::BigInt(self.views)]);
-        let tie = match &self.value {
-            None => format!("{column} IS NOT NULL"),
-            Some(value) => {
-                values.push(SqlValue::Text(value.clone()));
-                format!("{column} > ?")
-            }
-        };
-        format!("(COUNT(*) < ? OR (COUNT(*) = ? AND {tie}))")
-    }
-
-    pub fn clickhouse_continuation(
-        &self,
-        column: &str,
-        params: &mut crate::clickhouse::Params,
-    ) -> String {
+    pub fn continuation(&self, column: &str, params: &mut crate::clickhouse::Params) -> String {
         let views = params.int(self.views);
         let tie = match &self.value {
             None => format!("{column} IS NOT NULL"),

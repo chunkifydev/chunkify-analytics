@@ -7,7 +7,7 @@ use crate::{
     exports::emit_async,
     query::{
         Cursor, Dimension, Filters, GroupPosition, MetricKind as MetricSet, Query, SortOrder,
-        TimeseriesQuery, VideoSort, ViewSort, ViewsQuery,
+        TimeseriesQuery, VideoSort, ViewsQuery,
     },
 };
 use serde_json::{Value, json};
@@ -448,19 +448,6 @@ enum ViewSortValue {
     Number(f64),
 }
 
-fn view_sort_column(sort: ViewSort) -> &'static str {
-    match sort {
-        ViewSort::StartedAt => "occurred_at_ms",
-        ViewSort::VideoId => "video_id",
-        ViewSort::ViewId => "view_id",
-        ViewSort::DeviceType => "context_device_type",
-        ViewSort::PlayingTimeMs => "playing_time_ms",
-        ViewSort::StartupTimeMs => "m_startup_time_ms",
-        ViewSort::RebufferDurationMs => "m_rebuffer_duration_ms",
-        ViewSort::PlaybackScore => "playback_score",
-    }
-}
-
 const VIEW_COLUMNS: &str = "view_id, video_id, viewer_id, occurred_at_ms,
     context_browser_name, context_os_name, context_device_type, playing_time_ms,
     m_startup_time_ms, m_rebuffer_duration_ms,
@@ -634,10 +621,10 @@ impl Store {
                 &filters,
                 cohort_for(metrics),
             );
-            let column = group_by.clickhouse_column();
+            let column = group_by.column();
             let continuation = match &cursor {
                 None => "1".to_owned(),
-                Some(cursor) => cursor.after.clickhouse_continuation(column, &mut params),
+                Some(cursor) => cursor.after.continuation(column, &mut params),
             };
             let (samples, source) = source_for(metrics);
             let sql = format!(
@@ -1264,7 +1251,7 @@ impl Store {
             &filters,
             Cohort::Complete,
         );
-        let column = view_sort_column(sort);
+        let column = sort.column();
         let (direction, comparison) = match order {
             SortOrder::Asc => ("ASC", ">"),
             SortOrder::Desc => ("DESC", "<"),
@@ -1482,10 +1469,10 @@ impl Store {
                 &filters,
                 Cohort::Basic,
             );
-            let column = dimension.clickhouse_column();
+            let column = dimension.column();
             let continuation = match &cursor {
                 None => "1".into(),
-                Some(c) => c.after.clickhouse_continuation(column, &mut params),
+                Some(c) => c.after.continuation(column, &mut params),
             };
             let sql = format!(
                 "{cohort} SELECT {column}, count() FROM view_metrics GROUP BY {column} HAVING {continuation}

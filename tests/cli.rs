@@ -1,17 +1,71 @@
+//! Command-line behavior. Commands that store projects use a new database on
+//! the ClickHouse server at CHUNKIFY_TEST_CLICKHOUSE_URL (default local).
 use std::process::{Command, Output};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_chunkify-analytics");
 
-fn run(args: &[&str]) -> Output {
+fn clickhouse() -> String {
+    std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into())
+}
+
+fn database() -> String {
+    format!("chunkify_cli_{}", uuid::Uuid::new_v4().simple())
+}
+
+fn run_in(database: Option<&str>, args: &[&str]) -> Output {
     let mut command = Command::new(BINARY);
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("CHUNKIFY_")) {
         command.env_remove(key);
+    }
+    if let Some(database) = database {
+        command
+            .env("CHUNKIFY_CLICKHOUSE_URL", clickhouse())
+            .env("CHUNKIFY_CLICKHOUSE_DATABASE", database);
     }
     let directory = std::env::temp_dir().join(format!("chunkify-cli-cwd-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).unwrap();
     let output = command.current_dir(&directory).args(args).output().unwrap();
     std::fs::remove_dir_all(directory).unwrap();
     output
+}
+
+fn run(args: &[&str]) -> Output {
+    run_in(None, args)
+}
+
+fn sql(query: &str) -> String {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let response = reqwest::Client::new()
+            .post(clickhouse())
+            .body(query.to_owned())
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        response.text().await.unwrap()
+    })
+}
+
+/// Every stored registry version, oldest first.
+fn registry(database: &str) -> Vec<String> {
+    sql(&format!(
+        "SELECT document FROM {database}.registry ORDER BY version FORMAT JSONEachRow"
+    ))
+    .lines()
+    .map(|line| {
+        serde_json::from_str::<serde_json::Value>(line).unwrap()["document"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    })
+    .collect()
+}
+
+struct Database(String);
+impl Drop for Database {
+    fn drop(&mut self) {
+        sql(&format!("DROP DATABASE IF EXISTS {}", self.0));
+    }
 }
 
 #[test]
@@ -26,7 +80,7 @@ fn help_and_version_work_without_valid_server_configuration() {
         let output = Command::new(BINARY)
             .args(&args)
             .env("CHUNKIFY_BIND", "invalid")
-            .env("CHUNKIFY_DATA_DIR", "/nonexistent-cli-help-data")
+            .env("CHUNKIFY_CLICKHOUSE_URL", "invalid")
             .output()
             .unwrap();
         assert!(output.status.success(), "{args:?}: {output:?}");
@@ -43,6 +97,7 @@ fn missing_arguments_and_invalid_permissions_fail_in_the_parser() {
         vec!["viewer", "delete"],
         vec!["serve", "--bind", "invalid"],
         vec!["project-list"],
+        vec!["init", "--data-dir", "/removed-option"],
     ] {
         let output = run(&args);
         assert_eq!(output.status.code(), Some(2), "{args:?}: {output:?}");
@@ -50,19 +105,20 @@ fn missing_arguments_and_invalid_permissions_fail_in_the_parser() {
 }
 
 #[test]
-fn flags_override_environment_and_configuration_check_needs_no_data_directory() {
+fn flags_override_environment_and_configuration_check_contacts_no_database() {
     let output = Command::new(BINARY)
         .args(["serve", "--bind", "127.0.0.1:0", "--help"])
         .env("CHUNKIFY_BIND", "invalid")
         .output()
         .unwrap();
     assert!(output.status.success());
-    let output = run(&[
-        "config",
-        "check",
-        "--data-dir",
-        "/nonexistent-cli-check-data",
-    ]);
+    // An unreachable server is fine: checking configuration does not connect.
+    let output = Command::new(BINARY)
+        .args(["config", "check"])
+        .env("CHUNKIFY_CLICKHOUSE_URL", "http://127.0.0.1:1")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim(),
@@ -71,123 +127,111 @@ fn flags_override_environment_and_configuration_check_needs_no_data_directory() 
 }
 
 #[test]
-fn s3_buffer_interval_is_validated_from_toml_without_contacting_storage() {
-    let directory =
-        std::env::temp_dir().join(format!("chunkify-buffer-config-{}", uuid::Uuid::new_v4()));
+fn clickhouse_settings_are_validated_without_contacting_the_server() {
+    let directory = std::env::temp_dir().join(format!(
+        "chunkify-clickhouse-config-{}",
+        uuid::Uuid::new_v4()
+    ));
     std::fs::create_dir(&directory).unwrap();
     let config = directory.join("config.toml");
-    for (value, valid) in [
-        ("0", true),
-        ("1", true),
-        ("60", true),
-        ("3600", true),
-        ("3601", false),
-        ("-1", false),
-        ("1.5", false),
-        ("\"60\"", false),
+    for (setting, valid) in [
+        ("url = \"https://clickhouse.example.com:8443/\"", true),
+        ("url = \"http://user:secret@clickhouse:8123\"", false),
+        ("url = \"ftp://clickhouse:8123\"", false),
+        ("database = \"analytics_2\"", true),
+        ("database = \"analytics; DROP\"", false),
+        ("database = \"2analytics\"", false),
+        ("node_id = 63", true),
+        ("node_id = 64", false),
+        ("registry_refresh_seconds = 0", false),
+        ("deduplication_window_seconds = 0", true),
+        ("unknown = true", false),
     ] {
-        std::fs::write(&config, format!(
-            "[storage]\nbackend = \"s3\"\nurl = \"s3://unused-buffer-test/analytics/\"\nflush_interval_seconds = {value}\n"
-        )).unwrap();
+        std::fs::write(&config, format!("[clickhouse]\n{setting}\n")).unwrap();
         let output = run(&["--config", config.to_str().unwrap(), "config", "check"]);
-        assert_eq!(output.status.success(), valid, "{value}: {output:?}");
-        if !valid {
-            let error = String::from_utf8_lossy(&output.stderr);
-            assert!(
-                error.contains("flush_interval_seconds")
-                    || error.contains("Invalid TOML configuration"),
-                "{error}"
-            );
-        }
+        assert_eq!(output.status.success(), valid, "{setting}: {output:?}");
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.contains("secret"), "{error}");
     }
-    assert!(!directory.join("data").exists());
-    std::fs::remove_dir_all(directory).unwrap();
-}
-
-#[test]
-fn data_directory_flag_is_global_and_controls_initialization() {
-    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
-    let output = run(&["init", "--data-dir", directory.to_str().unwrap()]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(directory.join("keys.json").is_file());
-    let output = run(&["--data-dir", directory.to_str().unwrap(), "project", "list"]);
-    assert!(output.status.success(), "{output:?}");
-    let projects: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(projects[0]["id"], "default");
+    for removed in [
+        "data_dir = \"data\"",
+        "[storage]\nbackend = \"local\"",
+        "[duckdb]\nthreads = 1",
+        "[experimental]\nread_worker = true",
+        "profile = true",
+    ] {
+        std::fs::write(&config, format!("{removed}\n")).unwrap();
+        let output = run(&["--config", config.to_str().unwrap(), "config", "check"]);
+        assert!(!output.status.success(), "{removed}");
+    }
     std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn initialization_and_primary_rotation_return_secrets_without_persisting_them() {
-    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
-    let path = directory.to_str().unwrap();
-    let initialized = run(&["--data-dir", path, "init"]);
-    assert!(initialized.status.success());
+    let database = Database(database());
+    let db = Some(database.0.as_str());
+    let initialized = run_in(db, &["init"]);
+    assert!(initialized.status.success(), "{initialized:?}");
     let initial: serde_json::Value = serde_json::from_slice(&initialized.stdout).unwrap();
     let public = initial["public_key"].as_str().unwrap();
     let secret = initial["secret_key"].as_str().unwrap();
     for kind in ["public", "secret"] {
-        let rotated = run(&["--data-dir", path, "key", "rotate-primary", kind]);
-        assert!(rotated.status.success());
+        let rotated = run_in(db, &["key", "rotate-primary", kind]);
+        assert!(rotated.status.success(), "{rotated:?}");
         let value: serde_json::Value = serde_json::from_slice(&rotated.stdout).unwrap();
         let raw = value["key"].as_str().unwrap();
         assert_ne!(raw, public);
         assert_ne!(raw, secret);
         assert_eq!(value["key_id"], format!("primary-{kind}"));
-        let stored = std::fs::read_to_string(directory.join("keys.json")).unwrap();
-        for key in [public, secret, raw] {
-            assert!(!stored.contains(key));
-            assert!(!String::from_utf8_lossy(&rotated.stderr).contains(key));
+        assert_eq!(value["restart_required"], false);
+        let versions = registry(&database.0);
+        for stored in &versions {
+            for key in [public, secret, raw] {
+                assert!(!stored.contains(key));
+                assert!(!String::from_utf8_lossy(&rotated.stderr).contains(key));
+            }
         }
-        let registry: serde_json::Value = serde_json::from_str(&stored).unwrap();
-        assert_eq!(registry.as_object().unwrap().len(), 1);
-        assert_eq!(registry["projects"][0]["keys"].as_array().unwrap().len(), 2);
+        let current: serde_json::Value = serde_json::from_str(versions.last().unwrap()).unwrap();
+        assert_eq!(current.as_object().unwrap().len(), 1);
+        assert_eq!(current["projects"][0]["keys"].as_array().unwrap().len(), 2);
     }
-    let before = std::fs::read(directory.join("keys.json")).unwrap();
-    let repeated = run(&["--data-dir", path, "init"]);
+    let before = registry(&database.0);
+    let repeated = run_in(db, &["init"]);
     assert!(!repeated.status.success());
     assert!(repeated.stdout.is_empty());
-    assert_eq!(std::fs::read(directory.join("keys.json")).unwrap(), before);
-    std::fs::remove_dir_all(directory).unwrap();
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already initialized"));
+    assert_eq!(registry(&database.0), before);
 }
 
-#[cfg(unix)]
 #[test]
-fn initialization_returns_keys_after_a_post_commit_directory_sync_failure() {
-    use std::os::unix::fs::PermissionsExt;
-    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&directory).unwrap();
-    // Creation needs write+execute, but opening the directory for fsync needs read.
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o300)).unwrap();
-    let output = run(&["--data-dir", directory.to_str().unwrap(), "init"]);
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert!(output.status.success());
-    let generated: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(
-        generated["secret_key"]
-            .as_str()
-            .unwrap()
-            .starts_with("ck_secret_")
-    );
-    let saved = std::fs::read_to_string(directory.join("keys.json")).unwrap();
-    assert!(!saved.contains(generated["secret_key"].as_str().unwrap()));
-    std::fs::remove_dir_all(directory).unwrap();
+fn commands_fail_clearly_before_initialization_or_without_clickhouse() {
+    let database = Database(database());
+    let output = run_in(Some(&database.0), &["project", "list"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("run init first"));
+    let mut command = Command::new(BINARY);
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("CHUNKIFY_")) {
+        command.env_remove(key);
+    }
+    let output = command
+        .args(["project", "list"])
+        .env("CHUNKIFY_CLICKHOUSE_URL", "http://127.0.0.1:1")
+        .current_dir(std::env::temp_dir())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ClickHouse"));
 }
 
 #[test]
 fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
-    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
-    let path = directory.to_str().unwrap();
-    assert!(run(&["--data-dir", path, "init"]).status.success());
+    let database = Database(database());
+    let db = Some(database.0.as_str());
+    assert!(run_in(db, &["init"]).status.success());
     let mut ids = Vec::new();
     for _ in 0..2 {
-        let output = run(&[
-            "--data-dir",
-            path,
-            "project",
-            "create",
-            "Production / Europe",
-        ]);
+        let output = run_in(db, &["project", "create", "Production / Europe"]);
         assert!(output.status.success(), "{output:?}");
         let project: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let id = project["project_id"].as_str().unwrap();
@@ -196,7 +240,7 @@ fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
         ids.push(id.to_owned());
     }
     assert_ne!(ids[0], ids[1]);
-    let output = run(&["--data-dir", path, "project", "list"]);
+    let output = run_in(db, &["project", "list"]);
     assert!(output.status.success(), "{output:?}");
     let projects: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     for id in ids {
@@ -208,21 +252,18 @@ fn project_creation_generates_unique_ids_and_preserves_the_display_name() {
             .unwrap();
         assert_eq!(project["name"], "Production / Europe");
     }
-    std::fs::remove_dir_all(directory).unwrap();
 }
 
 #[test]
 fn private_key_access_defaults_to_full_and_read_only_survives_rotation() {
-    let directory = std::env::temp_dir().join(format!("chunkify-cli-{}", uuid::Uuid::new_v4()));
-    let path = directory.to_str().unwrap();
+    let database = Database(database());
+    let db = Some(database.0.as_str());
     let command = |args: &[&str]| {
-        let mut arguments = vec!["--data-dir", path];
-        arguments.extend_from_slice(args);
-        let output = run(&arguments);
+        let output = run_in(db, args);
         assert!(output.status.success(), "{output:?}");
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
     };
-    assert!(run(&["--data-dir", path, "init"]).status.success());
+    assert!(run_in(db, &["init"]).status.success());
     let original = command(&["project", "list"]);
     assert!(
         original[0]["keys"]
@@ -236,8 +277,8 @@ fn private_key_access_defaults_to_full_and_read_only_survives_rotation() {
     let readonly = command(&["key", "create", "default", "secret", "MCP", "--read-only"]);
     assert_eq!(readonly["read_only"], true);
     assert_eq!(
-        readonly["restart_required"], true,
-        "offline changes apply on startup"
+        readonly["restart_required"], false,
+        "running servers apply key changes live"
     );
     let rotated = command(&[
         "key",
@@ -248,18 +289,6 @@ fn private_key_access_defaults_to_full_and_read_only_survives_rotation() {
     assert_eq!(rotated["key_id"], readonly["key_id"]);
     assert_eq!(rotated["read_only"], true);
     assert_ne!(rotated["key"], readonly["key"]);
-
-    let filename = directory.join("keys.json");
-    let mut saved: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&filename).unwrap()).unwrap();
-    let keys = saved["projects"][0]["keys"].as_array_mut().unwrap();
-    keys.iter_mut()
-        .find(|key| key["id"] == full["key_id"])
-        .unwrap()
-        .as_object_mut()
-        .unwrap()
-        .remove("read_only");
-    std::fs::write(&filename, serde_json::to_vec(&saved).unwrap()).unwrap();
     let listing = command(&["project", "list"]);
     let keys = listing[0]["keys"].as_array().unwrap();
     assert_eq!(
@@ -272,24 +301,32 @@ fn private_key_access_defaults_to_full_and_read_only_survives_rotation() {
             .unwrap()["read_only"],
         true
     );
-    let rejected = run(&[
-        "--data-dir",
-        path,
-        "key",
-        "create",
-        "default",
-        "public",
-        "Invalid",
-        "--read-only",
-    ]);
+    let before = registry(&database.0);
+    let rejected = run_in(
+        db,
+        &[
+            "key",
+            "create",
+            "default",
+            "public",
+            "Invalid",
+            "--read-only",
+        ],
+    );
     assert!(!rejected.status.success());
     assert!(
         String::from_utf8_lossy(&rejected.stderr)
             .contains("Only secret keys support read-only access")
     );
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&std::fs::read(filename).unwrap()).unwrap(),
-        saved
+    assert_eq!(registry(&database.0), before);
+    let configured = run_in(
+        db,
+        &[
+            "project",
+            "configure",
+            "default",
+            "/nonexistent-settings.json",
+        ],
     );
-    std::fs::remove_dir_all(directory).unwrap();
+    assert!(!configured.status.success());
 }

@@ -3,10 +3,9 @@
 //! concurrent inserts. Reads use independent HTTP requests per report.
 use super::{Client, Params};
 use crate::{
-    api::ApiError, context::event_context, event::IncomingEvent, geolocation::Location,
-    writer::BatchConfig,
+    api::ApiError, batch::BatchConfig, context::event_context, event::IncomingEvent,
+    geolocation::Location,
 };
-use duckdb::types::Value as SqlValue;
 use serde_json::{Map, Value};
 use std::{
     sync::{
@@ -21,7 +20,7 @@ pub struct Store {
     pub(super) client: Client,
     pub(super) projects: Arc<crate::projects::Registry>,
     limits: crate::limits::Reads,
-    cache: crate::reader::cache::ReportCache,
+    cache: crate::cache::ReportCache,
     sender: mpsc::Sender<WriteRequest>,
     budget: Arc<Semaphore>,
     batch: BatchConfig,
@@ -95,20 +94,6 @@ impl Ids {
     }
 }
 
-fn json_value(value: SqlValue) -> Value {
-    match value {
-        SqlValue::Null => Value::Null,
-        SqlValue::Boolean(value) => Value::Bool(value),
-        SqlValue::Int(value) => Value::from(value),
-        SqlValue::BigInt(value) => Value::from(value),
-        SqlValue::Double(value) => {
-            serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
-        }
-        SqlValue::Text(value) => Value::String(value),
-        _ => unreachable!("storage encodes only scalar values"),
-    }
-}
-
 /// One JSONEachRow object without `ingest_id`, which is assigned at insert.
 fn encode_row(
     record: &IncomingEvent,
@@ -126,7 +111,7 @@ fn encode_row(
     )?;
     let mut object = Map::with_capacity(values.len() + 1);
     for ((name, _), value) in crate::storage::COLUMNS.iter().zip(values) {
-        object.insert(name.clone(), json_value(value));
+        object.insert(name.clone(), value);
     }
     object.insert(
         "otlp_payload".into(),
@@ -141,9 +126,9 @@ fn encode_row(
 impl Store {
     pub async fn open(
         config: &crate::config::Config,
-        settings: &crate::backend::ClickHouseConfig,
         projects: Arc<crate::projects::Registry>,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let settings = &config.clickhouse;
         let client = Client::new(settings.clone())?;
         client
             .ensure_schema()
@@ -161,7 +146,7 @@ impl Store {
         ));
         Ok(Arc::new(Self {
             limits: crate::limits::Reads::new(&config.rate_limits, projects.clone()),
-            cache: crate::reader::cache::ReportCache::new(config.report_cache_seconds),
+            cache: crate::cache::ReportCache::new(config.report_cache_seconds),
             budget: Arc::new(Semaphore::new(config.batch.queue_bytes)),
             batch: config.batch.clone(),
             client,
@@ -325,7 +310,7 @@ fn retained(projects: &crate::projects::Registry, params: &mut Params) -> Result
     let now = chrono::Utc::now().timestamp_millis();
     let (ids, cutoffs): (Vec<String>, Vec<i64>) = policy
         .overrides()
-        .map(|(id, _)| (id.to_owned(), policy.project_cutoff(id, now)))
+        .map(|id| (id.to_owned(), policy.project_cutoff(id, now)))
         .unzip();
     Ok(format!(
         "received_at_ms >= transform(project_id, {}, {}, {})",

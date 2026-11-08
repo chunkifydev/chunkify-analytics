@@ -1,52 +1,55 @@
-//! Local administration uses the data-directory lock when stopped, or the
-//! running collector's private socket. It never opens a second database writer.
+//! Project administration through HTTP and the CLI. Every change is a
+//! compare-and-set of the project registry in ClickHouse, so commands and any
+//! number of running servers can change projects concurrently.
 use crate::{
     config::{Config, Keys},
     projects::{self, Registry},
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Request {
     command: String,
     args: Vec<String>,
 }
 
-type Reply = std::result::Result<Value, String>;
-
-fn live_command(command: &str) -> bool {
-    matches!(
-        command,
-        "project-list"
-            | "project-create"
-            | "project-retention"
-            | "project-update"
-            | "project-delete"
-            | "key-create"
-            | "key-rotate"
-            | "key-revoke"
-            | "rotate-key"
-    )
-}
-
 // Validation and persistence finish before updating the active configuration.
 // Retention updates wait for any current sweep before saving and acknowledging.
+// When another server or command saved the registry first, the command is
+// applied again to the newest registry, which also validates it again.
 fn execute(
     config: &Config,
     keys: &mut Keys,
     registry: Option<&Registry>,
     request: &Request,
 ) -> Result<Value> {
-    if registry.is_some() && !live_command(&request.command) {
-        return Err("Stop the collector before changing projects or project settings.".into());
+    let mut attempts = 0;
+    loop {
+        match execute_once(config, keys, registry, request) {
+            Err(error) if crate::clickhouse::is_conflict(&*error) && attempts < 5 => {
+                attempts += 1;
+                let latest = config.keys()?;
+                if let Some(registry) = registry {
+                    adopt(config, registry, &latest)?;
+                }
+                *keys = latest;
+            }
+            result => return result,
+        }
     }
+}
+
+fn execute_once(
+    config: &Config,
+    keys: &mut Keys,
+    registry: Option<&Registry>,
+    request: &Request,
+) -> Result<Value> {
     let mut next = keys.clone();
     let mut output = projects::apply_command(&mut next, &request.command, &request.args)?;
+    record_expiration(config, keys, &mut next);
     if request.command == "project-list" {
         for project in output.as_array_mut().expect("project list") {
             project["effective_retention_seconds"] = project["settings"]["retention_seconds"]
@@ -85,7 +88,7 @@ fn execute(
         } else {
             None
         };
-        let warning = config.save_keys(&next)?;
+        config.save_keys(&next)?;
         if let Some(policy) = retention.as_mut() {
             **policy = crate::retention::Policy::new(config.retention_seconds, &next.projects);
         }
@@ -101,11 +104,52 @@ fn execute(
             output["restart_required"] = false.into();
         }
         *keys = next;
-        if let Some(warning) = warning {
-            output["warning"] = warning.into();
-        }
     }
     Ok(output)
+}
+
+/// When a project's effective retention changes, events already expired under
+/// the previous policy stay expired: reads hid them and the sweep deletes them.
+fn record_expiration(config: &Config, previous: &Keys, next: &mut Keys) {
+    let now = chrono::Utc::now().timestamp_millis();
+    for project in &mut next.projects {
+        let Some(before) = previous.projects.iter().find(|p| p.id == project.id) else {
+            continue;
+        };
+        let old = before
+            .settings
+            .retention_seconds
+            .unwrap_or(config.retention_seconds);
+        let new = project
+            .settings
+            .retention_seconds
+            .unwrap_or(config.retention_seconds);
+        if old != new && old > 0 {
+            let floor = now.saturating_sub((old * 1000) as i64);
+            project.expired_before_ms =
+                Some(project.expired_before_ms.map_or(floor, |f| f.max(floor)));
+        }
+    }
+}
+
+/// Make a newer registry active on a running server.
+fn adopt(config: &Config, registry: &Registry, next: &Keys) -> Result<()> {
+    let mut policy = registry
+        .retention
+        .write()
+        .map_err(|_| "Retention policy lock failed")?;
+    *policy = crate::retention::Policy::new(config.retention_seconds, &next.projects);
+    registry.replace_keys(next, config);
+    for project in next.projects.iter().filter(|project| !project.deleted) {
+        registry.replace_origins(
+            &project.id,
+            projects::effective_origins(
+                &config.allowed_origins,
+                project.settings.allowed_origins.as_deref(),
+            ),
+        );
+    }
+    Ok(())
 }
 
 pub struct Controller {
@@ -145,12 +189,9 @@ impl Controller {
         Ok(())
     }
 
-    /// Adopt a newer project registry saved by another analytics server.
-    /// Only ClickHouse storage shares a registry between running servers.
+    /// Adopt a newer project registry saved by the CLI or another server.
     pub fn sync(&self) -> Result<()> {
-        let crate::backend::Backend::ClickHouse(settings) = &self.config.backend else {
-            return Ok(());
-        };
+        let settings = &self.config.clickhouse;
         let Some((version, bytes)) = crate::clickhouse::load_registry(settings)? else {
             return Ok(());
         };
@@ -160,45 +201,24 @@ impl Controller {
         }
         let next: Keys = serde_json::from_slice(&bytes)?;
         projects::validate(&next.projects)?;
-        let mut policy = self
-            .registry
-            .retention
-            .write()
-            .map_err(|_| "Retention policy lock failed")?;
-        *policy = crate::retention::Policy::new(self.config.retention_seconds, &next.projects);
-        self.registry.replace_keys(&next, &self.config);
-        for project in next.projects.iter().filter(|project| !project.deleted) {
-            self.registry.replace_origins(
-                &project.id,
-                projects::effective_origins(
-                    &self.config.allowed_origins,
-                    project.settings.allowed_origins.as_deref(),
-                ),
-            );
-        }
-        drop(policy);
+        adopt(&self.config, &self.registry, &next)?;
         *keys = next;
         settings.set_loaded_version(version);
         Ok(())
     }
 
-    /// Whether credentials can change on another server sharing this storage.
-    pub fn shares_registry(&self) -> bool {
-        self.config.is_clickhouse()
-    }
-
-    /// Refresh after an unknown credential, at most once per second, so a key
-    /// created through another server works here without waiting for a poll.
-    pub fn sync_after_miss(&self) -> bool {
-        {
-            let Ok(mut missed) = self.missed.lock() else {
-                return false;
-            };
-            if missed.is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1)) {
-                return false;
-            }
-            *missed = Some(std::time::Instant::now());
+    /// Refresh after an unknown credential, so a key created through the CLI or
+    /// another server works here without waiting for the next poll. Refreshes
+    /// run one at a time; a request reuses any refresh that began after it
+    /// arrived, so a flood of unknown keys costs one registry read at a time.
+    pub fn sync_after_miss(&self, arrived: std::time::Instant) -> bool {
+        let Ok(mut started) = self.missed.lock() else {
+            return false;
+        };
+        if started.is_some_and(|at| at >= arrived) {
+            return true;
         }
+        *started = Some(std::time::Instant::now());
         self.sync().is_ok()
     }
 
@@ -243,22 +263,13 @@ impl Controller {
             .map_err(|_| ApiError::internal())
     }
 
-    fn new(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Self {
+    pub fn new(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Self {
         Self {
             config,
             registry,
             keys: Mutex::new(keys),
             missed: Mutex::new(None),
         }
-    }
-
-    fn execute(&self, request: &Request) -> Reply {
-        if request.command != "project-list" {
-            self.sync().map_err(|error| error.to_string())?;
-        }
-        let mut keys = self.keys.lock().map_err(|_| "Administration lock failed")?;
-        execute(&self.config, &mut keys, Some(&self.registry), request)
-            .map_err(|error| error.to_string())
     }
 
     pub fn project(
@@ -369,12 +380,9 @@ impl Controller {
 pub fn refresh_registry(
     config: Arc<Config>,
     controller: Arc<Controller>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let crate::backend::Backend::ClickHouse(settings) = &config.backend else {
-        return None;
-    };
-    let interval = settings.registry_refresh;
-    Some(tokio::spawn(async move {
+) -> tokio::task::JoinHandle<()> {
+    let interval = config.clickhouse.registry_refresh;
+    tokio::spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
             let controller = controller.clone();
@@ -385,343 +393,32 @@ pub fn refresh_registry(
                 _ => eprintln!("Project registry refresh failed; will retry"),
             }
         }
-    }))
+    })
 }
 
-pub async fn command(config: &Config, command: &str, args: &[String]) -> Result<()> {
+/// Apply a CLI command to the shared registry. Running servers adopt the change
+/// at their next refresh, except ingestion limits, which apply at startup.
+pub fn command(config: &Config, command: &str, args: &[String]) -> Result<()> {
     let request = Request {
         command: command.into(),
         args: args.to_vec(),
     };
-    let output = if let Some(_lock) = config.try_lock()? {
-        let mut output = execute(config, &mut config.keys()?, None, &request)?;
-        // Running servers poll the ClickHouse registry and apply keys, origins
-        // and retention live. Ingestion limits still apply at server startup.
-        if config.is_clickhouse()
-            && command != "project-configure"
-            && let Some(object) = output.as_object_mut()
-            && object.contains_key("restart_required")
-        {
-            object.insert("restart_required".into(), false.into());
-        }
-        output
-    } else if live_command(command) {
-        live::send(config, &request).await?
-    } else {
-        return Err("Stop the collector before changing projects or project settings.".into());
-    };
+    let mut output = execute(config, &mut config.keys()?, None, &request)?;
+    if let Some(object) = output.as_object_mut()
+        && object.contains_key("restart_required")
+    {
+        object.insert(
+            "restart_required".into(),
+            (command == "project-configure").into(),
+        );
+    }
     println!("{output}");
     Ok(())
-}
-
-pub use live::Server;
-
-#[cfg(unix)]
-mod live {
-    use super::*;
-    use std::{
-        fs, io,
-        os::unix::{
-            ffi::OsStrExt,
-            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-        },
-        path::PathBuf,
-        time::Duration,
-    };
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::{UnixListener, UnixStream},
-        sync::oneshot,
-        task::JoinHandle,
-        time::timeout,
-    };
-
-    const REQUEST_LIMIT: u64 = 16 * 1024;
-    const REPLY_LIMIT: u64 = 32 * 1024 * 1024;
-    const IO_TIMEOUT: Duration = Duration::from_secs(5);
-
-    fn socket_path(config: &Config, create: bool) -> Result<(PathBuf, Option<PathBuf>)> {
-        let directory = fs::canonicalize(&config.data_dir)?;
-        let path = directory.join("admin.sock");
-        // Use the smaller macOS limit on both platforms. Resolve aliases first
-        // so the server and CLI choose the same address for the same directory.
-        if path.as_os_str().as_bytes().len() < 104 {
-            return Ok((path, None));
-        }
-        // SAFETY: geteuid takes no pointers and only returns the process identity.
-        let uid = unsafe { libc::geteuid() };
-        let digest = ring::digest::digest(&ring::digest::SHA256, directory.as_os_str().as_bytes());
-        let hash: String = digest
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let locator = directory.join("admin.socket-id");
-        let runtime_for = |id: uuid::Uuid| {
-            PathBuf::from(format!(
-                "/tmp/ck-admin-{uid}-{}-{}",
-                &hash[..32],
-                id.simple()
-            ))
-        };
-        let runtime = if create {
-            // An unpredictable suffix prevents another local user from reserving
-            // our runtime path before startup. The private data directory holds
-            // the locator; the canonical-path hash keeps restored copies apart.
-            if let Ok(previous) = fs::read_to_string(&locator)
-                && let Ok(id) = uuid::Uuid::parse_str(&previous)
-            {
-                let stale = runtime_for(id);
-                if fs::symlink_metadata(&stale)
-                    .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o777 == 0o700)
-                {
-                    let socket = stale.join("s");
-                    if fs::symlink_metadata(&socket)
-                        .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
-                    {
-                        let _ = fs::remove_file(socket);
-                    }
-                    let _ = fs::remove_dir(stale);
-                }
-            }
-            let id = uuid::Uuid::new_v4();
-            let runtime = runtime_for(id);
-            fs::DirBuilder::new().mode(0o700).create(&runtime)?;
-            let temporary = directory.join(format!(".admin-{id}.tmp"));
-            let saved = (|| -> io::Result<()> {
-                use std::io::Write;
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&temporary)?;
-                file.write_all(id.to_string().as_bytes())?;
-                drop(file);
-                fs::rename(&temporary, &locator)
-            })();
-            if let Err(error) = saved {
-                let _ = fs::remove_file(temporary);
-                let _ = fs::remove_dir(runtime);
-                return Err(error.into());
-            }
-            runtime
-        } else {
-            runtime_for(uuid::Uuid::parse_str(&fs::read_to_string(locator)?)?)
-        };
-        let metadata = fs::symlink_metadata(&runtime)?;
-        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o777 != 0o700 {
-            return Err("Unsafe local administration directory in /tmp; expected a private directory owned by the collector user.".into());
-        }
-        Ok((runtime.join("s"), Some(runtime)))
-    }
-
-    // Remove only the socket we bound, including on startup failure. A crashed
-    // collector leaves a socket that the next exclusive lock owner can replace.
-    struct SocketFile {
-        path: PathBuf,
-        inode: u64,
-        runtime_directory: Option<PathBuf>,
-    }
-    impl Drop for SocketFile {
-        fn drop(&mut self) {
-            if fs::symlink_metadata(&self.path)
-                .is_ok_and(|m| m.file_type().is_socket() && m.ino() == self.inode)
-            {
-                let _ = fs::remove_file(&self.path);
-                if let Some(directory) = &self.runtime_directory {
-                    let _ = fs::remove_dir(directory);
-                }
-            }
-        }
-    }
-
-    pub struct Server {
-        listener: UnixListener,
-        socket: SocketFile,
-        controller: Arc<Controller>,
-        uid: u32,
-    }
-
-    impl Server {
-        // Caller must hold the exclusive data-directory lock for this lifetime.
-        pub fn bind(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Result<Self> {
-            let (path, runtime_directory) = socket_path(&config, true)?;
-            match fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(&path)?,
-                Ok(_) => return Err("admin.sock already exists and is not a socket; move it before starting the collector.".into()),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-                Err(error) => return Err(error.into()),
-            }
-            let listener = UnixListener::bind(&path)?;
-            let metadata = fs::symlink_metadata(&path)?;
-            let socket = SocketFile {
-                path,
-                inode: metadata.ino(),
-                runtime_directory,
-            };
-            fs::set_permissions(&socket.path, fs::Permissions::from_mode(0o600))?;
-            Ok(Self {
-                listener,
-                socket,
-                controller: Arc::new(Controller::new(config, registry, keys)),
-                uid: metadata.uid(),
-            })
-        }
-
-        pub fn controller(&self) -> Arc<Controller> {
-            self.controller.clone()
-        }
-
-        pub fn start(self) -> Running {
-            let (stop, mut stopped) = oneshot::channel();
-            let task = tokio::spawn(async move {
-                let Self {
-                    listener,
-                    socket,
-                    controller,
-                    uid,
-                } = self;
-                loop {
-                    let connection = tokio::select! {
-                        biased;
-                        _ = &mut stopped => break,
-                        connection = listener.accept() => connection,
-                    };
-                    let Ok((mut stream, _)) = connection else {
-                        eprintln!("Local administration listener failed");
-                        break;
-                    };
-                    // macOS does not enforce socket file permissions for connect.
-                    // Peer credentials also restrict access on a shared host.
-                    if !stream
-                        .peer_cred()
-                        .is_ok_and(|peer| peer.uid() == uid || peer.uid() == 0)
-                    {
-                        continue;
-                    }
-                    let request =
-                        timeout(IO_TIMEOUT, receive::<Request>(&mut stream, REQUEST_LIMIT)).await;
-                    let reply = match request {
-                        Ok(Ok(request)) => {
-                            let controller = controller.clone();
-                            let result =
-                                tokio::task::spawn_blocking(move || controller.execute(&request))
-                                    .await;
-                            match result {
-                                Ok(reply) => reply,
-                                Err(_) => {
-                                    eprintln!("Local administration worker failed");
-                                    break;
-                                }
-                            }
-                        }
-                        _ => Err("Invalid or incomplete administration request".into()),
-                    };
-                    if let Ok(bytes) = serde_json::to_vec(&reply) {
-                        let _ = timeout(IO_TIMEOUT, stream.write_all(&bytes)).await;
-                    }
-                }
-                drop(listener);
-                drop(socket);
-            });
-            Running { stop, task }
-        }
-    }
-
-    pub struct Running {
-        stop: oneshot::Sender<()>,
-        task: JoinHandle<()>,
-    }
-    impl Running {
-        pub async fn stop(self) {
-            let _ = self.stop.send(());
-            if self.task.await.is_err() {
-                eprintln!("Local administration worker failed during shutdown");
-            }
-        }
-    }
-
-    async fn receive<T: serde::de::DeserializeOwned>(
-        stream: &mut UnixStream,
-        limit: u64,
-    ) -> std::result::Result<T, String> {
-        let mut bytes = Vec::new();
-        stream
-            .take(limit + 1)
-            .read_to_end(&mut bytes)
-            .await
-            .map_err(|_| "Administration connection failed")?;
-        if bytes.len() as u64 > limit {
-            return Err("Administration message is too large".into());
-        }
-        serde_json::from_slice(&bytes).map_err(|_| "Invalid administration message".into())
-    }
-
-    pub(super) async fn send(config: &Config, request: &Request) -> Result<Value> {
-        let bytes = serde_json::to_vec(request)?;
-        if bytes.len() as u64 > REQUEST_LIMIT {
-            return Err("Administration request is too large".into());
-        }
-        let (path, _) = socket_path(config, false)?;
-        let metadata = fs::symlink_metadata(&path).map_err(|_| "Data directory is busy and local administration is unavailable. Wait for startup/shutdown or stop the collector first.")?;
-        if !metadata.file_type().is_socket() {
-            return Err("admin.sock is not a socket".into());
-        }
-        let exchange = async {
-            let mut stream = UnixStream::connect(path).await.map_err(|_| "Cannot connect to the running collector; wait for startup/shutdown or stop it first.")?;
-            if stream
-                .peer_cred()
-                .map_err(|_| "Cannot verify administration server")?
-                .uid()
-                != metadata.uid()
-            {
-                return Err("Administration server owner does not match the socket".into());
-            }
-            stream
-                .write_all(&bytes)
-                .await
-                .map_err(|_| "Administration request could not be sent")?;
-            stream
-                .shutdown()
-                .await
-                .map_err(|_| "Administration request could not be sent")?;
-            receive::<Reply>(&mut stream, REPLY_LIMIT).await?
-        };
-        timeout(Duration::from_secs(15), exchange).await
-            .map_err(|_| "Administration timed out; the change may have been applied. Check project list before retrying.")?
-            .map_err(Into::into)
-    }
-}
-
-#[cfg(not(unix))]
-mod live {
-    use super::*;
-    pub struct Server {
-        controller: Arc<Controller>,
-    }
-    impl Server {
-        pub fn bind(config: Arc<Config>, registry: Arc<Registry>, keys: Keys) -> Result<Self> {
-            Ok(Self {
-                controller: Arc::new(Controller::new(config, registry, keys)),
-            })
-        }
-        pub fn controller(&self) -> Arc<Controller> {
-            self.controller.clone()
-        }
-        pub fn start(self) -> Self {
-            self
-        }
-        pub async fn stop(self) {}
-    }
-    pub(super) async fn send(_: &Config, _: &Request) -> Result<Value> {
-        Err("Live key administration requires Linux or macOS. Stop the collector before running this command.".into())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf};
 
     struct Fixture {
         config: Arc<Config>,
@@ -729,32 +426,30 @@ mod tests {
         public_key: String,
         secret_key: String,
         registry: Arc<Registry>,
-        directory: PathBuf,
     }
     impl Fixture {
         fn new() -> Self {
-            let mut config =
-                Config::load_with(&crate::settings::Settings::default(), None, None).unwrap();
-            config.data_dir = std::env::temp_dir().join(format!(
-                "ck-admin-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..12]
-            ));
+            let config = crate::clickhouse::testing::config("");
             let generated = config.initialize().unwrap();
             let keys = config.keys().unwrap();
             let registry = Arc::new(Registry::new(&keys, &config).unwrap());
             Self {
                 public_key: generated["public_key"].as_str().unwrap().into(),
                 secret_key: generated["secret_key"].as_str().unwrap().into(),
-                directory: config.data_dir.clone(),
                 config: Arc::new(config),
                 keys,
                 registry,
             }
         }
+        fn saved(&self) -> (u64, Vec<u8>) {
+            crate::clickhouse::load_registry(&self.config.clickhouse)
+                .unwrap()
+                .unwrap()
+        }
     }
     impl Drop for Fixture {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.directory);
+            crate::clickhouse::testing::drop_database(&self.config.clickhouse);
         }
     }
     fn request(command: &str, args: &[&str]) -> Request {
@@ -787,7 +482,7 @@ mod tests {
             fixture.registry.clone(),
             fixture.keys.clone(),
         );
-        let before = fs::read(fixture.directory.join("keys.json")).unwrap();
+        let before = fixture.saved();
         for action in [
             ProjectAction::Keys(KeyAction::List),
             ProjectAction::Update(
@@ -801,10 +496,7 @@ mod tests {
             let error = controller.project(token, action).err().unwrap();
             assert_eq!(error.status, axum::http::StatusCode::FORBIDDEN);
         }
-        assert_eq!(
-            fs::read(fixture.directory.join("keys.json")).unwrap(),
-            before
-        );
+        assert_eq!(fixture.saved(), before);
         assert!(
             controller
                 .project(&fixture.secret_key, ProjectAction::Keys(KeyAction::List))
@@ -822,7 +514,7 @@ mod tests {
             fixture.registry.clone(),
             fixture.keys.clone(),
         );
-        let before = fs::read(fixture.directory.join("keys.json")).unwrap();
+        let before = fixture.saved();
         for token in ["", "invalid", &fixture.secret_key, &fixture.public_key] {
             for action in [KeyAction::List, KeyAction::Rotate("primary-secret".into())] {
                 let error = controller
@@ -832,10 +524,7 @@ mod tests {
                 assert_eq!(error.status, axum::http::StatusCode::UNAUTHORIZED);
             }
         }
-        assert_eq!(
-            fs::read(fixture.directory.join("keys.json")).unwrap(),
-            before
-        );
+        assert_eq!(fixture.saved(), before);
         let recovered = controller
             .admin_keys(
                 admin_key,
@@ -858,6 +547,9 @@ mod tests {
                 )
                 .is_ok()
         );
+        let saved = String::from_utf8(fixture.saved().1).unwrap();
+        assert!(!saved.contains(recovered["key"].as_str().unwrap()));
+        assert!(saved.contains(&projects::hash(recovered["key"].as_str().unwrap())));
     }
 
     #[test]
@@ -910,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn deletion_revokes_default_keys_and_preserves_data_until_project_expiration() {
+    fn deletion_revokes_default_keys_and_keeps_project_expiration() {
         let mut fixture = Fixture::new();
         Arc::get_mut(&mut fixture.config).unwrap().retention_seconds = 0;
         execute(
@@ -918,14 +610,6 @@ mod tests {
             &mut fixture.keys,
             Some(&fixture.registry),
             &request("project-retention", &["default", "10"]),
-        )
-        .unwrap();
-        let mut db = duckdb::Connection::open(fixture.config.database_path()).unwrap();
-        db.execute_batch(
-            "CREATE TABLE events(project_id VARCHAR, event_id VARCHAR, received_at_ms BIGINT);
-            CREATE TABLE event_otlp(project_id VARCHAR, event_id VARCHAR);
-            INSERT INTO events VALUES ('default', 'retained', 1000);
-            INSERT INTO event_otlp VALUES ('default', 'retained');",
         )
         .unwrap();
         let controller = Controller::new(
@@ -939,18 +623,12 @@ mod tests {
             .unwrap();
         assert_eq!(result["deleted"], true);
         assert_eq!(result["restart_required"], false);
-        assert!(
-            fixture
-                .registry
-                .authorize(&fixture.public_key, projects::Permission::Public)
-                .is_err()
-        );
-        assert!(
-            fixture
-                .registry
-                .authorize(&fixture.secret_key, projects::Permission::Secret)
-                .is_err()
-        );
+        for (key, permission) in [
+            (&fixture.public_key, projects::Permission::Public),
+            (&fixture.secret_key, projects::Permission::Secret),
+        ] {
+            assert!(fixture.registry.authorize(key, permission).is_err());
+        }
         let saved = fixture.config.keys().unwrap();
         assert!(saved.projects[0].deleted);
         assert!(saved.projects[0].keys.is_empty());
@@ -960,21 +638,10 @@ mod tests {
                 .authorize(&fixture.secret_key, projects::Permission::Secret)
                 .is_err()
         );
+        // Stored events of the deleted project still expire with its own policy.
         let policy = restored.retention.read().unwrap();
-        assert_eq!(policy.purge(&mut db, 11000).unwrap(), 0);
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM events", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        assert_eq!(policy.purge(&mut db, 11001).unwrap(), 1);
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM event_otlp", [], |row| row
-                .get::<_, i64>(0))
-                .unwrap(),
-            0
-        );
+        assert_eq!(policy.project_cutoff("default", 11000), 1000);
+        drop(policy);
         assert!(
             controller
                 .project(&fixture.secret_key, ProjectAction::Delete)
@@ -983,92 +650,70 @@ mod tests {
     }
 
     #[test]
-    fn failed_rename_keeps_disk_and_active_keys_unchanged() {
+    fn a_stale_change_is_reapplied_on_top_of_a_concurrent_change() {
         let mut fixture = Fixture::new();
-        let file = fixture.directory.join("keys.json");
-        let backup = fixture.directory.join("original.json");
-        let before = fs::read(&file).unwrap();
-        fs::rename(&file, &backup).unwrap();
-        fs::create_dir(&file).unwrap();
+        let (version, _) = fixture.saved();
+        // Another server creates a key first, from the same registry version.
+        let mut other_keys = fixture.keys.clone();
+        let mut other_config = crate::clickhouse::testing::config("");
+        other_config.clickhouse = fixture.config.clickhouse.clone();
+        other_config.clickhouse.registry_version =
+            Arc::new(std::sync::atomic::AtomicU64::new(version));
+        let other = execute(
+            &other_config,
+            &mut other_keys,
+            None,
+            &request("key-create", &["default", "secret", "Elsewhere"]),
+        )
+        .unwrap();
+        assert_eq!(fixture.saved().0, version + 1);
+        // This server's change, based on the older version, is applied again.
+        let rotated = execute(
+            &fixture.config,
+            &mut fixture.keys,
+            Some(&fixture.registry),
+            &request("key-rotate", &["default", "primary-public"]),
+        )
+        .unwrap();
+        assert_eq!(fixture.saved().0, version + 2);
+        let saved = fixture.config.keys().unwrap();
+        let ids: Vec<_> = saved.projects[0]
+            .keys
+            .iter()
+            .map(|key| key.id.as_str())
+            .collect();
+        assert!(ids.contains(&other["key_id"].as_str().unwrap()));
+        for (key, works) in [
+            (other["key"].as_str().unwrap(), true),
+            (rotated["key"].as_str().unwrap(), true),
+            (fixture.public_key.as_str(), false),
+        ] {
+            let permission = if key.starts_with("ck_public") {
+                projects::Permission::Public
+            } else {
+                projects::Permission::Secret
+            };
+            assert_eq!(fixture.registry.authorize(key, permission).is_ok(), works);
+        }
+        // A change that is invalid on the newest registry is not saved.
+        let mut stale = fixture.keys.clone();
+        stale.projects[0]
+            .keys
+            .retain(|key| key.id != "primary-secret");
+        fixture
+            .config
+            .clickhouse
+            .registry_version
+            .store(version, std::sync::atomic::Ordering::Release);
         assert!(
             execute(
                 &fixture.config,
-                &mut fixture.keys,
-                Some(&fixture.registry),
-                &request("key-rotate", &["default", "primary-public"])
+                &mut stale,
+                None,
+                &request("key-revoke", &["default", "missing"]),
             )
             .is_err()
         );
-        assert!(
-            fixture
-                .registry
-                .authorize(&fixture.public_key, projects::Permission::Public)
-                .is_ok()
-        );
-        assert_eq!(serde_json::to_vec_pretty(&fixture.keys).unwrap(), before);
-        assert!(!fs::read_dir(&fixture.directory).unwrap().any(|entry| {
-            entry
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".keys-")
-        }));
-        fs::remove_dir(file).unwrap();
-        fs::rename(backup, fixture.directory.join("keys.json")).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn private_socket_rejects_invalid_requests_and_cleans_up() {
-        use tokio::{
-            io::{AsyncReadExt, AsyncWriteExt},
-            net::UnixStream,
-        };
-        let fixture = Fixture::new();
-        let _lock = fixture.config.lock().unwrap();
-        let path = fixture.directory.join("admin.sock");
-        // Never delete a regular file found where the socket should be.
-        fs::write(&path, b"keep").unwrap();
-        assert!(
-            Server::bind(
-                fixture.config.clone(),
-                fixture.registry.clone(),
-                fixture.keys.clone()
-            )
-            .is_err()
-        );
-        assert_eq!(fs::read(&path).unwrap(), b"keep");
-        fs::remove_file(&path).unwrap();
-        let server = Server::bind(
-            fixture.config.clone(),
-            fixture.registry.clone(),
-            fixture.keys.clone(),
-        )
-        .unwrap()
-        .start();
-        for body in [
-            "invalid".into(),
-            "x".repeat(16385),
-            serde_json::to_string(&request("project-rename", &["default", "blocked"])).unwrap(),
-            r#"{"command":"project-list","args":[],"unexpected":true}"#.into(),
-        ] {
-            let mut stream = UnixStream::connect(&path).await.unwrap();
-            stream.write_all(body.as_bytes()).await.unwrap();
-            stream.shutdown().await.unwrap();
-            let mut bytes = Vec::new();
-            stream.read_to_end(&mut bytes).await.unwrap();
-            assert!(serde_json::from_slice::<Reply>(&bytes).unwrap().is_err());
-        }
-        assert_eq!(
-            live::send(&fixture.config, &request("project-list", &[]))
-                .await
-                .unwrap()
-                .as_array()
-                .unwrap()
-                .len(),
-            1
-        );
-        server.stop().await;
-        assert!(!path.exists());
+        assert_eq!(fixture.saved().0, version + 2);
     }
 }

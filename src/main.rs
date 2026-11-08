@@ -1,6 +1,8 @@
 mod admin;
 mod api;
 mod backend;
+mod batch;
+mod cache;
 mod cli;
 mod clickhouse;
 mod config;
@@ -14,15 +16,11 @@ mod exports;
 mod geolocation;
 mod limits;
 mod mcp;
-mod profile;
 mod projects;
 mod query;
-mod reader;
 mod retention;
-mod s3_store;
 mod storage;
 mod store;
-mod writer;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cli::Command::Serve { bind } => *bind,
         _ => None,
     };
-    let config = config::Config::load_with(&settings, cli.data_dir.as_deref(), bind)?;
+    let config = config::Config::load_with(&settings, bind)?;
     match cli.command {
         cli::Command::Init => {
             println!("{}", config.initialize()?);
@@ -64,18 +62,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|_| "Cannot initialize server logging")?;
             let geolocation =
                 std::sync::Arc::new(geolocation::Database::open(&config.geoip_database)?);
-            // Every server holds its own data directory. With ClickHouse, many
-            // servers, each with its own directory, can share one database.
-            let _lock = config.lock()?;
+            // Servers keep no local state: any number can share one database.
             let keys = config.keys()?;
             let config = std::sync::Arc::new(config);
             let projects = std::sync::Arc::new(projects::Registry::new(&keys, &config)?);
-            let admin = admin::Server::bind(config.clone(), projects.clone(), keys)?;
-            let controller = admin.controller();
-            let (store, worker) = store::Store::connect(&config, projects.clone()).await?;
+            let controller = std::sync::Arc::new(admin::Controller::new(
+                config.clone(),
+                projects.clone(),
+                keys,
+            ));
+            let store = clickhouse::Store::open(&config, projects.clone()).await?;
             let refresh = admin::refresh_registry(config.clone(), controller.clone());
             let removed = store
-                .purge_expired(projects.clone())
+                .purge_expired()
                 .await
                 .map_err(|_| "Startup retention sweep failed")?;
             if removed > 0 {
@@ -100,14 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Keep the timer active even when all policies are disabled, because
             // the administrator can enable expiration without restarting.
             let maintenance_store = store.clone();
-            let maintenance_projects = projects.clone();
             let maintenance = tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(interval).await;
-                    match maintenance_store
-                        .purge_expired(maintenance_projects.clone())
-                        .await
-                    {
+                    match maintenance_store.purge_expired().await {
                         Ok(removed) if removed > 0 => {
                             println!("Retention removed {removed} events")
                         }
@@ -119,7 +114,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
             let shutdown = shutdown();
-            let admin = admin.start();
             println!("Listening on http://{}", listener.local_addr()?);
             let result = axum::serve(
                 listener,
@@ -128,25 +122,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .with_graceful_shutdown(shutdown)
             .await;
-            admin.stop().await;
-            if let Some(refresh) = refresh {
-                refresh.abort();
-                let _ = refresh.await;
-            }
+            // Graceful shutdown has completed every in-flight request, and with
+            // it every acknowledged write.
+            refresh.abort();
+            let _ = refresh.await;
             maintenance.abort();
             let _ = maintenance.await;
-            drop(store);
-            worker.join().map_err(|_| "Database worker panicked")??;
             result?;
             Ok(())
         }
         cli::Command::Project { command } => {
             let (command, args) = command.request();
-            admin::command(&config, command, &args).await
+            admin::command(&config, command, &args)
         }
         cli::Command::Key { command } => {
             let (command, args) = command.request();
-            admin::command(&config, command, &args).await
+            admin::command(&config, command, &args)
         }
         cli::Command::Mcp => unreachable!(),
     }

@@ -8,16 +8,11 @@ use std::{
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct FileConfig {
-    data_dir: Option<PathBuf>,
-    profile: Option<bool>,
     logging: Logging,
     server: Server,
     retention: Retention,
     batch: Batch,
-    duckdb: Duckdb,
-    storage: Storage,
     clickhouse: ClickHouse,
-    experimental: Experimental,
     mcp: Mcp,
     rate_limits: crate::limits::Config,
     cache: Cache,
@@ -62,30 +57,6 @@ struct Batch {
     delay_ms: Option<u64>,
     queue_max_bytes: Option<usize>,
     queue_max_requests: Option<usize>,
-    insert_mode: Option<String>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Duckdb {
-    threads: Option<usize>,
-    checkpoint_threshold_mib: Option<u32>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Storage {
-    backend: Option<String>,
-    flush_interval_seconds: Option<u64>,
-    path: Option<PathBuf>,
-    url: Option<String>,
-    endpoint: Option<String>,
-    region: Option<String>,
-    access_key_id: Option<String>,
-    secret_access_key: Option<String>,
-    session_token: Option<String>,
-    url_style: Option<String>,
-    use_ssl: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -99,12 +70,6 @@ struct ClickHouse {
     registry_refresh_seconds: Option<u64>,
     node_id: Option<u16>,
     deduplication_window_seconds: Option<u64>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Experimental {
-    read_worker: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -151,41 +116,6 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             seconds.to_string().into(),
         );
     }
-    let mut storage = config.storage;
-    if let Some(value) = storage.flush_interval_seconds {
-        settings.values.insert(
-            "storage.flush_interval_seconds".into(),
-            value.to_string().into(),
-        );
-    }
-    if let Some(path) = storage.path.take() {
-        let path = if path.is_absolute() {
-            path
-        } else {
-            file.parent().unwrap_or_else(|| Path::new(".")).join(path)
-        };
-        settings
-            .values
-            .insert("storage.path".into(), path.into_os_string());
-    }
-    for (name, value) in [
-        ("storage.backend", storage.backend),
-        ("storage.url", storage.url),
-        ("storage.endpoint", storage.endpoint),
-        ("storage.region", storage.region),
-        ("storage.access_key_id", storage.access_key_id),
-        ("storage.secret_access_key", storage.secret_access_key),
-        ("storage.session_token", storage.session_token),
-        ("storage.url_style", storage.url_style),
-        (
-            "storage.use_ssl",
-            storage.use_ssl.map(|value| value.to_string()),
-        ),
-    ] {
-        if let Some(value) = value {
-            settings.values.insert(name.into(), value.into());
-        }
-    }
     let clickhouse = config.clickhouse;
     for (name, value) in [
         ("clickhouse.url", clickhouse.url),
@@ -216,23 +146,6 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         if let Some(value) = value {
             settings.values.insert(name.into(), value.into());
         }
-    }
-    if let Some(directory) = config.data_dir {
-        let directory = if directory.is_absolute() {
-            directory
-        } else {
-            file.parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(directory)
-        };
-        settings
-            .values
-            .insert("data_dir".into(), directory.into_os_string());
-    }
-    if let Some(value) = config.profile {
-        settings
-            .values
-            .insert("profile".into(), value.to_string().into());
     }
     if let Some(value) = config.logging.level {
         settings.values.insert("logging.level".into(), value.into());
@@ -310,27 +223,6 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
         settings
             .values
             .insert("batch.queue_max_requests".into(), value.to_string().into());
-    }
-    if let Some(value) = config.batch.insert_mode {
-        settings
-            .values
-            .insert("batch.insert_mode".into(), value.into());
-    }
-    if let Some(value) = config.duckdb.threads {
-        settings
-            .values
-            .insert("duckdb.threads".into(), value.to_string().into());
-    }
-    if let Some(value) = config.duckdb.checkpoint_threshold_mib {
-        settings.values.insert(
-            "duckdb.checkpoint_threshold_mib".into(),
-            value.to_string().into(),
-        );
-    }
-    if let Some(value) = config.experimental.read_worker {
-        settings
-            .values
-            .insert("experimental.read_worker".into(), value.to_string().into());
     }
     if let Some(value) = config.mcp.enabled {
         settings

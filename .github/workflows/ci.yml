@@ -30,6 +30,20 @@ jobs:
       CARGO_BUILD_JOBS: 2
       RUSTUP_TOOLCHAIN: "1.99.0"
       CHUNKIFY_BINARY: ${{ github.workspace }}/target/ci/chunkify-analytics
+    services:
+      # Disposable ClickHouse for every test that starts an analytics server.
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.10
+        env:
+          CLICKHOUSE_SKIP_USER_SETUP: "1"
+        ports:
+          - 127.0.0.1:8123:8123
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "wget --spider --quiet http://127.0.0.1:8123/ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -47,12 +61,10 @@ jobs:
       - name: Restore Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: linked-duckdb-ci-ubuntu22-v1
+          key: clickhouse-ci-ubuntu22-v1
           cache-on-failure: true
       - name: Install local geolocation database for the native demo
         run: sh scripts/install-geolocation.sh
-      - name: Install prebuilt DuckDB
-        run: sh scripts/install-duckdb.sh
       # cargo test also builds the real executable for integration tests. Build
       # that dependency graph first so later checks reuse the same artifacts.
       - name: Build analytics server and test executables
@@ -68,9 +80,8 @@ jobs:
         run: node --test examples/demo/*.test.mjs tests/http/*.test.mjs
       - name: Prepare tested executable for Docker
         run: |
-          mkdir -p target/container/usr/local/bin target/container/opt/duckdb
+          mkdir -p target/container/usr/local/bin
           cp "$CHUNKIFY_BINARY" target/container/usr/local/bin/chunkify-analytics
-          cp target/lib/libduckdb.so target/container/opt/duckdb/libduckdb.so
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
       - name: Validate Dockerfile

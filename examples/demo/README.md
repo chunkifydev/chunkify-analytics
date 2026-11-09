@@ -11,13 +11,17 @@ From the repository root:
 
 ```sh
 npm ci
-sh scripts/install-duckdb.sh
 sh scripts/install-geolocation.sh
+sh scripts/install-clickhouse.sh
+sh scripts/start-clickhouse.sh
 cargo build --locked
 npm run demo -- --collector target/debug/chunkify-analytics
 ```
 
-The setup scripts download and verify prebuilt DuckDB 2.0.0 and DB-IP City Lite. The launcher creates
+The setup scripts download and verify DB-IP City Lite and a pinned ClickHouse
+server, and start ClickHouse on `127.0.0.1:8123` with data in
+`target/clickhouse/data`. To use another ClickHouse server, pass
+`--clickhouse http://host:8123`. The launcher creates
 separate Demo data and Player test projects, loads 816 synthetic events for 268
 views, and opens the dashboard at `http://127.0.0.1:8787`.
 
@@ -50,9 +54,10 @@ refresh. **Sample dates** restores the seeded date range.
 
 ## Saved data
 
-The launcher stores its database, credentials, configuration and logs in
-`demo-data/`. Keep this directory private. It is ignored by Git. Retention is
-disabled for samples, and the launcher uses its own configuration.
+Events and projects live in a ClickHouse database named in
+`demo-data/demo.json`. The launcher stores that marker, its configuration and
+logs in `demo-data/`. Keep this directory private. It is ignored by Git.
+Retention is disabled for samples, and the launcher uses its own configuration.
 
 To start fresh, stop the demo and move `demo-data/` elsewhere, or select a new
 location with `--data-dir /path/to/new-directory`. The launcher refuses existing

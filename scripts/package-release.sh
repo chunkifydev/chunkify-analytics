@@ -14,8 +14,7 @@ case "$version" in
         ;;
 esac
 case "$target" in
-    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu) library=libduckdb.so ;;
-    x86_64-apple-darwin|aarch64-apple-darwin) library=libduckdb.dylib ;;
+    x86_64-unknown-linux-gnu|aarch64-unknown-linux-gnu|x86_64-apple-darwin|aarch64-apple-darwin) ;;
     *)
         echo "Unsupported release target: $target" >&2
         exit 1
@@ -29,9 +28,8 @@ mkdir -p target/release-dist
 temporary=$(mktemp -d target/.release-pack.XXXXXX)
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 bundle="$temporary/$name"
-mkdir -p "$bundle/bin" "$bundle/lib" "$bundle/share/chunkify-analytics"
+mkdir -p "$bundle/bin" "$bundle/share/chunkify-analytics"
 install -m 755 "$binary" "$bundle/bin/chunkify-analytics"
-install -m 755 "target/lib/$library" "$bundle/lib/$library"
 install -m 644 target/share/chunkify-analytics/dbip-city-lite.mmdb "$bundle/share/chunkify-analytics/"
 cp README.md LICENSE config.toml.example openapi.json "$bundle/"
 cp -R docs "$bundle/docs"

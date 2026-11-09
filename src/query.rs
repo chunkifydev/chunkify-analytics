@@ -1,6 +1,5 @@
 use crate::{api::ApiError, event};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use duckdb::types::Value as SqlValue;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
@@ -116,8 +115,8 @@ impl ViewSort {
             Self::ViewId => "view_id",
             Self::DeviceType => "context_device_type",
             Self::PlayingTimeMs => "playing_time_ms",
-            Self::StartupTimeMs => "measurement.startup_time_ms",
-            Self::RebufferDurationMs => "measurement.rebuffer_duration_ms",
+            Self::StartupTimeMs => "m_startup_time_ms",
+            Self::RebufferDurationMs => "m_rebuffer_duration_ms",
             Self::PlaybackScore => "playback_score",
         }
     }
@@ -176,24 +175,6 @@ pub enum Dimension {
     UserId,
 }
 
-impl Dimension {
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::BrowserName => "context_browser_name",
-            Self::OsName => "context_os_name",
-            Self::DeviceType => "context_device_type",
-            Self::Continent => "context_continent",
-            Self::Country => "context_country",
-            Self::City => "context_city",
-            Self::PageOrigin => "context_page_origin",
-            Self::PagePath => "context_page_path",
-            Self::VideoId => "video_id",
-            Self::ViewerId => "viewer_id",
-            Self::UserId => "e_user_id",
-        }
-    }
-}
-
 impl MetricKind {
     pub fn name(self) -> &'static str {
         match self {
@@ -217,21 +198,6 @@ pub enum BreakdownBy {
     City,
     PageOrigin,
     PagePath,
-}
-
-impl BreakdownBy {
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::BrowserName => "context_browser_name",
-            Self::OsName => "context_os_name",
-            Self::DeviceType => "context_device_type",
-            Self::Continent => Dimension::Continent.column(),
-            Self::Country => Dimension::Country.column(),
-            Self::City => Dimension::City.column(),
-            Self::PageOrigin => Dimension::PageOrigin.column(),
-            Self::PagePath => Dimension::PagePath.column(),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
@@ -330,7 +296,7 @@ impl TimeseriesQuery {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     from_ms: Option<i64>,
     to_ms: Option<i64>,
@@ -472,59 +438,118 @@ impl Query {
 }
 
 impl Filters {
-    /// Whether `sql()` reads the view's `user_id`.
-    pub fn selects_user_id(&self) -> bool {
-        self.user_id.is_some()
-    }
-    pub fn sql(&self) -> (String, Vec<SqlValue>) {
-        let mut conditions = vec!["TRUE".to_owned()];
-        let mut values = Vec::new();
+    /// SQL conditions with bound values. Column names match both the events
+    /// table and the view cohort, where context values are extracted columns.
+    pub fn clickhouse(&self, params: &mut crate::clickhouse::Params) -> String {
+        let mut conditions = vec!["1".to_owned()];
         if let Some(value) = self.from_ms {
-            conditions.push("occurred_at_ms >= ?".into());
-            values.push(SqlValue::BigInt(value));
+            conditions.push(format!("occurred_at_ms >= {}", params.int(value)));
         }
         if let Some(value) = self.to_ms {
-            conditions.push("occurred_at_ms < ?".into());
-            values.push(SqlValue::BigInt(value));
+            conditions.push(format!("occurred_at_ms < {}", params.int(value)));
         }
-        if let Some(value) = &self.video_id {
-            conditions.push("video_id = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.viewer_id {
-            conditions.push("viewer_id = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.user_id {
-            conditions.push(format!("{} = ?", Dimension::UserId.column()));
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.view_id {
-            conditions.push("view_id = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        if let Some(value) = &self.event_name {
-            conditions.push("event_name = ?".into());
-            values.push(SqlValue::Text(value.clone()));
-        }
-        // Compare only strings. Missing/null fields and other JSON primitives
-        // are not normalized browser, device or location values.
         for (value, column) in [
-            (&self.browser_name, Dimension::BrowserName.column()),
-            (&self.os_name, Dimension::OsName.column()),
-            (&self.device_type, Dimension::DeviceType.column()),
-            (&self.continent, Dimension::Continent.column()),
-            (&self.country, Dimension::Country.column()),
-            (&self.city, Dimension::City.column()),
-            (&self.page_origin, Dimension::PageOrigin.column()),
-            (&self.page_path, Dimension::PagePath.column()),
+            (&self.video_id, "video_id"),
+            (&self.viewer_id, "viewer_id"),
+            (&self.user_id, "e_user_id"),
+            (&self.view_id, "view_id"),
+            (&self.event_name, "event_name"),
+            (&self.browser_name, "context_browser_name"),
+            (&self.os_name, "context_os_name"),
+            (&self.device_type, "context_device_type"),
+            (&self.continent, "ctx_continent"),
+            (&self.country, "ctx_country"),
+            (&self.city, "ctx_city"),
+            (&self.page_origin, "ctx_page_origin"),
+            (&self.page_path, "ctx_page_path"),
         ] {
             if let Some(value) = value {
-                conditions.push(format!("{column} = ?"));
-                values.push(SqlValue::Text(value.clone()));
+                conditions.push(format!("{column} = {}", params.text(value)));
             }
         }
-        (conditions.join(" AND "), values)
+        conditions.join(" AND ")
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The filters hourly rollups can answer: a date range, a video, and at
+    /// most one first-start context value. Viewer, user, view and event
+    /// filters always read events.
+    pub fn rollup_scope(&self) -> Option<RollupScope> {
+        if self.viewer_id.is_some()
+            || self.user_id.is_some()
+            || self.view_id.is_some()
+            || self.event_name.is_some()
+        {
+            return None;
+        }
+        let mut dimensions = [
+            (&self.browser_name, "context_browser_name"),
+            (&self.os_name, "context_os_name"),
+            (&self.device_type, "context_device_type"),
+            (&self.continent, "ctx_continent"),
+            (&self.country, "ctx_country"),
+            (&self.city, "ctx_city"),
+            (&self.page_origin, "ctx_page_origin"),
+            (&self.page_path, "ctx_page_path"),
+        ]
+        .into_iter()
+        .filter_map(|(value, column)| value.as_ref().map(|value| (column, value.clone())));
+        let dimension = dimensions.next();
+        if dimensions.next().is_some() {
+            return None;
+        }
+        Some(RollupScope {
+            from_ms: self.from_ms,
+            to_ms: self.to_ms,
+            video_id: self.video_id.clone(),
+            dimension,
+        })
+    }
+}
+
+/// Filters a report can read from hourly rollups. See [`Filters::rollup_scope`].
+pub struct RollupScope {
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub video_id: Option<String>,
+    /// A first-start context column and the value it must equal.
+    pub dimension: Option<(&'static str, String)>,
+}
+
+impl Dimension {
+    /// Cohort column for this dimension.
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::BrowserName => "context_browser_name",
+            Self::OsName => "context_os_name",
+            Self::DeviceType => "context_device_type",
+            Self::Continent => "ctx_continent",
+            Self::Country => "ctx_country",
+            Self::City => "ctx_city",
+            Self::PageOrigin => "ctx_page_origin",
+            Self::PagePath => "ctx_page_path",
+            Self::VideoId => "video_id",
+            Self::ViewerId => "viewer_id",
+            Self::UserId => "e_user_id",
+        }
+    }
+}
+
+impl BreakdownBy {
+    pub fn column(self) -> &'static str {
+        match self {
+            Self::BrowserName => Dimension::BrowserName.column(),
+            Self::OsName => Dimension::OsName.column(),
+            Self::DeviceType => Dimension::DeviceType.column(),
+            Self::Continent => Dimension::Continent.column(),
+            Self::Country => Dimension::Country.column(),
+            Self::City => Dimension::City.column(),
+            Self::PageOrigin => Dimension::PageOrigin.column(),
+            Self::PagePath => Dimension::PagePath.column(),
+        }
     }
 }
 
@@ -536,16 +561,13 @@ pub struct GroupPosition {
 }
 
 impl GroupPosition {
-    pub fn continuation(&self, column: &str, values: &mut Vec<SqlValue>) -> String {
-        values.extend([SqlValue::BigInt(self.views), SqlValue::BigInt(self.views)]);
+    pub fn continuation(&self, column: &str, params: &mut crate::clickhouse::Params) -> String {
+        let views = params.int(self.views);
         let tie = match &self.value {
             None => format!("{column} IS NOT NULL"),
-            Some(value) => {
-                values.push(SqlValue::Text(value.clone()));
-                format!("{column} > ?")
-            }
+            Some(value) => format!("{column} > {}", params.text(value)),
         };
-        format!("(COUNT(*) < ? OR (COUNT(*) = ? AND {tie}))")
+        format!("(count() < {views} OR (count() = {views} AND {tie}))")
     }
 }
 
@@ -558,6 +580,9 @@ pub struct Cursor<T> {
     pub after: T,
     pub through: i64,
     pub filters: Filters,
+    /// The rollup refresh run a lagged first page read; later pages read it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollup: Option<i64>,
 }
 impl<T: Serialize + DeserializeOwned> Cursor<T> {
     pub fn decode(

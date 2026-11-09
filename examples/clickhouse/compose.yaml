@@ -1,0 +1,56 @@
+# Chunkify Analytics on ClickHouse. Analytics servers keep no state of their
+# own, so you can run several behind the gateway:
+#   docker compose up -d --scale analytics=3
+# See README.md in this directory and docs/storage.md.
+name: chunkify-analytics
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.10
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: chunkify
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      # Small-host settings; remove or enlarge on a large dedicated server.
+      - ./clickhouse.xml:/etc/clickhouse-server/config.d/chunkify.xml:ro
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "--quiet", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  analytics:
+    image: ${CHUNKIFY_IMAGE:-ghcr.io/chunkifydev/chunkify-analytics:latest}
+    restart: unless-stopped
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      CHUNKIFY_CLICKHOUSE_URL: http://clickhouse:8123
+      CHUNKIFY_CLICKHOUSE_USER: chunkify
+      CHUNKIFY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}
+      CHUNKIFY_ADMIN_KEY: ${CHUNKIFY_ADMIN_KEY:-}
+    volumes:
+      - ./config.toml:/data/config.toml:ro
+    # Not published: clients reach every replica through the gateway.
+    expose:
+      - "4174"
+
+  gateway:
+    image: caddy:2.10
+    restart: unless-stopped
+    depends_on:
+      - analytics
+    ports:
+      - "127.0.0.1:4174:4174"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+volumes:
+  clickhouse-data:

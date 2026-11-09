@@ -206,19 +206,9 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_reads_release_project_and_queue_permits_when_canceled() {
-        let directory =
-            std::env::temp_dir().join(format!("collector-admission-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir(&directory).unwrap();
-        let file = directory.join("config.toml");
-        let env = directory.join("empty.env");
-        std::fs::write(&env, "").unwrap();
-        std::fs::write(
-            &file,
-            "rate_limits.read_concurrent=1\nrate_limits.read_concurrent_per_project=1\n",
-        )
-        .unwrap();
-        let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();
-        let config = crate::config::Config::load_with(&settings, Some(&directory), None).unwrap();
+        let config = crate::clickhouse::testing::config(
+            "rate_limits.read_concurrent=1\nrate_limits.read_concurrent_per_project=1",
+        );
         let mut other = crate::projects::primary_project("other-public", "other-secret");
         other.id = uuid::Uuid::new_v4().to_string();
         let other_id = other.id.clone();
@@ -246,7 +236,6 @@ mod tests {
         assert_eq!(reads.waiting.available_permits(), 1024);
         drop(next);
         assert_eq!(reads.concurrent.available_permits(), 1);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

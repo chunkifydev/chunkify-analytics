@@ -3,17 +3,19 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer, request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/player-analytics";
 import { createHttpAdapter } from "@chunkify/player-analytics/http";
 import { component, assertRequest, assertResponse } from "./openapi-support.mjs";
-import { collectorEnvironment, writeConfig } from "./configuration.mjs";
+import { clickhouseQuery, collectorEnvironment, databaseFor, storedRegistry, writeConfig, dropTestDatabases } from "./configuration.mjs";
+
+after(dropTestDatabases);
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 
@@ -45,7 +47,7 @@ async function collector(t, settings = {}) {
     "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
     "data_dir": directory, "server.bind": "127.0.0.1:0",
     "server.allowed_origins": "https://player.example",
-    "server.trusted_proxies": "", ...settings };
+    "server.trusted_proxies": "", "clickhouse.registry_refresh_seconds": "1", ...settings };
   await writeConfig(directory, env);
   const init = spawn(binary, ["init"], { env: collectorEnvironment(env), cwd: directory, stdio: "pipe" });
   let errors = "";
@@ -67,8 +69,23 @@ async function collector(t, settings = {}) {
       }
       return result;
     },
+    database: databaseFor(directory, env),
+    // The newest project registry document stored in ClickHouse, as JSON text.
+    async registryText() {
+      return JSON.stringify((await storedRegistry(directory, env)).at(-1));
+    },
+    // Make every registry save fail until the returned function is called.
+    async blockRegistry() {
+      await clickhouseQuery(`ALTER TABLE ${server.database}.registry ADD CONSTRAINT chunkify_test_block CHECK 0`);
+      return () => clickhouseQuery(`ALTER TABLE ${server.database}.registry DROP CONSTRAINT chunkify_test_block`);
+    },
+    // Make every event insert fail until the returned function is called.
+    async blockEvents() {
+      await clickhouseQuery(`ALTER TABLE ${server.database}.events ADD CONSTRAINT chunkify_test_block CHECK 0`);
+      return () => clickhouseQuery(`ALTER TABLE ${server.database}.events DROP CONSTRAINT chunkify_test_block`);
+    },
     async assertStoredKeyHashes() {
-      const stored = JSON.parse(await readFile(join(directory, "keys.json"), "utf8"));
+      const stored = JSON.parse(await server.registryText());
       assert.equal(stored.public_key, undefined);
       assert.equal(stored.secret_key, undefined);
       const primary = stored.projects.find(project => project.id === "default");
@@ -118,12 +135,19 @@ async function collector(t, settings = {}) {
   return server;
 }
 
-function profiles(server) {
-  return server.logs().split("\n").filter((line) => line.startsWith('{"type":"collector_profile"')).map((line) => JSON.parse(line));
+// Running servers adopt registry changes from the CLI at their next refresh.
+async function eventually(check, message) {
+  const deadline = Date.now() + 10000;
+  while (!(await check())) {
+    assert.ok(Date.now() < deadline, message);
+    await delay(100);
+  }
 }
 
-function writerProfile(server) {
-  return profiles(server).find((profile) => profile.worker === "writer");
+// One entry per INFO batch_saved log line.
+function savedBatches(server) {
+  return server.logs().split("\n").filter(line => line.includes("batch_saved")).map(line =>
+    Object.fromEntries(["requests", "received", "inserted", "duplicates"].map(name => [name, Number(line.match(new RegExp(`${name}=(\\d+)`))[1])])));
 }
 
 function sdkEvents(videoId = "video-a", viewerId = "viewer-a") {
@@ -196,7 +220,7 @@ test("batch logging works live without profiling and respects the configured lev
   for (let attempt = 0; attempt < 100 && server.logs().split("batch_saved").length < 3; attempt++) await delay(10);
   const lines = server.logs().split("\n").filter(line => line.includes("batch_saved"));
   assert.equal(lines.length, 2);
-  assert.match(lines[0], /INFO batch_saved backend="duckdb" requests=1 received=1 inserted=1 duplicates=0/);
+  assert.match(lines[0], /INFO batch_saved backend="clickhouse" requests=1 received=1 inserted=1 duplicates=0/);
   assert.match(lines[1], /inserted=0 duplicates=1/);
   assert.ok(!server.logs().includes("batch_started"));
   for (const secret of [server.keys.public_key, server.keys.secret_key, event.event_id, "private-log-video", "private-log-viewer"]) {
@@ -221,67 +245,20 @@ test("batch logging works live without profiling and respects the configured lev
   assert.ok(!server.logs().includes("batch_saved") && !server.logs().includes("batch_started"));
 });
 
-test("optional profiling reports database work on shutdown without event data or credentials", async (t) => {
-  const server = await collector(t, { "profile": "true", "retention.seconds": "0", "batch.insert_mode": "row" });
-  const events = sdkEvents("private-video", "private-viewer");
-  await server.send(events[0]);
-  await server.send(events[0]);
-  await server.send(events[1]);
-  await server.get("/v1/events");
-  await server.get("/v1/summary");
-  await server.get("/v1/videos");
-  await server.stop();
-  const profile = writerProfile(server);
-  assert.ok(profile, "profiling must emit a structured shutdown report");
-  const readProfile = profiles(server).find((profile) => profile.worker === "reader") ?? profile;
-  assert.equal(profile.version, 2);
-  assert.equal(profile.ingest.transactions, 3);
-  assert.equal(profile.ingest.requests, 3);
-  assert.equal(profile.ingest.received_records, 3);
-  assert.equal(profile.ingest.inserted_records, 2);
-  assert.equal(profile.ingest.max_records, 1);
-  assert.ok(profile.ingest.total_bytes >= profile.ingest.max_bytes);
-  assert.equal(profile.jobs.ingest.execution.count, 3);
-  assert.equal(profile.jobs.ingest.queue_wait.count, 3);
-  for (const name of ["events", "summary", "videos"]) assert.equal(readProfile.jobs[name].execution.count, 1);
-  for (const name of ["begin", "prepare_request", "insert_event", "commit"]) {
-    assert.equal(profile.ingest_stages[name].count, 3);
-    assert.ok(profile.ingest_stages[name].total_ms >= profile.ingest_stages[name].max_ms);
-  }
-  assert.equal(profile.ingest_stages.insert_otlp, undefined);
-  for (const secret of [server.keys.public_key, server.keys.secret_key, "private-video", "private-viewer", events[0].event_id, "127.0.0.1"]) {
-    assert.ok(!JSON.stringify(profiles(server)).includes(secret), "profiles must contain only aggregate measurements");
-  }
-  await server.start(binary, { "profile": "false" });
-  assert.equal((await server.get("/v1/events")).events.length, 2);
-  await server.stop();
-  assert.ok(!server.logs().includes('"collector_profile"'));
-});
-
-test("checkpoint configuration is applied and acknowledged events survive a crash", async (t) => {
-  const server = await collector(t, { "profile": "true", "duckdb.checkpoint_threshold_mib": "64" });
-  const events = sdkEvents("checkpoint");
+test("acknowledged events survive a crash", async (t) => {
+  const server = await collector(t);
+  const events = sdkEvents("crash");
   await server.send(events[0]);
   await server.send(events.at(-1));
   const records = (await server.get("/v1/events")).events;
   await server.stop("SIGKILL");
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events, records);
-  await server.stop();
-  const profile = writerProfile(server);
-  assert.equal(profile.database?.checkpoint_threshold, "64.0 MiB");
-  assert.ok(profile.database.threads > 0);
-  assert.ok(profile.database.version.startsWith("v"));
-  for (const value of ["0", "1025", "no", "1; DROP TABLE events"]) {
-    const result = await server.command(["serve"], { "duckdb.checkpoint_threshold_mib": value });
-    assert.notEqual(result.code, 0);
-    assert.match(result.stderr, /duckdb.checkpoint_threshold_mib|Invalid TOML configuration/);
-  }
 });
 
 test("concurrent event requests share bounded transactions and preserve their data", async (t) => {
-  const server = await collector(t, { "profile": "true", "retention.seconds": "0",
-    "batch.max_events": "8", "batch.delay_ms": "100", "batch.insert_mode": "row" });
+  const server = await collector(t, { "retention.seconds": "0",
+    "batch.max_events": "8", "batch.delay_ms": "100" });
   const events = Array.from({ length: 12 }, (_, index) => sdkEvents(`batch-${index}`)[0]);
   await Promise.all(events.map(event => server.send(event)));
   const records = (await server.get("/v1/events")).events;
@@ -293,11 +270,11 @@ test("concurrent event requests share bounded transactions and preserve their da
     assert.deepEqual(record.event_context, { schema_version: 1, continent: null, country: null, city: null });
   }
   await server.stop();
-  const profile = writerProfile(server);
-  assert.ok(profile.ingest.transactions < 12, "concurrent requests must share transactions");
-  assert.equal(profile.ingest.requests, 12);
-  assert.equal(profile.ingest.inserted_records, 12);
-  assert.ok(profile.ingest.max_records > 1 && profile.ingest.max_records <= 8);
+  const batches = savedBatches(server);
+  assert.ok(batches.length < 12, "concurrent requests must share inserts");
+  assert.equal(batches.reduce((sum, batch) => sum + batch.requests, 0), 12);
+  assert.equal(batches.reduce((sum, batch) => sum + batch.inserted, 0), 12);
+  assert.ok(batches.some(batch => batch.received > 1) && batches.every(batch => batch.received <= 8));
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events, records);
 });
@@ -332,7 +309,7 @@ test("oversized write requests are rejected atomically and a full byte budget re
 });
 
 test("bulk writes keep the first event and return per-request duplicate results", async (t) => {
-  const server = await collector(t, { "batch.insert_mode": "bulk", "profile": "true", "batch.delay_ms": "100" });
+  const server = await collector(t, { "batch.delay_ms": "100" });
   const playback = sdkEvents("bulk");
   const events = [playback[0], playback.at(-1)];
   for (const event of events) await server.send(event);
@@ -348,10 +325,9 @@ test("bulk writes keep the first event and return per-request duplicate results"
   assert.deepEqual(records.map((r) => r.event), events);
   assert.ok(records.every(record => record.otlp === undefined));
   await server.stop();
-  const profile = writerProfile(server);
-  assert.ok(profile.ingest_stages.append_events?.count > 0, "bulk writes must use the measured bulk path");
-  assert.equal(profile.ingest.inserted_records, 2);
-  assert.equal(profile.ingest.requests, 8);
+  const batches = savedBatches(server);
+  assert.equal(batches.reduce((sum, batch) => sum + batch.inserted, 0), 2);
+  assert.equal(batches.reduce((sum, batch) => sum + batch.requests, 0), 8);
   await server.start();
   assert.deepEqual((await server.get("/v1/events")).events, records);
   await server.send(sdkEvents("after-bulk")[0]);
@@ -360,20 +336,15 @@ test("bulk writes keep the first event and return per-request duplicate results"
   assert.equal((await server.get("/v1/events")).events.length, 3);
 });
 
-test("a failed batch commit never acknowledges or retains any of its requests", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async (t) => {
+test("a failed batch insert never acknowledges or retains any of its requests", async (t) => {
   const server = await collector(t, { "retention.seconds": "0", "batch.delay_ms": "200" });
-  // A clean checkpoint removes the WAL. Prevent its recreation to exercise a
-  // real commit failure through the deployment filesystem, without DB access.
-  await server.stop();
-  await server.start();
-  assert.ok(!(await readdir(server.directory)).some((name) => name.endsWith(".wal")));
   const events = Array.from({ length: 8 }, (_, i) => sdkEvents(`failed-${i}`)[0]);
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockEvents();
   try {
     const responses = await Promise.all(events.map((event) => fetch(`${server.url}/v1/events`, { method: "POST", body: JSON.stringify(event),
         headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key } })));
     assert.ok(responses.every((r) => r.status === 500), `failed writes returned ${responses.map((r) => r.status)}`);
-  } finally { await chmod(server.directory, 0o700); }
+  } finally { await restore(); }
   await server.stop("SIGKILL");
   await server.start();
   assert.equal((await server.get("/v1/events")).events.length, 0);
@@ -381,39 +352,27 @@ test("a failed batch commit never acknowledges or retains any of its requests", 
   assert.equal((await server.get("/v1/events")).events.length, 1);
 });
 
-test("zero collection delay commits each event request separately", async (t) => {
-  const server = await collector(t, { "batch.delay_ms": "0", "profile": "true" });
-  await Promise.all(Array.from({ length: 12 }, (_, i) => server.send(sdkEvents(`zero-${i}`)[0])));
+test("zero collection delay saves each sequential event request separately", async (t) => {
+  const server = await collector(t, { "batch.delay_ms": "0" });
+  for (let i = 0; i < 6; i++) await server.send(sdkEvents(`zero-${i}`)[0]);
   await server.stop();
-  const profile = writerProfile(server);
-  assert.equal(profile.ingest.requests, 12);
-  assert.equal(profile.ingest.transactions, 12);
-  assert.equal(profile.ingest.max_requests, 1);
-  assert.equal(profile.ingest.inserted_records, 12);
+  const batches = savedBatches(server);
+  assert.equal(batches.length, 6);
+  assert.ok(batches.every(batch => batch.requests === 1 && batch.inserted === 1));
 });
 
-test("shared-worker reads flush pending writes and graceful shutdown drains an incomplete batch", async (t) => {
-  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0",
-    "experimental.read_worker": "false" });
-  let acknowledged = false;
-  const writing = server.send(sdkEvents("read-barrier")[0]).then(() => { acknowledged = true; });
-  await delay(100);
-  assert.equal(acknowledged, false, "write should still be waiting for the collection deadline");
-  const before = Date.now();
-  assert.equal((await server.get("/v1/events")).events.length, 1);
-  await writing;
-  assert.ok(Date.now() - before < 800, "a queued read should flush the batch before its one-second deadline");
+test("graceful shutdown drains an incomplete batch", async (t) => {
+  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0" });
   const events = Array.from({ length: 6 }, (_, i) => sdkEvents(`shutdown-${i}`)[0]);
   const pending = Promise.all(events.map(event => server.send(event)));
   await delay(100);
   await Promise.all([server.stop(), pending]);
   await server.start();
-  assert.equal((await server.get("/v1/events")).events.length, 7);
+  assert.equal((await server.get("/v1/events")).events.length, 6);
 });
 
 test("separate reads return committed data without flushing unacknowledged writes", async (t) => {
-  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0",
-    "experimental.read_worker": "true" });
+  const server = await collector(t, { "batch.delay_ms": "1000", "retention.seconds": "0" });
   let acknowledged = false;
   const writing = server.send(sdkEvents("independent-read")[0]).then(() => { acknowledged = true; });
   await delay(100);
@@ -443,8 +402,7 @@ test("invalid batch settings fail startup with the setting name", async (t) => {
   const server = await collector(t);
   await server.stop();
   for (const [name, value] of Object.entries({ "batch.max_events": "0", "batch.delay_ms": "not-a-number",
-    "batch.queue_max_bytes": "100", "batch.queue_max_requests": "0", "batch.insert_mode": "unknown",
-    "experimental.read_worker": "invalid" })) {
+    "batch.queue_max_bytes": "100", "batch.queue_max_requests": "0", "clickhouse.node_id": "64" })) {
     const result = await server.command(["serve"], { [name]: value });
     assert.notEqual(result.code, 0);
     assert.ok((result.stderr.includes(name) || result.stderr.includes("Invalid TOML configuration")), result.stderr);
@@ -498,10 +456,13 @@ test("trusted proxy lookups persist location but no request IP, including retrie
   const csv = await (await fetch((await grant.json()).download_url)).text();
   assert.match(csv, /context.country/); assert.match(csv, /context.city/); assert.match(csv, /London/);
   await server.stop();
-  const database = await readFile(join(server.directory, "analytics.duckdb"));
+  // Every stored column, including extracted context columns.
+  const database = await clickhouseQuery(`SELECT *, ctx_continent, ctx_country, ctx_city, ctx_page_origin, ctx_page_path
+    FROM ${server.database}.events FORMAT JSONEachRow`);
+  assert.match(database, /London/);
   for (const ip of ["216.160.83.56", "81.2.69.160", "10.20.1.2", "2001:db8:abcd::1"]) {
     assert.ok(!JSON.stringify(stored).includes(ip));
-    assert.ok(!csv.includes(ip)); assert.ok(!server.logs().includes(ip)); assert.ok(!database.includes(Buffer.from(ip)));
+    assert.ok(!csv.includes(ip)); assert.ok(!server.logs().includes(ip)); assert.ok(!database.includes(ip));
   }
   for (const field of ["peer_ip", "client_ip", "client_ip_source"]) assert.ok(!csv.includes(field));
   await server.start();
@@ -690,9 +651,10 @@ test("offline key rotation returns each credential once without persisting secre
   const event = sdkEvents()[0];
   await server.send(event);
   const original = await server.get("/v1/events");
-  const busy = await server.command(["project", "rename", "default", "Renamed"]);
-  assert.notEqual(busy.code, 0);
-  assert.match(busy.stderr, /Stop the collector/);
+  // Commands change the shared registry while servers run.
+  const renamed = await server.command(["project", "rename", "default", "Renamed"]);
+  assert.equal(renamed.code, 0, renamed.stderr);
+  assert.equal(JSON.parse(renamed.stdout).restart_required, false);
   await server.assertStoredKeyHashes();
   assert.deepEqual(server.keys, originalKeys);
   await server.stop();
@@ -705,11 +667,8 @@ test("offline key rotation returns each credential once without persisting secre
   assert.equal(server.keys.secret_key, originalKeys.secret_key);
   assert.ok(server.keys.public_key.length >= 32);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
-    assert.equal((await readFile(join(server.directory, "keys.json"), "utf8")).includes(key), false);
+    assert.equal((await server.registryText()).includes(key), false);
     assert.equal(ingest.stderr.includes(key), false);
-  }
-  if (process.platform !== "win32") {
-    assert.equal((await stat(join(server.directory, "keys.json"))).mode & 0o777, 0o600);
   }
   await server.start();
   assert.deepEqual(await server.get("/v1/events"), original);
@@ -728,7 +687,7 @@ test("offline key rotation returns each credential once without persisting secre
   assert.notEqual(server.keys.secret_key, originalKeys.secret_key);
   assert.equal(server.keys.public_key, rotatedIngest);
   for (const key of [...Object.values(originalKeys), ...Object.values(server.keys)]) {
-    assert.equal((await readFile(join(server.directory, "keys.json"), "utf8")).includes(key), false);
+    assert.equal((await server.registryText()).includes(key), false);
     assert.equal(read.stderr.includes(key), false);
   }
   await server.start();
@@ -738,42 +697,6 @@ test("offline key rotation returns each credential once without persisting secre
   assert.equal(deniedRead.status, 401);
   await server.send(sdkEvents("after-read-rotation")[0]);
   assert.equal((await server.get("/v1/summary")).views, 3);
-});
-
-test("a stopped data-directory backup restores events, summaries and keys", async (t) => {
-  const events = sdkPlayback(t);
-  const server = await collector(t);
-  const backups = await mkdtemp(join(tmpdir(), "chunkify-collector-backup-test-"));
-  t.after(async () => { await server.stop(); await rm(backups, { recursive: true, force: true }); });
-  for (const [index, event] of events.entries()) {
-    await server.send(event);
-  }
-  const originalKeys = { ...server.keys };
-  const originalEvents = await server.get("/v1/events");
-  const originalSummary = await server.get("/v1/summary");
-  await server.stop();
-  await cp(server.directory, join(backups, "snapshot"), { recursive: true, force: false, errorOnExist: true });
-  // Changes made after the backup must not appear in the restored installation.
-  const rotation = await server.command(["key", "rotate-primary", "public"]);
-  assert.equal(rotation.code, 0, rotation.stderr);
-  await server.assertStoredKeyHashes();
-  assert.notEqual(server.keys.public_key, originalKeys.public_key);
-  await server.start();
-  await server.send(sdkEvents("after-backup")[0]);
-  await server.stop();
-  const restored = join(backups, "restored");
-  await cp(join(backups, "snapshot"), restored, { recursive: true, force: false, errorOnExist: true });
-  const restoredKeys = JSON.parse(await readFile(join(restored, "keys.json"), "utf8"));
-  assert.equal(restoredKeys.public_key, undefined);
-  assert.equal(restoredKeys.secret_key, undefined);
-  Object.assign(server.keys, originalKeys);
-  await server.start(binary, { "data_dir": restored });
-  assert.deepEqual(await server.get("/v1/events"), originalEvents);
-  assert.deepEqual(await server.get("/v1/summary"), originalSummary);
-  await server.send(events[0]);
-  assert.deepEqual(await server.get("/v1/events"), originalEvents);
-  await server.send(sdkEvents("after-restore")[0]);
-  assert.equal((await server.get("/v1/summary")).views, 2);
 });
 
 test("invalid retention settings fail clearly without changing stored events or keys", async (t) => {
@@ -969,10 +892,9 @@ test("ingestion rate limits reject excess requests without storing more events",
   assert.deepEqual(await (await fetch(`${server.url}/healthz`)).json(), { status: "ok" });
 });
 
-test("separate reader serves committed SDK events with stable pagination", async (t) => {
+test("concurrent reads serve stored SDK events with stable pagination", async (t) => {
   await t.test("direct", async (t) => {
-    const server = await collector(t, { "experimental.read_worker": "true",
-      "retention.seconds": "0", "profile": "true" });
+    const server = await collector(t, { "retention.seconds": "0" });
     const events = Array.from({ length: 8 }, (_, index) => {
       const view = sdkEvents(`video-${index % 2}`, `viewer-${index % 3}`);
       view.at(-1).playing_time_ms = 1000;
@@ -1005,10 +927,6 @@ test("separate reader serves committed SDK events with stable pagination", async
       assert.deepEqual(record.event_context, { schema_version: 1, continent: null, country: null, city: null });
     }
     await server.stop();
-    const reader = profiles(server).find((profile) => profile.worker === "reader");
-    assert.ok(reader, "read worker must report its own execution");
-    assert.ok(reader.jobs.summary.execution.count > 0);
-    assert.equal(writerProfile(server).jobs.summary, undefined, "dashboard queries must bypass the writer");
     await server.start();
     assert.equal((await server.get("/v1/events")).events.length, events.length + extra.length);
     assert.equal((await server.get("/v1/summary")).views, 9);
@@ -1026,9 +944,8 @@ function projectPost(server, key, event, headers = {}) {
     headers: { "content-type": "application/json", "x-chunkify-ingest-key": key, ...headers } });
 }
 
-for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cursors (${mode})`, async (t) => {
+test("projects isolate identical IDs and cursors", async (t) => {
   const server = await collector(t, { "retention.seconds": "0", "server.ingest_per_second": "1000",
-    "batch.insert_mode": mode === "row" ? "row" : "bulk",
     "batch.delay_ms": "100" });
   await server.stop();
   const live = await projectCommand(server, ["project", "create", "Production website"]);
@@ -1037,7 +954,7 @@ for (const mode of ["row", "bulk"]) test(`projects isolate identical IDs and cur
   const firstKey = list.find(p => p.id === live.project_id).keys.find(k => k.permission === "public").id;
   assert.equal(list.find(p => p.id === live.project_id).name, "Production website");
   assert.ok(list.every(p => p.keys.every(k => !k.hash && !k.key)));
-  const configuration = await readFile(join(server.directory, "keys.json"), "utf8");
+  const configuration = await server.registryText();
   for (const secret of [live.public_key, live.secret_key, second.key]) assert.ok(!configuration.includes(secret));
   await server.start();
   const events = sdkEvents("shared-video", "shared-viewer");
@@ -1151,6 +1068,7 @@ test("project retention updates live, preserves other settings, and persists acr
   assert.equal(server.url, url, "retention change must not restart the HTTP server");
   // A retry after expiration is new data. Disable expiry before resending it.
   await projectCommand(server, ["project", "retention", live.project_id, "0"]);
+  await delay(1500);
   for (const event of events) await server.send(event, { "X-Chunkify-Ingest-Key": live.public_key });
   await delay(2200);
   assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
@@ -1158,10 +1076,10 @@ test("project retention updates live, preserves other settings, and persists acr
   await server.start();
   assert.equal((await projectCommand(server, ["project", "list"])).find(p => p.id === live.project_id).effective_retention_seconds, 0);
   assert.equal((await server.get("/v1/events", live.secret_key)).events.length, events.length);
-  // The running server's default is authoritative, even if the CLI has a different environment.
+  // Each process reports the effective policy from its own installation default.
   const inherited = await server.command(["project", "retention", live.project_id, "inherit"], { "retention.seconds": "1" });
   assert.equal(inherited.code, 0, inherited.stderr);
-  assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 0);
+  assert.equal(JSON.parse(inherited.stdout).effective_retention_seconds, 1);
   assert.equal(JSON.parse(inherited.stdout).retention_seconds, null);
   // Enabling a policy after startup with all expiry disabled must start expiring data.
   await projectCommand(server, ["project", "retention", "default", "1"]);
@@ -1182,7 +1100,7 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
   for (const project of projects) await server.send(event, { "X-Chunkify-Ingest-Key": project.public_key });
   await server.stop();
   for (const [id, seconds] of [["short", "1"], ["long", "60"], ["keep", "0"]]) {
-    assert.equal((await projectCommand(server, ["project", "retention", projects.find(project => project.name === id).project_id, seconds])).restart_required, true);
+    assert.equal((await projectCommand(server, ["project", "retention", projects.find(project => project.name === id).project_id, seconds])).restart_required, false);
   }
   await delay(1200);
   await server.start(binary, { "retention.seconds": "1" });
@@ -1199,18 +1117,17 @@ test("startup retention uses inherited, longer, shorter and disabled project pol
 test("invalid or unpersisted project retention changes preserve policy and data", async (t) => {
   const server = await collector(t, { "retention.seconds": "0", "retention.interval_seconds": "1" });
   await server.send(sdkEvents()[0]);
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
+  const before = await server.registryText();
   for (const value of ["-1", "1.5", "abc", "9223372036854776", "18446744073709551616"]) {
     assert.notEqual((await server.command(["project", "retention", "default", value])).code, 0);
-    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
   assert.notEqual((await server.command(["project", "retention", "missing", "1"])).code, 0);
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockRegistry();
   try {
     assert.notEqual((await server.command(["project", "retention", "default", "1"])).code, 0);
-    assert.equal(await readFile(file, "utf8"), before);
-  } finally { await chmod(server.directory, 0o700); }
+    assert.equal(await server.registryText(), before);
+  } finally { await restore(); }
   await delay(2200);
   assert.equal((await projectCommand(server, ["project", "list"]))[0].effective_retention_seconds, 0);
   assert.equal((await server.get("/v1/events")).events.length, 1);
@@ -1219,7 +1136,7 @@ test("invalid or unpersisted project retention changes preserve policy and data"
   for (const retention_seconds of [-1, 1.5, "1", 9223372036854776]) {
     await writeFile(settings, JSON.stringify({ retention_seconds }));
     assert.notEqual((await server.command(["project", "configure", "default", settings])).code, 0);
-    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
 });
 
@@ -1262,23 +1179,25 @@ test("a busy project leaves admission slots for another project", async (t) => {
 test("project administration rejects invalid changes without overwriting credentials", async (t) => {
   const server = await collector(t);
   await server.stop();
-  const keyFile = join(server.directory, "keys.json");
   for (const args of [["project", "create", ""], ["project", "create", "   "],
     ["project", "create", "x".repeat(129)], ["project", "rename", "missing", "New name"], ["key", "create", "default", "admin", "Wrong kind"]]) {
-    const before = await readFile(keyFile, "utf8");
+    const before = await server.registryText();
     assert.notEqual((await server.command(args)).code, 0);
-    assert.equal(await readFile(keyFile, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
   await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
-  const keys = JSON.parse(await readFile(keyFile, "utf8"));
+  // Save a registry version with the maximum number of keys directly.
+  const keys = JSON.parse(await server.registryText());
   keys.projects[0].keys = Array.from({ length: 64 }, (_, index) => ({ id: `key-${index}`, name: "Integration", permission: "public",
     hash: index.toString(16).padStart(64, "0") }));
-  await writeFile(keyFile, JSON.stringify(keys));
-  const before = await readFile(keyFile, "utf8");
+  const version = Number((await clickhouseQuery(`SELECT max(version) FROM ${server.database}.registry`)).trim());
+  await clickhouseQuery(`INSERT INTO ${server.database}.registry (version, write_id, document) FORMAT JSONEachRow
+    ${JSON.stringify({ version: version + 1, write_id: "test", document: JSON.stringify(keys) })}`);
+  const before = await server.registryText();
   const result = await server.command(["key", "rotate-primary", "public"]);
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /64 keys/);
-  assert.equal(await readFile(keyFile, "utf8"), before, "failed legacy rotation must not break the registry");
+  assert.equal(await server.registryText(), before, "failed rotation must not change the registry");
 });
 
 
@@ -1301,6 +1220,8 @@ test("live keys update ingestion and read access immediately and survive a crash
   const rotated = await projectCommand(server, ["key", "rotate", "default", first.key_id]);
   assert.equal(rotated.restart_required, false);
   assert.equal(rotated.key_id, first.key_id);
+  await eventually(async () => (await postEvent(server, "{}", { "X-Chunkify-Ingest-Key": first.key })).status === 401,
+    "a rotated key must stop working");
   assert.equal((await projectPost(server, first.key, events[1])).status, 401);
   assert.equal((await postEvent(server, "{}", { "X-Chunkify-Ingest-Key": first.key })).status, 401);
   for (const event of events.slice(1)) await server.send(event, { "X-Chunkify-Ingest-Key": rotated.key });
@@ -1308,7 +1229,8 @@ test("live keys update ingestion and read access immediately and survive a crash
   assert.ok(stored.every(row => row.ingest_key_id === first.key_id && row.project_id === "default"));
   assert.deepEqual(stored.map(row => row.event), events);
   await projectCommand(server, ["key", "revoke", "default", read.key_id]);
-  assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status, 401);
+  await eventually(async () => (await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status === 401,
+    "a revoked key must stop working");
   assert.equal((await projectPost(server, other.public_key, sdkEvents("other")[0])).status, 201);
   const listed = await projectCommand(server, ["project", "list"]);
   assert.ok(listed.find(project => project.id === "default").keys.some(key => key.id === first.key_id));
@@ -1317,7 +1239,6 @@ test("live keys update ingestion and read access immediately and survive a crash
     assert.ok(!server.logs().includes(secret));
   }
   assert.ok(listed.every(project => project.keys.every(key => !("hash" in key))));
-  assert.equal((await stat(join(server.directory, "admin.sock"))).mode & 0o777, 0o600);
   assert.equal(server.url, originalUrl);
   await server.stop("SIGKILL");
   await server.start();
@@ -1325,24 +1246,21 @@ test("live keys update ingestion and read access immediately and survive a crash
   assert.equal((await projectPost(server, rotated.key, sdkEvents()[0])).status, 201);
   assert.equal((await fetch(`${server.url}/v1/events`, { headers: { authorization: `Bearer ${read.key}` } })).status, 401);
   assert.equal((await server.get("/v1/summary")).views, 2);
-  await server.stop();
-  await assert.rejects(stat(join(server.directory, "admin.sock")), { code: "ENOENT" });
 });
 
-test("live administration serializes concurrent commands and rejects invalid changes", async (t) => {
+test("concurrent administration commands all apply and invalid changes are rejected", async (t) => {
   const server = await collector(t);
   const created = await Promise.all(Array.from({ length: 5 }, (_, index) =>
     projectCommand(server, ["key", "create", "default", "secret", `Dashboard ${index}`])));
   const listed = await projectCommand(server, ["project", "list"]);
   assert.equal(listed[0].keys.length, 7);
   await Promise.all(created.map(key => server.get("/v1/summary", key.key)));
-  const keyFile = join(server.directory, "keys.json");
-  const before = await readFile(keyFile, "utf8");
+  const before = await server.registryText();
   for (const args of [["key", "create", "default", "admin", "Invalid"], ["key", "create", "default", "secret", ""],
     ["key", "revoke", "default", "unknown"], ["key", "rotate", "unknown", "primary-public"],
-    ["project", "rename", "default", "New name"], ["project", "configure", "default", "missing.json"]]) {
+    ["project", "rename", "missing", "New name"], ["project", "configure", "default", "missing.json"]]) {
     assert.notEqual((await server.command(args)).code, 0);
-    assert.equal(await readFile(keyFile, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
   await Promise.all(created.map(key => projectCommand(server, ["key", "revoke", "default", key.key_id])));
   assert.equal((await projectCommand(server, ["project", "list"]))[0].keys.length, 2);
@@ -1356,14 +1274,16 @@ test("live primary rotation and revocation persist only hashes", async (t) => {
     assert.equal(result.code, 0, result.stderr);
     assert.equal(JSON.parse(result.stdout).restart_required, false);
     await server.assertStoredKeyHashes();
-    for (const secret of Object.values(server.keys)) assert.ok(!(await readFile(join(server.directory, "keys.json"), "utf8")).includes(secret));
+    for (const secret of Object.values(server.keys)) assert.ok(!(await server.registryText()).includes(secret));
   }
-  assert.equal((await projectPost(server, original.public_key, sdkEvents()[0])).status, 401);
+  await eventually(async () => (await postEvent(server, "{}", { "X-Chunkify-Ingest-Key": original.public_key })).status === 401,
+    "the previous public key must stop working");
   assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${original.secret_key}` } })).status, 401);
   await server.send(sdkEvents()[0]);
   assert.equal((await server.get("/v1/summary")).views, 1);
   await projectCommand(server, ["key", "revoke", "default", "primary-public"]);
-  assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0])).status, 401);
+  await eventually(async () => (await postEvent(server, "{}", { "X-Chunkify-Ingest-Key": server.keys.public_key })).status === 401,
+    "a revoked key must stop working");
   const restored = await server.command(["key", "rotate-primary", "public"]);
   assert.equal(restored.code, 0, restored.stderr);
   await server.assertStoredKeyHashes();
@@ -1373,44 +1293,19 @@ test("live primary rotation and revocation persist only hashes", async (t) => {
 
 test("failed live key persistence does not change active credentials", async (t) => {
   const server = await collector(t);
-  const before = await readFile(join(server.directory, "keys.json"), "utf8");
-  // Make creating the replacement file fail, even though the server can still
-  // read its existing database. Restore permissions before shutdown/cleanup.
-  await chmod(server.directory, 0o500);
+  const before = await server.registryText();
+  // Registry saves fail while reads of the existing registry still work.
+  const restore = await server.blockRegistry();
   try {
     const result = await server.command(["key", "rotate", "default", "primary-secret"]);
     assert.notEqual(result.code, 0);
-    assert.equal(await readFile(join(server.directory, "keys.json"), "utf8"), before);
+    assert.equal(await server.registryText(), before);
     assert.equal((await server.get("/v1/summary")).views, 0);
-  } finally { await chmod(server.directory, 0o700); }
+  } finally { await restore(); }
   const rotated = await projectCommand(server, ["key", "rotate", "default", "primary-secret"]);
   assert.equal((await server.get("/v1/summary", rotated.key)).views, 0);
 });
 
-
-test("live key administration supports a deeply nested data directory", async (t) => {
-  const server = await collector(t);
-  await server.stop();
-  const directory = join(server.directory, "nested-".repeat(24));
-  const settings = { "data_dir": directory };
-  const init = await server.command(["init"], settings);
-  assert.equal(init.code, 0, init.stderr);
-  await server.start(binary, settings);
-  const created = await server.command(["key", "create", "default", "secret", "Long path"], settings);
-  assert.equal(created.code, 0, created.stderr);
-  const token = JSON.parse(created.stdout);
-  assert.equal(token.restart_required, false);
-  assert.equal((await server.get("/v1/summary", token.key)).views, 0);
-  const locator = join(directory, "admin.socket-id");
-  const previousSocket = await readFile(locator, "utf8");
-  assert.equal((await stat(locator)).mode & 0o777, 0o600);
-  await server.stop("SIGKILL");
-  await server.start(binary, settings);
-  assert.notEqual(await readFile(locator, "utf8"), previousSocket);
-  const revoked = await server.command(["key", "revoke", "default", token.key_id], settings);
-  assert.equal(revoked.code, 0, revoked.stderr);
-  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${token.key}` } })).status, 401);
-});
 
 async function projectApi(server, path, { method = "GET", body, token = server.keys.secret_key, headers = {} } = {}) {
   return fetch(`${server.url}/v1/project${path}`, { method,
@@ -1446,9 +1341,9 @@ test("project origins update live, merge shared origins and persist without chan
   assert.equal((await send("https://old.example")).status, 403);
   assert.equal((await send("https://chunkify.dev")).status, 201);
   assert.equal((await projectPost(server, server.keys.public_key, sdkEvents()[0], { origin: "https://customer.example" })).status, 403);
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockRegistry();
   try { assert.equal((await update(["https://unsaved.example"])).status, 500); }
-  finally { await chmod(server.directory, 0o700); }
+  finally { await restore(); }
   assert.equal((await send("https://customer.example")).status, 201);
   assert.equal((await send("https://unsaved.example")).status, 403);
   const [updated, created] = await Promise.all([update(["https://next.example"]),
@@ -1569,7 +1464,7 @@ test("admin rotation recovers a lost project secret without rotating its public 
   assert.equal((await projectPost(server, project.public_key, event)).status, 401);
   assert.equal((await projectPost(server, rotatedPublic.key, event)).status, 200);
   assert.equal((await server.get("/v1/summary", recovered.key)).views, 1);
-  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  const stored = await server.registryText();
   for (const key of [adminKey, recovered.key, rotatedRead.key, rotatedPublic.key]) {
     assert.ok(!stored.includes(key));
     assert.ok(!server.logs().includes(key));
@@ -1594,8 +1489,7 @@ test("admin key recovery rejects project credentials and unknown, revoked or del
   const secretId = list.keys.find(key => key.permission === "secret" && !key.read_only).id;
   const listPath = "/v1/projects/{project_id}/keys";
   const rotatePath = "/v1/projects/{project_id}/keys/{key_id}/rotate";
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
+  const before = await server.registryText();
   for (const token of [undefined, "wrong", project.public_key, project.secret_key, readonly.key, server.keys.secret_key]) {
     for (const [path, method, contractPath] of [["/keys", "get", listPath], [`/keys/${secretId}/rotate`, "post", rotatePath]]) {
       const response = await adminProjectApi(server, project.project_id, path, { method: method.toUpperCase(), token });
@@ -1609,7 +1503,7 @@ test("admin key recovery rejects project credentials and unknown, revoked or del
     await assertResponse(rotatePath, "post",
       await adminProjectApi(server, id, `/keys/${key}/rotate`, { method: "POST", token: adminKey }), 404);
   }
-  assert.equal(await readFile(file, "utf8"), before);
+  assert.equal(await server.registryText(), before);
   assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
   assert.equal((await projectApi(server, "", { method: "DELETE", token: project.secret_key })).status, 200);
   await assertResponse(listPath, "get", await adminProjectApi(server, project.project_id, "/keys", { token: adminKey }), 404);
@@ -1627,12 +1521,11 @@ test("admin rotation is disabled without an admin key and preserves credentials 
   await server.stop();
   const adminKey = `admin-${randomUUID()}`;
   await server.start(binary, { CHUNKIFY_ADMIN_KEY: adminKey });
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
-  await chmod(server.directory, 0o500);
+  const before = await server.registryText();
+  const restore = await server.blockRegistry();
   try { await assertResponse(rotatePath, "post", await rotate(adminKey), 500); }
-  finally { await chmod(server.directory, 0o700); }
-  assert.equal(await readFile(file, "utf8"), before);
+  finally { await restore(); }
+  assert.equal(await server.registryText(), before);
   assert.equal((await projectApi(server, "/keys")).status, 200);
   const recovered = await assertResponse(rotatePath, "post", await rotate(adminKey), 200);
   assert.equal((await projectApi(server, "/keys", { token: recovered.key })).status, 200);
@@ -1684,7 +1577,7 @@ test("admin project creation activates isolated projects immediately and persist
   assert.deepEqual((await server.get("/v1/events", sameName.secret_key)).events, []);
   const listing = await projectCommand(server, ["project", "list"]);
   assert.deepEqual(listing.find(p => p.id === project.project_id).settings.allowed_origins, ["https://customer.example"]);
-  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  const stored = await server.registryText();
   for (const secret of [adminKey, project.public_key, project.secret_key]) assert.ok(!stored.includes(secret));
   await server.stop();
   await server.start();
@@ -1712,20 +1605,19 @@ test("project creation is disabled without an admin key and validates before sav
   await disabled.stop();
   const adminKey = `admin-${randomUUID()}`;
   const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey });
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
+  const before = await server.registryText();
   for (const body of [{}, { name: "" }, { name: "  " }, { name: "x".repeat(129) }, { name: 42 },
     { name: "Customer", id: "chosen" }, { name: "Customer", project_id: "chosen" },
     { name: "Customer", allowed_origins: null }, { name: "Customer", allowed_origins: "https://customer.example" },
     { name: "Customer", allowed_origins: ["*"] }, { name: "Customer", allowed_origins: ["https://customer.example/"] }]) {
     const result = await createProject(server, body, adminKey);
     assert.equal(result.status, 400, await result.clone().text());
-    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockRegistry();
   try { assert.equal((await createProject(server, { name: "Unsaved" }, adminKey)).status, 500); }
-  finally { await chmod(server.directory, 0o700); }
-  assert.equal(await readFile(file, "utf8"), before);
+  finally { await restore(); }
+  assert.equal(await server.registryText(), before);
   assert.equal((await projectCommand(server, ["project", "list"])).length, 1);
   const [apiResponse, cli] = await Promise.all([
     createProject(server, { name: "API customer" }, adminKey),
@@ -1765,12 +1657,11 @@ test("PATCH project updates only supplied fields and persists both fields atomic
   response = await update({ allowed_origins: ["https://second.example"] });
   assert.equal(response.status, 200);
   assert.equal((await response.json()).name, "Name only");
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
-  await chmod(server.directory, 0o500);
+  const before = await server.registryText();
+  const restore = await server.blockRegistry();
   try { assert.equal((await update({ name: "Unsaved", allowed_origins: ["https://unsaved.example"] })).status, 500); }
-  finally { await chmod(server.directory, 0o700); }
-  assert.equal(await readFile(file, "utf8"), before);
+  finally { await restore(); }
+  assert.equal(await server.registryText(), before);
   const results = await Promise.all([update({ name: "Concurrent name" }), update({ allowed_origins: ["https://customer.example"] })]);
   assert.ok(results.every(result => result.status === 200));
   assert.equal((await state()).name, "Concurrent name");
@@ -1798,9 +1689,9 @@ test("DELETE project revokes all keys, preserves retention and isolates other pr
   for (const token of [customer.public_key, adminKey, "invalid"]) assert.equal((await remove(token)).status, 401);
   assert.equal((await remove(customer.secret_key, "?project_id=default")).status, 400);
   assert.equal((await remove(customer.secret_key, "", { project_id: "default" })).status, 400);
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockRegistry();
   try { assert.equal((await remove()).status, 500); }
-  finally { await chmod(server.directory, 0o700); }
+  finally { await restore(); }
   assert.equal((await projectApi(server, "/keys", { token: customer.secret_key })).status, 200);
   const response = await remove();
   assert.equal(response.status, 200);
@@ -1883,13 +1774,12 @@ test("HTTP project retention applies at creation, changes live and survives rest
 test("HTTP retention rejects invalid changes and keeps active policy when persistence fails", async t => {
   const adminKey = `admin-${randomUUID()}`;
   const server = await collector(t, { CHUNKIFY_ADMIN_KEY: adminKey, "retention.seconds": "0", "retention.interval_seconds": "1" });
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
+  const before = await server.registryText();
   for (const retention_seconds of [-1, 0.5, "60", true, {}, [], 1e16]) {
     await assertResponse("/v1/projects", "post", await createProject(server, { name: "Invalid", retention_seconds }, adminKey), 400);
     await assertResponse("/v1/project", "patch", await projectApi(server, "", {
       method: "PATCH", body: { name: "Must not change", retention_seconds } }), 400);
-    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
   for (const token of [adminKey, server.keys.public_key, "invalid"]) {
     await assertResponse("/v1/project", "patch", await projectApi(server, "", {
@@ -1897,12 +1787,12 @@ test("HTTP retention rejects invalid changes and keeps active policy when persis
   }
   const event = sdkEvents()[0];
   await server.send(event);
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockRegistry();
   try {
     await assertResponse("/v1/project", "patch", await projectApi(server, "", {
       method: "PATCH", body: { name: "Unsaved", allowed_origins: [], retention_seconds: 1 } }), 500);
-  } finally { await chmod(server.directory, 0o700); }
-  assert.equal(await readFile(file, "utf8"), before);
+  } finally { await restore(); }
+  assert.equal(await server.registryText(), before);
   await delay(2200);
   assert.equal((await server.get("/v1/events")).events.length, 1);
 });
@@ -1938,7 +1828,7 @@ test("HTTP key creation scopes public, write and read-only keys and returns secr
     method: "PATCH", token: readKey.key, body: { retention_seconds: 1 } }), 403);
   const listing = await server.get("/v1/project/keys", writeKey.key);
   assert.equal(listing.keys.length, 5);
-  const stored = await readFile(join(server.directory, "keys.json"), "utf8");
+  const stored = await server.registryText();
   for (const key of created) {
     assert.ok(listing.keys.some(metadata => metadata.id === key.key_id));
     assert.ok(!JSON.stringify(listing).includes(key.key));
@@ -1958,20 +1848,19 @@ test("HTTP key creation scopes public, write and read-only keys and returns secr
 test("HTTP key creation validates before saving and enforces the key limit under concurrent requests", async t => {
   const server = await collector(t);
   const create = body => projectApi(server, "/keys", { method: "POST", body });
-  const file = join(server.directory, "keys.json");
-  const before = await readFile(file, "utf8");
+  const before = await server.registryText();
   for (const body of [{}, { name: "Missing permission" }, { permission: "public" },
     { name: "", permission: "public" }, { name: "  ", permission: "secret" }, { name: "x".repeat(129), permission: "secret" },
     { name: "é".repeat(65), permission: "secret" }, { name: "Invalid", permission: "admin" },
     { name: "Invalid", permission: "public", read_only: true }, { name: "Invalid", permission: "secret", read_only: "true" },
     { name: "Invalid", permission: "secret", read_only: null }, { name: "Foreign", permission: "public", project_id: "other" }]) {
     await assertResponse("/v1/project/keys", "post", await create(body), 400);
-    assert.equal(await readFile(file, "utf8"), before);
+    assert.equal(await server.registryText(), before);
   }
-  await chmod(server.directory, 0o500);
+  const restore = await server.blockRegistry();
   try { await assertResponse("/v1/project/keys", "post", await create({ name: "Unsaved", permission: "secret" }), 500); }
-  finally { await chmod(server.directory, 0o700); }
-  assert.equal(await readFile(file, "utf8"), before);
+  finally { await restore(); }
+  assert.equal(await server.registryText(), before);
   assert.equal((await server.get("/v1/project/keys")).keys.length, 2);
   const results = await Promise.all(Array.from({ length: 64 }, (_, index) => create({ name: `Key ${index}`, permission: "secret" })));
   assert.equal(results.filter(r => r.status === 201).length, 62);
@@ -2037,12 +1926,13 @@ test("read-only private keys read analytics live and cannot manage projects or k
   assert.notEqual(rejected.code, 0);
   assert.match(rejected.stderr, /Only secret keys support read-only access/);
   await projectCommand(server, ["key", "revoke", project.project_id, created.key_id]);
-  assert.equal((await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${rotated.key}` } })).status, 401);
+  await eventually(async () => (await fetch(`${server.url}/v1/summary`, { headers: { authorization: `Bearer ${rotated.key}` } })).status === 401,
+    "a revoked key must stop working");
   assert.equal((await projectApi(server, "/keys", { token: project.secret_key })).status, 200);
 });
 
-for (const readers of [false, true]) test(`retention reports watched sections and exports CSV (readers=${readers})`, async t => {
-  const server = await collector(t, { "experimental.read_worker": String(readers) });
+test("retention reports watched sections and exports CSV", async t => {
+  const server = await collector(t);
   const records = sdkEvents("retention-video");
   const last = { ...records.at(-1), media_duration_seconds: 5,
     played_ranges: [{ start_seconds: 0, end_seconds: 1 }, { start_seconds: 3, end_seconds: 4 }], playhead_seconds: 4 };

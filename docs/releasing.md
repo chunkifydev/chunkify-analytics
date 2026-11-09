@@ -90,12 +90,13 @@ these archives, with `VERSION` replaced by the Cargo version:
 | `chunkify-analytics-VERSION-x86_64-apple-darwin.tar.gz` | macOS 15 Intel |
 | `chunkify-analytics-VERSION-aarch64-apple-darwin.tar.gz` | macOS 15 Apple Silicon |
 
-Each archive contains `bin/chunkify-analytics`, its matching DuckDB shared
-library under `lib`, the example configuration, OpenAPI specification, README,
-documentation, and license notices. It contains no data directory or
-credentials. Keep `bin` and `lib` beside each other so the executable can find
-DuckDB without an environment override. macOS packages are unsigned and are not
-notarized.
+Each archive contains `bin/chunkify-analytics`, the bundled City MMDB under
+`share`, the example configuration, OpenAPI specification, README,
+documentation, and license notices. It contains no data or credentials. Keep
+`bin` and `share` beside each other so the executable finds the City MMDB.
+macOS packages are unsigned and are not notarized. Release builds test the
+executable against a pinned ClickHouse server started by
+`scripts/install-clickhouse.sh` and `scripts/start-clickhouse.sh`.
 
 The container image is published as:
 
@@ -130,12 +131,10 @@ Release Please on `main` performs its normal PR and release processing.
 For example, on an Apple Silicon Mac:
 
 ```sh
-sh scripts/install-duckdb.sh
+sh scripts/install-geolocation.sh
 cargo build --locked --release --target aarch64-apple-darwin
 sh scripts/package-release.sh 0.1.0 aarch64-apple-darwin
 ```
 
 The script writes to the ignored `target/release-dist/` directory. Its optional
-third argument selects another executable to package. Update the DuckDB license
-notice in `docs/licenses/duckdb.txt` alongside the installer when changing the
-DuckDB version.
+third argument selects another executable to package.

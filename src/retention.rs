@@ -1,13 +1,20 @@
 //! Receipt-time expiration policy, loaded with the administrator's project settings.
 use crate::projects::Project;
-use duckdb::{Connection, params_from_iter, types::Value};
 
 pub const MAX_SECONDS: u64 = (i64::MAX / 1000) as u64;
 
 #[derive(Clone)]
 pub struct Policy {
     default_seconds: u64,
-    overrides: Vec<(String, u64)>,
+    // Projects with their own retention or an expiration floor.
+    overrides: Vec<Override>,
+}
+
+#[derive(Clone)]
+struct Override {
+    id: String,
+    seconds: Option<u64>,
+    expired_before_ms: i64,
 }
 
 impl Policy {
@@ -17,74 +24,52 @@ impl Policy {
             default_seconds,
             overrides: projects
                 .iter()
-                .filter_map(|project| {
-                    project
-                        .settings
-                        .retention_seconds
-                        .map(|seconds| (project.id.clone(), seconds))
+                .filter(|project| {
+                    project.settings.retention_seconds.is_some()
+                        || project.expired_before_ms.is_some()
+                })
+                .map(|project| Override {
+                    id: project.id.clone(),
+                    seconds: project.settings.retention_seconds,
+                    expired_before_ms: project.expired_before_ms.unwrap_or(i64::MIN),
                 })
                 .collect(),
         }
     }
 
     pub fn enabled(&self) -> bool {
-        self.default_seconds > 0 || self.overrides.iter().any(|(_, seconds)| *seconds > 0)
+        self.default_seconds > 0
+            || self.overrides.iter().any(|project| {
+                project.seconds.is_some_and(|seconds| seconds > 0)
+                    || project.expired_before_ms > i64::MIN
+            })
     }
 
+    /// Events received before this time are expired for the project.
     pub fn project_cutoff(&self, project: &str, now_ms: i64) -> i64 {
-        cutoff(now_ms, self.project_seconds(project))
+        let floor = self
+            .overrides
+            .iter()
+            .find(|entry| entry.id == project)
+            .map_or(i64::MIN, |entry| entry.expired_before_ms);
+        cutoff(now_ms, self.project_seconds(project)).max(floor)
+    }
+
+    /// Projects whose cutoff differs from the installation default.
+    pub fn overrides(&self) -> impl Iterator<Item = &str> {
+        self.overrides.iter().map(|project| project.id.as_str())
+    }
+
+    pub fn default_cutoff(&self, now_ms: i64) -> i64 {
+        cutoff(now_ms, self.default_seconds)
     }
 
     pub fn project_seconds(&self, project: &str) -> u64 {
         self.overrides
             .iter()
-            .find(|(id, _)| id == project)
-            .map_or(self.default_seconds, |(_, seconds)| *seconds)
-    }
-
-    pub fn purge(&self, connection: &mut Connection, now_ms: i64) -> duckdb::Result<usize> {
-        let default_cutoff = cutoff(now_ms, self.default_seconds);
-        let (expired, mut values) = if self.overrides.is_empty() {
-            (
-                "SELECT project_id, event_id FROM events WHERE received_at_ms < ?".into(),
-                Vec::new(),
-            )
-        } else {
-            let rows = std::iter::repeat_n("(?, ?)", self.overrides.len())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let values = self
-                .overrides
-                .iter()
-                .flat_map(|(id, seconds)| {
-                    [
-                        Value::Text(id.clone()),
-                        Value::BigInt(cutoff(now_ms, *seconds)),
-                    ]
-                })
-                .collect::<Vec<_>>();
-            // Join all overrides in one scan instead of scanning once per project.
-            (
-                format!(
-                    "SELECT events.project_id, events.event_id FROM events
-                LEFT JOIN (VALUES {rows}) AS retention(project_id, cutoff_ms) USING (project_id)
-                WHERE received_at_ms < COALESCE(retention.cutoff_ms, ?)"
-                ),
-                values,
-            )
-        };
-        values.push(Value::BigInt(default_cutoff));
-        let tx = connection.transaction()?;
-        tx.execute(
-            &format!("DELETE FROM event_otlp WHERE (project_id, event_id) IN ({expired})"),
-            params_from_iter(&values),
-        )?;
-        let removed = tx.execute(
-            &format!("DELETE FROM events WHERE (project_id, event_id) IN ({expired})"),
-            params_from_iter(&values),
-        )?;
-        tx.commit()?;
-        Ok(removed)
+            .find(|entry| entry.id == project)
+            .and_then(|entry| entry.seconds)
+            .unwrap_or(self.default_seconds)
     }
 }
 
@@ -105,6 +90,7 @@ mod tests {
     fn project(id: &str, seconds: Option<u64>) -> Project {
         Project {
             deleted: false,
+            expired_before_ms: None,
             id: id.into(),
             name: id.into(),
             keys: Vec::new(),
@@ -116,17 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn expiration_respects_project_overrides_and_exact_receipt_boundary() {
-        let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(
-            "CREATE TABLE events(project_id VARCHAR, event_id VARCHAR, received_at_ms BIGINT);
-            CREATE TABLE event_otlp(project_id VARCHAR, event_id VARCHAR);
-            INSERT INTO events VALUES ('inherit', 'same', 8999), ('inherit', 'boundary', 9000),
-                ('long', 'same', 8999), ('short', 'same', 9499), ('short', 'boundary', 9500),
-                ('keep', 'same', -5000), ('unlisted', 'same', 8999);
-            INSERT INTO event_otlp SELECT project_id, event_id FROM events;",
-        )
-        .unwrap();
+    fn cutoffs_respect_project_overrides_and_exact_receipt_boundary() {
         let policy = Policy::new(
             1,
             &[
@@ -136,33 +112,43 @@ mod tests {
                 project("keep", Some(0)),
             ],
         );
-        assert_eq!(policy.purge(&mut db, 10500).unwrap(), 4);
-        let remaining: Vec<String> = db
-            .prepare("SELECT project_id FROM events ORDER BY project_id")
-            .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .map(Result::unwrap)
-            .collect();
-        assert_eq!(remaining, ["keep", "long", "short"]);
+        assert!(policy.enabled());
+        assert_eq!(policy.project_cutoff("inherit", 10500), 9500);
+        assert_eq!(policy.project_cutoff("unlisted", 10500), 9500);
+        assert_eq!(policy.project_cutoff("long", 10500), 10500 - 60_000);
+        assert_eq!(policy.project_cutoff("short", 10500), 9500);
+        assert_eq!(policy.project_cutoff("keep", 10500), i64::MIN);
+        assert_eq!(policy.default_cutoff(10500), 9500);
+        let mut overrides: Vec<_> = policy.overrides().collect();
+        overrides.sort();
+        assert_eq!(overrides, ["keep", "long", "short"]);
+    }
+
+    #[test]
+    fn an_expiration_floor_keeps_old_events_hidden_when_retention_grows() {
+        let mut keep = project("keep", Some(0));
+        keep.expired_before_ms = Some(5000);
+        let mut inherit = project("inherit", None);
+        inherit.expired_before_ms = Some(9800);
+        let policy = Policy::new(0, &[keep, inherit]);
+        assert!(policy.enabled());
+        assert_eq!(policy.project_cutoff("keep", 10000), 5000);
+        assert_eq!(policy.project_cutoff("inherit", 10000), 9800);
+        assert_eq!(policy.project_cutoff("other", 10000), i64::MIN);
+        // A shorter policy than the floor still applies.
+        let mut short = project("short", Some(1));
+        short.expired_before_ms = Some(100);
         assert_eq!(
-            db.query_row("SELECT count(*) FROM event_otlp", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            3
+            Policy::new(0, &[short]).project_cutoff("short", 10000),
+            9000
         );
-        assert_eq!(policy.purge(&mut db, 10500).unwrap(), 0);
     }
 
     #[test]
     fn disabled_default_still_allows_project_expiration_and_large_durations() {
-        let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE events(project_id VARCHAR, event_id VARCHAR, received_at_ms BIGINT);
-            CREATE TABLE event_otlp(project_id VARCHAR, event_id VARCHAR);
-            INSERT INTO events VALUES ('default', 'same', 0), ('short', 'same', 0), ('long', 'same', 0);").unwrap();
         let disabled = Policy::new(0, &[]);
         assert!(!disabled.enabled());
-        assert_eq!(disabled.purge(&mut db, 10000).unwrap(), 0);
+        assert_eq!(disabled.project_cutoff("default", 10000), i64::MIN);
         let policy = Policy::new(
             0,
             &[
@@ -171,26 +157,11 @@ mod tests {
             ],
         );
         assert!(policy.enabled());
-        assert_eq!(policy.purge(&mut db, 10000).unwrap(), 1);
+        assert_eq!(policy.project_cutoff("short", 10000), 9000);
         assert_eq!(
-            db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            2
+            policy.project_cutoff("long", 10000),
+            10000 - (MAX_SECONDS * 1000) as i64
         );
-    }
-
-    #[test]
-    fn failed_event_deletion_rolls_back_otlp_deletion() {
-        let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE VIEW events AS SELECT 'default' AS project_id, 'same' AS event_id, 0 AS received_at_ms;
-            CREATE TABLE event_otlp(project_id VARCHAR, event_id VARCHAR);
-            INSERT INTO event_otlp VALUES ('default', 'same');").unwrap();
-        assert!(Policy::new(1, &[]).purge(&mut db, 10000).is_err());
-        assert_eq!(
-            db.query_row("SELECT count(*) FROM event_otlp", [], |r| r
-                .get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
+        assert_eq!(policy.project_cutoff("default", 10000), i64::MIN);
     }
 }

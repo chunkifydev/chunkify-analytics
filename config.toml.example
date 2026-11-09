@@ -1,33 +1,32 @@
 # Copy to config.toml. Omitted settings keep their built-in defaults.
 # Precedence: CLI flags > process environment > .env > TOML > defaults.
-# Relative TOML data paths are resolved beside this file.
-data_dir = "./data"
-profile = false
+# Relative TOML paths are resolved beside this file.
 
 [logging]
 # One summary per saved batch. Use warn for failures only, debug for batch starts.
 level = "info"
 
-[storage]
-# Local storage is the default. S3-compatible storage also uses this section.
-backend = "local"
-# Optional database file; defaults to analytics.duckdb inside data_dir.
-# path = "./data/analytics.duckdb"
-# For S3 or R2, replace backend with "s3" and set these in the same section:
-# url = "s3://my-bucket/analytics/"
-# endpoint = "ACCOUNT_ID.r2.cloudflarestorage.com"
-# region = "auto"
-# access_key_id = "YOUR_ACCESS_KEY_ID"
-# secret_access_key = "YOUR_SECRET_ACCESS_KEY"
-# session_token = "..." # Optional for temporary credentials.
-# url_style = "path"   # Or "vhost".
-# use_ssl = true       # Set false only for an HTTP endpoint.
-# Omit explicit credentials on AWS to use the task role.
-# Optional S3 buffering: return HTTP 201 immediately and upload within 60 seconds,
-# or sooner when a batch fills. Buffered events can be lost on a crash.
-# flush_interval_seconds = 60
-# Omit or set 0 to wait for each upload before acknowledging events.
-# See docs/storage.md for setup, expiration and single-writer operation.
+[clickhouse]
+# Events, projects and key hashes live in this ClickHouse database. Any number of
+# analytics servers can share it. Run `init` once per database.
+url = "http://127.0.0.1:8123"
+database = "chunkify_analytics"
+# user = "chunkify"
+# password = "..."                   # Prefer CHUNKIFY_CLICKHOUSE_PASSWORD.
+# Let ClickHouse combine inserts from all servers; requests still wait for storage.
+async_insert = true
+# Seconds between checks for project and key changes made elsewhere.
+registry_refresh_seconds = 5
+# Repeated event IDs within this window return duplicate: true. 0 stores every delivery.
+deduplication_window_seconds = 604800
+# Optional 0..63, distinct for each server sharing the database. Leased when unset.
+# node_id = 1
+# Reports read hourly rollups and lag stored events by about the refresh interval
+# plus ten seconds. They read events while the last refresh is older than this
+# limit, which must be at least twice the interval. 0 makes reports exact.
+rollup_max_lag_seconds = 120
+# Seconds between rollup refreshes when reports may lag.
+rollup_interval_seconds = 45
 
 [server]
 # External base URL for CSV download links behind an ingress or URL prefix:
@@ -59,24 +58,13 @@ seconds = 2592000
 interval_seconds = 3600
 
 [batch]
-# Optional limits for buffered S3: up to 10 MiB or 10,000 events per upload.
-# Without overrides, local/unbuffered storage uses 1 MiB and 100 events.
+# Each server batches requests; requests queued while one batch is saved form the
+# next. Limits apply per batch and to memory held for waiting requests.
 # max_events = 10000
 # max_bytes = 10485760
 delay_ms = 10
-# Buffered S3 defaults to 32 MiB and 4096 outstanding requests; otherwise
-# defaults are 16 MiB and 256 requests. Increase with larger batch limits.
 # queue_max_bytes = 33554432
 # queue_max_requests = 4096
-insert_mode = "bulk"
-
-[duckdb]
-# Recommended starting value; omit threads to let DuckDB choose automatically.
-threads = 1
-checkpoint_threshold_mib = 16
-
-[experimental]
-read_worker = false
 
 [mcp]
 enabled = true
@@ -88,6 +76,6 @@ allowed_hosts = ["localhost", "127.0.0.1", "[::1]"]
 url = "http://127.0.0.1:4174"
 # secret_key = "..."
 
-# S3 report freshness. Local storage defaults to 0; raw events and exports bypass it.
+# Optional per-server report cache, in seconds. Raw events and exports bypass it.
 [cache]
-report_ttl_seconds = 60
+report_ttl_seconds = 0

@@ -7,10 +7,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
-import test from "node:test";
+import test, { after } from "node:test";
 import { attachAnalytics } from "@chunkify/player-analytics";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
-import { collectorEnvironment, writeConfig } from "./configuration.mjs";
+import { collectorEnvironment, writeConfig, dropTestDatabases } from "./configuration.mjs";
+
+after(dropTestDatabases);
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 
@@ -20,7 +22,8 @@ async function collector(t, settings = {}) {
   const configuration = { ...inherited, "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
     "rate_limits.read_concurrent_per_project": "32", "rate_limits.read_concurrent": "32",
     "rate_limits.export_downloads_per_minute": "1000", "data_dir": directory, "server.bind": "127.0.0.1:0",
-    "server.allowed_origins": "https://player.example", "retention.seconds": "0", ...settings };
+    "server.allowed_origins": "https://player.example", "retention.seconds": "0",
+    "clickhouse.registry_refresh_seconds": "1", ...settings };
   await writeConfig(directory, configuration);
   const env = collectorEnvironment(inherited);
   let child;
@@ -305,9 +308,8 @@ test("rate limit responses use the documented event error envelope", async t => 
 });
 
 
-for (const separateReads of [false, true]) {
-  test(`timeseries returns bounded UTC start cohorts with summary parity (separate reads: ${separateReads})`, async t => {
-    const server = await collector(t, { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" });
+  test(`timeseries returns bounded UTC start cohorts with summary parity`, async t => {
+    const server = await collector(t, {});
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (at, viewer, video = "video-a", browser = "Chrome") => ({
       ...sample, event_id: randomUUID(), view_id: randomUUID(), sequence: 1,
@@ -384,12 +386,10 @@ for (const separateReads of [false, true]) {
     }
     for (const path of ["/v1/summary", "/v1/videos", "/v1/events"]) await server.get(`${path}?interval=day`, 400);
   });
-}
 
 
-for (const separateReads of [false, true]) {
-  test(`quality measures each view once with explicit coverage (separate reads: ${separateReads})`, async t => {
-    const settings = { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" };
+  test(`quality measures each view once with explicit coverage`, async t => {
+    const settings = {};
     const server = await collector(t, settings);
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (video = "a", browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
@@ -493,12 +493,10 @@ for (const separateReads of [false, true]) {
 
 
   });
-}
 
 
-for (const separateReads of [false, true]) {
-  test(`engagement uses all attempts and the selected final event (separate reads: ${separateReads})`, async t => {
-    const settings = { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" };
+  test(`engagement uses all attempts and the selected final event`, async t => {
+    const settings = {};
     const server = await collector(t, settings);
     const sample = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
     const start = (video, browser = "Chrome", at = "2026-10-19T12:00:00Z", viewer = "viewer") => ({
@@ -584,10 +582,9 @@ for (const separateReads of [false, true]) {
     }
     await server.get("/v1/engagement?video_id=overflow", 500);
   });
-}
 
-for (const separateReads of [false, true]) test(`video sorting ranks the full cohort and paginates ties (separate reads: ${separateReads})`, async t => {
-  const server = await collector(t, { "experimental.read_worker": String(separateReads) });
+test(`video sorting ranks the full cohort and paginates ties`, async t => {
+  const server = await collector(t, {});
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
   function attempt(videoId, playingTime, browser = "Chrome") {
     const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(),
@@ -659,8 +656,8 @@ for (const separateReads of [false, true]) test(`video sorting ranks the full co
   assert.equal((await get(watch)).videos[0].video_id, "g", "a fresh sequence sees the later watch time");
 });
 
-for (const separateReads of [false, true]) test(`metric breakdowns preserve start context and page complete groups (separate reads: ${separateReads})`, async t => {
-  const server = await collector(t, { "experimental.read_worker": String(separateReads) });
+test(`metric breakdowns preserve start context and page complete groups`, async t => {
+  const server = await collector(t, {});
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
   const context = (browser_name, os_name, device_type) => ({ schema_version: 1, browser_name, os_name, device_type });
   function attempt(video, browser, viewer, playing, reason = "destroyed") {
@@ -775,10 +772,8 @@ function csvRecords(text) {
   return rows;
 }
 
-for (const separateReads of [false, true])
-  test(`analytics exploration and scoped CSV downloads (separate reads: ${separateReads})`, async (t) => {
+test(`analytics exploration and scoped CSV downloads`, async (t) => {
     const server = await collector(t, {
-      "experimental.read_worker": String(separateReads),
       "server.ingest_per_second": "100000",
     });
     const example =
@@ -1052,7 +1047,11 @@ for (const separateReads of [false, true])
     await create({ resource: "events" }, 401, server.keys.public_key);
     const link = await create({ resource: "events" });
     await server.admin(["key", "rotate", "default", key.key_id]);
-    assert.equal((await fetch(link.download_url)).status, 404);
+    // Running servers adopt CLI changes at their next registry refresh.
+    const deadline = Date.now() + 10000;
+    let status;
+    while ((status = (await fetch(link.download_url)).status) !== 404 && Date.now() < deadline) await delay(200);
+    assert.equal(status, 404);
     assert.equal(
       (await fetch(`${server.url}/v1/exports/${"A".repeat(43)}`)).status,
       404,
@@ -1136,10 +1135,8 @@ test("export links use the configured public base including an ingress prefix", 
   assert.equal((await fetch(`${server.url}/v1/exports/${token}`)).status, 200);
 });
 
-for (const separateReads of [false, true])
-  test(`read rate budgets span routes and keys without blocking ingestion (separate reads: ${separateReads})`, async (t) => {
+  test(`read rate budgets span routes and keys without blocking ingestion`, async (t) => {
     const server = await collector(t, {
-      "experimental.read_worker": String(separateReads),
       "rate_limits.read_per_minute": "1",
       "rate_limits.read_burst": "1",
     });
@@ -1276,8 +1273,8 @@ test("CSV download budgets cannot be bypassed with another link or rotated key",
   await server.get("/v1/summary");
 });
 
-for (const separateReads of [false, true]) test(`video reports preserve progress, measured watch time and startup outcomes (${separateReads})`, async t => {
-  const server = await collector(t, { "experimental.read_worker": String(separateReads), "duckdb.threads": "1" });
+test(`video reports preserve progress, measured watch time and startup outcomes`, async t => {
+  const server = await collector(t, {});
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
   const samples = [
     [0, 0, "failed_before_start"], [0, 0, "ended_before_start"], [9999, 0.25, "started"],
@@ -1401,8 +1398,8 @@ test("renditions report weights bitrate by watch time and exports every row with
   assert.ok(csv.startsWith("width,height,codec,bitrate_bps,frame_rate,views,playing_time_ms,playing_time_ratio"));
 });
 
-for (const separateReads of [false, true]) test(`location reports use first starts, filter consistently and export all groups (separate reads: ${separateReads})`, async t => {
-  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1", "experimental.read_worker": String(separateReads) });
+test(`location reports use first starts, filter consistently and export all groups`, async t => {
+  const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
   const send = (event, ip) => server.post("/v1/events", JSON.stringify(event), 201, { "x-forwarded-for": ip });
   const starts = [];

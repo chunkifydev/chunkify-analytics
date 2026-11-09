@@ -1,0 +1,14 @@
+# Application settings for the Compose stack. Storage connection settings come
+# from compose.yaml and .env.
+
+[server]
+# Origins of the websites that send events, without paths or trailing slashes.
+allowed_origins = ["http://localhost:3000"]
+# The gateway forwards client addresses. Compose networks use these ranges.
+trusted_proxies = ["172.16.0.0/12", "192.168.0.0/16"]
+
+[retention]
+seconds = 2592000
+
+[clickhouse]
+database = "chunkify_analytics"

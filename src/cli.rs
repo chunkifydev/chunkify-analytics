@@ -4,9 +4,6 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Parser)]
 #[command(name = "chunkify-analytics", version, about, propagate_version = true)]
 pub struct Cli {
-    /// Directory containing the database and credentials
-    #[arg(long, global = true)]
-    pub data_dir: Option<PathBuf>,
     /// Load environment values from this file instead of ./.env
     #[arg(long, global = true)]
     pub env_file: Option<PathBuf>,
@@ -19,7 +16,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Initialize a new data directory and credentials
+    /// Create the ClickHouse database and the initial project credentials
     Init,
     /// Run the analytics HTTP API and MCP endpoint
     Serve {
@@ -96,7 +93,7 @@ pub enum KeyCommand {
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
-    /// Validate configuration without opening the database
+    /// Validate configuration without contacting ClickHouse
     Check,
 }
 

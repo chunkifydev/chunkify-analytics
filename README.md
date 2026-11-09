@@ -10,47 +10,48 @@ Chunkify Analytics includes:
 - Separate projects and credentials for different websites or customers.
 - An HTTP API for building dashboards and exporting CSV reports.
 - A read-only MCP endpoint for connecting AI tools.
-- Local or S3-compatible storage with configurable expiration.
+- Storage in [ClickHouse](https://clickhouse.com/), with configurable expiration.
 
-One `chunkify-analytics serve` process runs ingestion, queries, and MCP. You do
-not need to install or run a separate database server.
+Each `chunkify-analytics serve` process runs ingestion, queries, and MCP. Events,
+projects and credential hashes live in a ClickHouse database, an open-source
+server that runs beside the analytics server in its own container. Analytics
+servers keep no data of their own, so you can run several behind a load
+balancer and add more as traffic grows.
 
 Choose [Docker](#install-with-docker) for a packaged deployment, or
 [install the executable directly](#install-without-docker) on your computer.
 
 ## Install with Docker
 
-Docker is the recommended way to run the service. The prebuilt image supports
-Linux amd64 and arm64; Docker selects the architecture for your computer.
+Docker Compose is the recommended way to run the service. The stack runs
+ClickHouse, the analytics server and a small gateway that spreads requests
+over every analytics server. The prebuilt images support Linux amd64 and arm64.
 
-### 1. Get the application
+### 1. Get the stack
 
-You need Docker. Pull the latest stable release:
-
-```sh
-docker pull ghcr.io/chunkifydev/chunkify-analytics:latest
-```
-
-The image includes the analytics server, DuckDB, and the local DB-IP City Lite database. No Git, Rust, or local build
-is required. For a fixed version, replace `:latest` with a release version such
-as `:0.1.0` in every command, and download that version's sample configuration.
-See [building from source](docs/development.md#build-the-docker-image) if you want
-to build your own image.
-
-### 2. Configure your website
+You need Docker with Compose. Download the stack files into a new directory:
 
 ```sh
 mkdir -p chunkify-analytics
 cd chunkify-analytics
-curl --fail --location \
-  https://github.com/chunkifydev/chunkify-analytics/releases/latest/download/config.toml.example \
-  --output config.toml
+base=https://raw.githubusercontent.com/chunkifydev/chunkify-analytics/main/examples/clickhouse
+for file in compose.yaml Caddyfile config.toml .env.example; do
+  curl --fail --location "$base/$file" --output "$file"
+done
+cp .env.example .env
 ```
 
-For a fixed version, replace `releases/latest/download` with
-`releases/download/v0.1.0` in the URL, matching your image version.
+For a fixed version, replace `main` with a release tag such as `v0.14.0` in the
+URL, and set `CHUNKIFY_IMAGE=ghcr.io/chunkifydev/chunkify-analytics:0.14.0` in
+`.env`. The analytics image includes the DB-IP City Lite database. No Git, Rust,
+or local build is required. See
+[building from source](docs/development.md#build-the-docker-image) to build
+your own image.
 
-Edit `config.toml` and set the website origin that will send events:
+### 2. Configure your website
+
+Set `CLICKHOUSE_PASSWORD` in `.env` to a long random value. Then edit
+`config.toml` and set the website origin that will send events:
 
 ```toml
 [server]
@@ -68,51 +69,48 @@ Retention defaults to 30 days. The server looks up continent, country and city l
 discards the request IP. No lookup requests leave your infrastructure.
 [Geolocation setup and attribution](docs/geolocation.md).
 
-### 3. Initialize persistent storage
+### 3. Initialize the database
 
 ```sh
-docker volume create chunkify-analytics-data
-
-docker run --rm \
-  --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  --mount type=bind,src="$(pwd)/config.toml",dst=/data/config.toml,readonly \
-  ghcr.io/chunkifydev/chunkify-analytics:latest init
+docker compose run --rm analytics init
 ```
 
-Run `init` once for a new installation. It prints the initial `public_key` and
-`secret_key` once as JSON and refuses to overwrite an existing registry. Save the
-keys in your secret manager; the collector stores only their hashes.
+Run `init` once for a new installation. It creates the ClickHouse database,
+prints the initial `public_key` and `secret_key` once as JSON, and refuses to
+initialize a database twice. Save the keys in your secret manager; ClickHouse
+stores only their hashes.
 
 ### 4. Start the service
 
 ```sh
-docker run -d --name chunkify-analytics --restart unless-stopped \
-  --mount type=volume,src=chunkify-analytics-data,dst=/data \
-  --mount type=bind,src="$(pwd)/config.toml",dst=/data/config.toml,readonly \
-  -p 127.0.0.1:4174:4174 \
-  ghcr.io/chunkifydev/chunkify-analytics:latest
+docker compose up -d
 ```
 
 Check that it is running:
 
 ```sh
 curl --fail http://127.0.0.1:4174/healthz
-docker logs chunkify-analytics
+docker compose logs analytics
 ```
 
-The health endpoint returns `{"status":"ok"}`. The example exposes the port on
+The health endpoint returns `{"status":"ok"}`. The gateway listens on
 localhost. Put your HTTPS reverse proxy in front of it when accepting events
-from a public website. A proxy running in another container can use a shared
-Docker network instead.
+from a public website.
 
-Keep the named volume when replacing containers. It holds the database and
-credentials. Run one analytics server process per data volume.
+To handle more traffic, run more analytics servers. The gateway finds new
+servers within five seconds:
 
-The container loads `/data/config.toml` automatically. Edit the host file and
-recreate the container with the same mounts to apply changes. The image uses
-`/data` for storage and listens on `0.0.0.0:4174` inside the container; these two
-image settings override `data_dir` and `[server].bind` in TOML. The port mapping
-above restricts access from your computer to localhost.
+```sh
+docker compose up -d --scale analytics=3
+```
+
+The `clickhouse-data` volume holds all events, projects and credential hashes.
+Keep it when replacing containers, and include it in backups. Analytics
+containers keep no state and can be replaced at any time.
+
+Each analytics container loads `/data/config.toml`. Edit the host file and run
+`docker compose up -d` to apply changes. The image listens on `0.0.0.0:4174`
+inside the container; this image setting overrides `[server].bind` in TOML.
 
 ### 5. Use your credentials
 
@@ -131,8 +129,8 @@ integration and revoke them independently.
 
 Run the executable directly on your computer without a container. Published
 [GitHub Releases](https://github.com/chunkifydev/chunkify-analytics/releases)
-include executables and their DuckDB library. No Rust or Node.js runtime is
-required to run them.
+include executables. No Rust or Node.js runtime is required to run them. You
+also need a ClickHouse server; ClickHouse 26.10 is tested.
 
 ### 1. Get and install the executable
 
@@ -146,17 +144,16 @@ Download the archive for your computer and `SHA256SUMS` from the same release:
 | macOS Apple Silicon | `aarch64-apple-darwin` |
 
 Linux builds use glibc and support Ubuntu 22.04, Debian Bookworm, and newer
-compatible distributions. Keep the included `bin` and `lib` directories together.
-For example, to install version 0.1.0 on Linux Intel/AMD, run these commands in
+compatible distributions. Keep the included `bin` and `share` directories together.
+For example, to install version 0.14.0 on Linux Intel/AMD, run these commands in
 the download directory. Replace the version and target to match your archive:
 
 ```sh
 shasum -a 256 --check --ignore-missing SHA256SUMS
-tar -xzf chunkify-analytics-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-cd chunkify-analytics-0.1.0-x86_64-unknown-linux-gnu
-mkdir -p "$HOME/.local/bin" "$HOME/.local/lib" "$HOME/.local/share/chunkify-analytics"
+tar -xzf chunkify-analytics-0.14.0-x86_64-unknown-linux-gnu.tar.gz
+cd chunkify-analytics-0.14.0-x86_64-unknown-linux-gnu
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/chunkify-analytics"
 install -m 755 bin/chunkify-analytics "$HOME/.local/bin/"
-install -m 755 lib/libduckdb.* "$HOME/.local/lib/"
 install -m 644 share/chunkify-analytics/dbip-city-lite.mmdb "$HOME/.local/share/chunkify-analytics/"
 install -m 644 docs/licenses/db-ip.txt "$HOME/.local/share/chunkify-analytics/"
 export PATH="$HOME/.local/bin:$PATH"
@@ -176,24 +173,35 @@ Linux, use your distribution's build tools.
 ```sh
 git clone https://github.com/chunkifydev/chunkify-analytics.git
 cd chunkify-analytics
-sh scripts/install-duckdb.sh
 sh scripts/install-geolocation.sh
 cargo build --locked --release
-mkdir -p "$HOME/.local/bin" "$HOME/.local/lib" "$HOME/.local/share/chunkify-analytics"
+mkdir -p "$HOME/.local/bin" "$HOME/.local/share/chunkify-analytics"
 install -m 755 target/release/chunkify-analytics "$HOME/.local/bin/"
-install -m 755 target/lib/libduckdb.* "$HOME/.local/lib/"
 install -m 644 target/share/chunkify-analytics/dbip-city-lite.mmdb "$HOME/.local/share/chunkify-analytics/"
 install -m 644 docs/licenses/db-ip.txt "$HOME/.local/share/chunkify-analytics/"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Keep `$HOME/.local/bin` in your shell's PATH to use the command in future
-sessions. The setup script downloads DuckDB 2.0.0 for macOS or Linux and verifies
-its checksum. The geolocation installer downloads and verifies the pinned DB-IP
-City Lite MMDB. The executable finds these files in the adjacent `lib` and
-`share/chunkify-analytics` directories.
+sessions. The geolocation installer downloads and verifies the pinned DB-IP
+City Lite MMDB. The executable finds it in the adjacent
+`share/chunkify-analytics` directory.
 
-### 2. Configure and initialize
+### 2. Start ClickHouse
+
+Use an existing ClickHouse server, or run one locally from a repository checkout:
+
+```sh
+sh scripts/install-clickhouse.sh
+sh scripts/start-clickhouse.sh
+```
+
+These scripts download and verify a pinned ClickHouse binary into
+`target/clickhouse` and start it on `127.0.0.1:8123`, storing data in
+`target/clickhouse/data`. See [ClickHouse's installation guide](https://clickhouse.com/docs/install)
+for a managed service installation.
+
+### 3. Configure and initialize
 
 From the extracted release or repository directory:
 
@@ -204,16 +212,17 @@ chunkify-analytics config check
 chunkify-analytics init
 ```
 
-Edit the website origins and data path before initialization. The example stores
-its data in `./data`, beside `config.toml`. `init` returns the initial credentials
-once as JSON. Save them in your secret manager; they cannot be read back from the
-registry. Use `key rotate-primary public` or `key rotate-primary secret` to
-replace a lost credential.
+Set the website origins and the `[clickhouse]` connection before initialization.
+Put the ClickHouse password in `CHUNKIFY_CLICKHOUSE_PASSWORD` rather than in the
+file. `init` returns the initial credentials once as JSON. Save them in your
+secret manager; they cannot be read back from the registry. Use
+`key rotate-primary public` or `key rotate-primary secret` to replace a lost
+credential.
 
 Use `public_key` in the player and keep `secret_key` private for API and MCP
 access. This secret key must stay out of browser code.
 
-### 3. Run and check the service
+### 4. Run and check the service
 
 ```sh
 chunkify-analytics serve
@@ -226,8 +235,8 @@ curl --fail http://127.0.0.1:4174/healthz
 ```
 
 The HTTP API and `/mcp` are both available on `127.0.0.1:4174`. Press Ctrl+C in
-the server terminal to stop gracefully. Run `serve` again to reuse the same data;
-you do not run `init` again.
+the server terminal to stop gracefully. Run `serve` again to reuse the same
+database; you do not run `init` again.
 
 When starting from another directory, select the configuration file explicitly:
 
@@ -235,9 +244,9 @@ When starting from another directory, select the configuration file explicitly:
 chunkify-analytics --config /path/to/config.toml serve
 ```
 
-For a service manager, use an explicit `--config` path and make the data directory
-writable by the service account. Keep the complete data directory when moving or
-updating the executable.
+For a service manager, use an explicit `--config` path. To run more servers,
+start them with the same `[clickhouse]` settings and a different `server.bind`
+or host, and put a load balancer in front of them.
 
 ## Send playback events
 
@@ -357,7 +366,7 @@ MCP share each project's budgets across all its keys. See
 and overrides.
 
 Relative TOML paths resolve beside that file. Restart after changing installation
-settings. The [configuration reference](docs/configuration.md) lists all fields
+settings; with several servers, restart each of them. The [configuration reference](docs/configuration.md) lists all fields
 and the small set of environment overrides for deployments and secrets.
 
 Copy [.env.example](.env.example) to `.env` for local overrides, or pass the
@@ -377,10 +386,12 @@ Read-only private keys can query analytics through HTTP and MCP. Existing and
 new private keys without `--read-only` keep full project access.
 
 Use the returned `project_id` in later commands. Save new secrets when returned.
-In Docker, run these commands through
-`docker exec chunkify-analytics chunkify-analytics …`. Project creation, key
-management and retention changes work while serving on Linux and macOS. Stop the analytics server
-to rename projects or replace project settings. For automatic customer onboarding,
+With Docker Compose, run these commands through
+`docker compose exec analytics chunkify-analytics …`. Commands change the shared
+registry in ClickHouse while servers run. Every server applies new keys at once
+and other changes within `clickhouse.registry_refresh_seconds` (5 seconds by
+default). Ingestion limits from `project configure` apply when a server starts.
+For automatic customer onboarding,
 use [project creation through the API](docs/administration.md#create-projects-through-the-api)
 with `CHUNKIFY_ADMIN_KEY`. Your trusted backend can also use that admin key to
 [recover a lost project key](docs/administration.md#recover-a-lost-project-key)
@@ -388,15 +399,14 @@ by rotating it again.
 
 ## Storage and backups
 
-Local storage is the default. Set `backend = "s3"` under `[storage]` for S3-compatible
-storage, including Cloudflare R2. S3 keeps events and credentials when a container
-is replaced. Run one analytics server per bucket prefix.
+All events, projects and credential hashes live in the ClickHouse database.
+Back it up with ClickHouse's own tools, such as `BACKUP DATABASE`, and keep the
+`registry` table with the events. Analytics servers keep no data.
 
 Expiration defaults to 30 days by receipt time. Projects can override it.
-Expired events stop contributing to reports. Local database files can reuse
-freed space without shrinking.
+Reports hide expired events immediately, and a periodic sweep deletes them.
 
-See [storage](docs/storage.md) for configuration and
+See [storage](docs/storage.md) for settings, scaling and replication, and
 [backup and restore](docs/administration.md#backup-and-restore) before moving data.
 
 ## Troubleshooting
@@ -408,12 +418,13 @@ See [storage](docs/storage.md) for configuration and
 | MCP requests receive `403` | Add the client-facing HTTP hostname to `[mcp].allowed_hosts`; browser Origin headers must also be allowed. |
 | Ingestion receives `429` | Requests exceed an installation or project rate limit. See the admission settings. |
 | Requests receive `503` | The write/read queue or another configured resource budget is full. Retry later and check logs. |
-| Data directory is in use | Another analytics server or an offline administration command owns it. Run one writer per directory. |
-| Container configuration did not change | Recreate the container with the updated TOML file and the same data volume. Environment changes also require recreation. |
+| `init` or `serve` cannot reach ClickHouse | Check `clickhouse.url`, the user and password, and that ClickHouse is running. `docker compose logs clickhouse` shows the server's log. |
+| A command reports that the registry changed on another server | Another server or command changed projects at the same time. Run the command again. |
+| Container configuration did not change | Run `docker compose up -d` after editing `config.toml` or `.env`. |
 
 ## Further documentation
 
-- [Storage backends and R2 setup](docs/storage.md)
+- [Storage, scaling and replication](docs/storage.md)
 - [Configuration reference](docs/configuration.md)
 - [HTTP API and metric definitions](docs/api.md)
 - [Projects, credentials, retention, and backups](docs/administration.md)

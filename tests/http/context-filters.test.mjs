@@ -6,9 +6,11 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import test from "node:test";
+import test, { after } from "node:test";
 import { attachAnalytics } from "@chunkify/player-analytics";
-import { collectorEnvironment, writeConfig } from "./configuration.mjs";
+import { collectorEnvironment, writeConfig, dropTestDatabases } from "./configuration.mjs";
+
+after(dropTestDatabases);
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 const command = promisify(execFile);

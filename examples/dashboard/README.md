@@ -71,8 +71,8 @@ unset CHUNKIFY_DEMO_PUBLIC_KEY
 The script sends 816 synthetic events for 268 views across nine videos and seven
 days. These are fabricated measurements. Use a demo project's public key.
 
-Same-day reruns reuse event IDs. Local storage ignores repeats; S3 stores each
-delivery. A new day produces another dataset. Use a fresh project to replace
+Same-day reruns reuse event IDs, which the analytics server ignores as
+duplicates. A new day produces another dataset. Use a fresh project to replace
 sample fixtures.
 
 ## Verification

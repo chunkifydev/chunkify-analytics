@@ -1,19 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::{
-    fs,
-    io::Write,
-    net::SocketAddr,
-    path::{Path, PathBuf},
-};
+use std::{net::SocketAddr, path::PathBuf};
 use tracing::level_filters::LevelFilter;
-use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub struct Config {
     pub admin_key_hash: Option<String>,
-    pub backend: crate::backend::Backend,
-    pub data_dir: PathBuf,
+    pub clickhouse: crate::backend::ClickHouseConfig,
     pub mcp_enabled: bool,
     pub mcp_allowed_hosts: Vec<String>,
     pub bind: SocketAddr,
@@ -26,12 +19,8 @@ pub struct Config {
     pub retention_seconds: u64,
     pub retention_interval_seconds: u64,
     pub geoip_database: PathBuf,
-    pub profile: bool,
     pub log_level: LevelFilter,
-    pub checkpoint_threshold_mib: u32,
-    pub duckdb_threads: Option<usize>,
-    pub batch: crate::writer::BatchConfig,
-    pub separate_reads: bool,
+    pub batch: crate::batch::BatchConfig,
     pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
@@ -42,35 +31,8 @@ pub struct Keys {
 }
 
 impl Config {
-    pub fn lock(&self) -> Result<fs::File> {
-        self.try_lock()?.ok_or_else(|| {
-            "Data directory is in use. Stop the collector and any administration command first."
-                .into()
-        })
-    }
-
-    pub fn try_lock(&self) -> Result<Option<fs::File>> {
-        if matches!(self.backend, crate::backend::Backend::S3(_)) {
-            self.create_data_directory()?;
-        }
-        let mut options = fs::OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(self.data_dir.join("collector.lock"))?;
-        match file.try_lock() {
-            Ok(()) => Ok(Some(file)),
-            Err(fs::TryLockError::WouldBlock) => Ok(None),
-            Err(fs::TryLockError::Error(error)) => Err(error.into()),
-        }
-    }
-
     pub fn load_with(
         settings: &crate::settings::Settings,
-        data_dir: Option<&Path>,
         bind: Option<SocketAddr>,
     ) -> Result<Self> {
         settings.rate_limits.validate()?;
@@ -115,27 +77,6 @@ impl Config {
         if !(1..=86400).contains(&retention_interval_seconds) {
             return Err("retention.interval_seconds must be between 1 and 86400".into());
         }
-        let checkpoint_threshold_mib = settings
-            .var("duckdb.checkpoint_threshold_mib")
-            .unwrap_or_else(|_| "16".into())
-            .parse::<u32>()
-            .map_err(|_| "duckdb.checkpoint_threshold_mib must be between 1 and 1024")?;
-        if !(1..=1024).contains(&checkpoint_threshold_mib) {
-            return Err("duckdb.checkpoint_threshold_mib must be between 1 and 1024".into());
-        }
-        let duckdb_threads = settings
-            .var("duckdb.threads")
-            .ok()
-            .map(|value| -> Result<usize> {
-                let count = value
-                    .parse::<usize>()
-                    .map_err(|_| "duckdb.threads must be between 1 and 256")?;
-                if !(1..=256).contains(&count) {
-                    return Err("duckdb.threads must be between 1 and 256".into());
-                }
-                Ok(count)
-            })
-            .transpose()?;
         let mcp_allowed_hosts: Vec<String> = settings
             .var("mcp.allowed_hosts")
             .unwrap_or_else(|_| "localhost,127.0.0.1,[::1]".into())
@@ -155,21 +96,11 @@ impl Config {
                 "mcp.allowed_hosts must contain literal hostnames or host:port authorities".into(),
             );
         }
-        let backend = crate::backend::Backend::load(settings)?;
-        let batch = crate::writer::BatchConfig::load(
-            settings,
-            matches!(&backend, crate::backend::Backend::S3(s3) if !s3.flush_interval.is_zero()),
-        )?;
+        let clickhouse = crate::backend::ClickHouseConfig::load(settings)?;
+        let batch = crate::batch::BatchConfig::load(settings)?;
         let report_cache_seconds = settings
             .var("cache.report_ttl_seconds")
-            .unwrap_or_else(|_| {
-                if matches!(backend, crate::backend::Backend::S3(_)) {
-                    "60"
-                } else {
-                    "0"
-                }
-                .into()
-            })
+            .unwrap_or_else(|_| "0".into())
             .parse::<u64>()
             .ok()
             .filter(|seconds| *seconds <= 60)
@@ -205,7 +136,7 @@ impl Config {
                 .ok()
                 .filter(|key| !key.trim().is_empty())
                 .map(|key| crate::projects::hash(&key)),
-            backend,
+            clickhouse,
             report_cache_seconds,
             mcp_enabled: settings
                 .var("mcp.enabled")
@@ -213,19 +144,7 @@ impl Config {
                 .parse()
                 .map_err(|_| "mcp.enabled must be true or false")?,
             mcp_allowed_hosts,
-            checkpoint_threshold_mib,
-            duckdb_threads,
             batch,
-            separate_reads: settings
-                .var("experimental.read_worker")
-                .unwrap_or_else(|_| "false".into())
-                .parse()
-                .map_err(|_| "experimental.read_worker must be true or false")?,
-            profile: settings
-                .var("profile")
-                .unwrap_or_else(|_| "false".into())
-                .parse()
-                .map_err(|_| "profile must be true or false")?,
             log_level: match settings.var("logging.level").as_deref().unwrap_or("info") {
                 "off" => LevelFilter::OFF,
                 "error" => LevelFilter::ERROR,
@@ -246,12 +165,6 @@ impl Config {
                 .var_os("server.geoip_database")
                 .map(PathBuf::from)
                 .unwrap_or(crate::geolocation::default_path()?),
-            data_dir: data_dir.map(Path::to_path_buf).unwrap_or_else(|| {
-                settings
-                    .var_os("data_dir")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| "data".into())
-            }),
             bind: match bind {
                 Some(bind) => bind,
                 None => settings
@@ -267,124 +180,48 @@ impl Config {
         })
     }
 
-    pub fn database_path(&self) -> PathBuf {
-        match &self.backend {
-            crate::backend::Backend::Local { path: Some(path) } => path.clone(),
-            _ => self.data_dir.join("analytics.duckdb"),
-        }
-    }
-
-    fn create_data_directory(&self) -> Result<()> {
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(&self.data_dir)?;
-        Ok(())
-    }
-
+    /// Create the ClickHouse schema and the initial project registry once.
     pub fn initialize(&self) -> Result<serde_json::Value> {
-        self.create_data_directory()?;
-        let _lock = self.lock()?;
+        crate::clickhouse::prepare(&self.clickhouse)?;
+        if crate::clickhouse::load_registry(&self.clickhouse)?.is_some() {
+            return Err(
+                "This ClickHouse database is already initialized; run serve to use it".into(),
+            );
+        }
         let public_key = crate::projects::generate_key(crate::projects::Permission::Public);
         let secret_key = crate::projects::generate_key(crate::projects::Permission::Secret);
         let keys = Keys {
             projects: vec![crate::projects::primary_project(&public_key, &secret_key)],
         };
-        let output = serde_json::json!({
+        self.save_keys(&keys)?;
+        Ok(serde_json::json!({
             "project_id": crate::projects::DEFAULT_PROJECT,
             "public_key": public_key,
             "secret_key": secret_key,
-        });
-        if let crate::backend::Backend::S3(remote) = &self.backend {
-            if remote.read_keys()?.is_some() {
-                return Err("S3 installation is already initialized; run serve to use it".into());
-            }
-            if let Some(warning) = self.save_keys(&keys)? {
-                eprintln!("{warning}");
-            }
-            return Ok(output);
-        }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(self.data_dir.join("keys.json"))?;
-        file.write_all(&serde_json::to_vec_pretty(&keys)?)?;
-        file.sync_all()?;
-        #[cfg(unix)]
-        if fs::File::open(&self.data_dir)
-            .and_then(|directory| directory.sync_all())
-            .is_err()
-        {
-            eprintln!(
-                "Registry was created, but syncing the directory failed; durability across a system crash is uncertain."
-            );
-        }
-        Ok(output)
+        }))
     }
 
+    /// The current project registry, which stores only credential hashes.
     pub fn keys(&self) -> Result<Keys> {
-        let bytes = match &self.backend {
-            crate::backend::Backend::S3(remote) => remote
-                .read_keys()?
-                .ok_or("S3 installation is not initialized; run init first")?,
-            _ => fs::read(self.data_dir.join("keys.json")).map_err(
-                |_| "Cannot read keys.json. Run the init command with this data directory first.",
-            )?,
-        };
+        // Reads never create a database, for example under a mistyped name.
+        let (version, bytes) = crate::clickhouse::read_registry(&self.clickhouse)?
+            .ok_or("This ClickHouse database is not initialized; run init first")?;
         let keys: Keys = serde_json::from_slice(&bytes)?;
         crate::projects::validate(&keys.projects)?;
+        self.clickhouse.set_loaded_version(version);
         Ok(keys)
     }
 
-    pub(crate) fn save_keys(&self, keys: &Keys) -> Result<Option<String>> {
-        if let crate::backend::Backend::S3(remote) = &self.backend {
-            remote.write_keys(&serde_json::to_vec_pretty(keys)?)?;
-            return Ok(None);
-        }
-        self.save_local_keys(keys)
-    }
-
-    fn save_local_keys(&self, keys: &Keys) -> Result<Option<String>> {
-        // Write and sync a private file on the same filesystem before replacing
-        // keys.json. Readers see the complete old or complete new key pair.
-        let temporary = self.data_dir.join(format!(".keys-{}.tmp", Uuid::new_v4()));
-        let result = (|| -> Result<()> {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary)?;
-            file.write_all(&serde_json::to_vec_pretty(&keys)?)?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, self.data_dir.join("keys.json"))?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result?;
-        // Rename has committed the change. Even if the directory sync fails,
-        // callers must activate these keys and return any newly generated secret.
-        #[cfg(unix)]
-        if fs::File::open(&self.data_dir)
-            .and_then(|directory| directory.sync_all())
-            .is_err()
-        {
-            return Ok(Some("Keys were updated, but syncing the directory failed; durability across a system crash is uncertain.".into()));
-        }
-        Ok(None)
+    /// Compare-and-set against the version this process last loaded, so
+    /// concurrent administration through another server is never lost.
+    pub(crate) fn save_keys(&self, keys: &Keys) -> Result<()> {
+        let version = crate::clickhouse::save_registry(
+            &self.clickhouse,
+            self.clickhouse.loaded_version(),
+            &serde_json::to_vec_pretty(keys)?,
+        )?;
+        self.clickhouse.set_loaded_version(version);
+        Ok(())
     }
 }
 

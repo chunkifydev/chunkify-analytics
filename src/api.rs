@@ -72,11 +72,6 @@ impl ApiError {
         }
     }
 }
-impl From<duckdb::Error> for ApiError {
-    fn from(_: duckdb::Error) -> Self {
-        Self::internal()
-    }
-}
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut response = (self.status, Json(json!({"error": self.message}))).into_response();
@@ -168,6 +163,22 @@ pub fn router(
         .with_state(app)
 }
 
+// An unknown key may have just been created through another analytics server
+// or the CLI; refresh the shared registry once before refusing it.
+async fn authorize(app: &App, secret: &str, permission: Permission) -> Result<Resolved, ApiError> {
+    match app.projects.authorize(secret, permission) {
+        Err(error) if error.status == StatusCode::UNAUTHORIZED => {
+            let arrived = std::time::Instant::now();
+            if app.admin.sync_after_miss(arrived).await {
+                app.projects.authorize(secret, permission)
+            } else {
+                Err(error)
+            }
+        }
+        result => result,
+    }
+}
+
 async fn access(
     State(app): State<App>,
     mut request: Request,
@@ -186,24 +197,22 @@ async fn access(
         app.admin.authorize_admin(&bearer(request.headers()))?;
         None
     } else if ingest && request.method() != Method::OPTIONS {
-        Some(
-            app.projects.authorize(
-                request
-                    .headers()
-                    .get("x-chunkify-ingest-key")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or(""),
-                Permission::Public,
-            )?,
-        )
+        let key = request
+            .headers()
+            .get("x-chunkify-ingest-key")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        Some(authorize(&app, &key, Permission::Public).await?)
     } else if !ingest && (request.uri().path().starts_with("/v1/") || mcp) {
         let secret = request
             .headers()
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .unwrap_or("");
-        let resolved = app.projects.authorize(secret, Permission::Secret)?;
+            .unwrap_or("")
+            .to_owned();
+        let resolved = authorize(&app, &secret, Permission::Secret).await?;
         let analytics_read = matches!(*request.method(), Method::GET | Method::HEAD)
             && matches!(
                 request.uri().path(),
@@ -343,7 +352,12 @@ async fn ingest(
     event::validate(&event)?;
     let inserted = app
         .store
-        .insert(&resolved.project, &resolved.key_id, event, Some(context))
+        .insert(
+            &resolved.project,
+            &resolved.key_id,
+            vec![event::IncomingEvent { event, otlp: None }],
+            Some(context),
+        )
         .await?
         > 0;
     Ok((
@@ -561,14 +575,7 @@ async fn events(
     ))
 }
 async fn health(State(app): State<App>) -> Result<Json<Value>, ApiError> {
-    app.store.check_read_index()?;
-    app.store
-        .call("health", |db| {
-            db.query_row("SELECT 1", [], |row| row.get::<_, i32>(0))?;
-            Ok(())
-        })
-        .await?;
-    app.store.check_read_index()?;
+    app.store.health().await?;
     Ok(Json(json!({ "status": "ok" })))
 }
 

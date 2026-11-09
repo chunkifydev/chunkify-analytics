@@ -21,28 +21,19 @@ function integer(name, fallback, min, max) {
 const seconds = integer("CHUNKIFY_LOAD_SECONDS", 30, 5, 300);
 const preload = integer("CHUNKIFY_LOAD_PRELOAD_EVENTS", 50000, 0, 100000);
 const concurrency = integer("CHUNKIFY_LOAD_CONCURRENCY", 128, 1, 4096);
-const profile = integer("CHUNKIFY_LOAD_PROFILE", 0, 0, 1) === 1;
 const queries = integer("CHUNKIFY_LOAD_QUERIES", 1, 0, 1) === 1;
 const browserContext = integer("CHUNKIFY_LOAD_BROWSER_CONTEXT", 0, 0, 1) === 1;
 const write_settings = {};
 const writeFields = { BATCH_MAX_EVENTS: "batch.max_events", BATCH_MAX_BYTES: "batch.max_bytes",
-  BATCH_DELAY_MS: "batch.delay_ms", QUEUE_MAX_BYTES: "batch.queue_max_bytes", QUEUE_MAX_REQUESTS: "batch.queue_max_requests",
-  CHECKPOINT_THRESHOLD_MIB: "duckdb.checkpoint_threshold_mib" };
+  BATCH_DELAY_MS: "batch.delay_ms", QUEUE_MAX_BYTES: "batch.queue_max_bytes", QUEUE_MAX_REQUESTS: "batch.queue_max_requests" };
 for (const [name, fallback, min, max] of [
-  ["BATCH_MAX_EVENTS", 100, 1, 10000], ["BATCH_MAX_BYTES", 1048576, 1, 67108864],
-  ["BATCH_DELAY_MS", 10, 0, 1000], ["QUEUE_MAX_BYTES", 16777216, 1, 268435456],
-  ["QUEUE_MAX_REQUESTS", 256, 1, 4096],
-  ["CHECKPOINT_THRESHOLD_MIB", 16, 1, 1024],
+  ["BATCH_MAX_EVENTS", 10000, 1, 10000], ["BATCH_MAX_BYTES", 10485760, 1, 67108864],
+  ["BATCH_DELAY_MS", 10, 0, 1000], ["QUEUE_MAX_BYTES", 33554432, 1, 268435456],
+  ["QUEUE_MAX_REQUESTS", 4096, 1, 4096],
 ]) {
   if (process.env[`CHUNKIFY_LOAD_${name}`] !== undefined) {
     write_settings[writeFields[name]] = String(integer(`CHUNKIFY_LOAD_${name}`, fallback, min, max));
   }
-}
-if (process.env.CHUNKIFY_LOAD_READ_WORKER === "1") write_settings["experimental.read_worker"] = "true";
-const insertMode = process.env.CHUNKIFY_LOAD_INSERT_MODE;
-if (insertMode !== undefined) {
-  if (!["row", "bulk"].includes(insertMode)) throw new Error("CHUNKIFY_LOAD_INSERT_MODE must be row or bulk");
-  write_settings["batch.insert_mode"] = insertMode;
 }
 const cases = [
   ...[100, 200, 400, 500, 750, 800, 1000, 1600, 2000, 3000, 4000].map((rate) => ({ name: `native-${rate}`, rate })),
@@ -60,15 +51,7 @@ const cases = [
 const selected = process.env.CHUNKIFY_LOAD_CASES?.split(",");
 for (const arg of process.argv.slice(2)) if (arg !== "--list") throw new Error(`Unknown argument: ${arg}. Use --list or configure CHUNKIFY_LOAD_* environment variables.`);
 for (const name of selected ?? []) if (!cases.some((item) => item.name === name)) throw new Error(`Unknown benchmark case: ${name}`);
-let plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, profile, queries, write_settings, ...item }));
-const compareReads = integer("CHUNKIFY_LOAD_COMPARE_READS", 0, 0, 1) === 1;
-if (compareReads) {
-  if (plan.length !== 1) throw new Error("Read-worker comparison requires exactly one selected workload");
-  plan = [
-    { ...plan[0], name: `${plan[0].name}-shared-worker`, write_settings: { ...write_settings, "experimental.read_worker": "false" } },
-    { ...plan[0], name: `${plan[0].name}-separate-reader`, write_settings: { ...write_settings, "experimental.read_worker": "true" } },
-  ];
-}
+const plan = cases.filter((item) => !selected || selected.includes(item.name)).map((item) => ({ seconds, concurrency, queries, write_settings, ...item }));
 if (process.argv.includes("--list")) {
   console.log(JSON.stringify({ cases: plan, thresholds, safety, generator_runtime, container_limits: containerLimits }, null, 2));
 } else {
@@ -122,16 +105,13 @@ if (process.argv.includes("--list")) {
   const workload = await captureWorkload({ browserContext });
   report.workload = workload.description;
   await save();
-  const fixture = compareReads ? {} : undefined;
-  try {
   for (const config of plan) {
     console.error(`Measuring ${config.name} for ${config.seconds}s${config.preload ? ` after preloading ${config.preload} events` : ""}...`);
     try {
-      const result = await measure(config, workload, { signal: controller.signal, fixture,
+      const result = await measure(config, workload, { signal: controller.signal,
         async onProgress(update) { (report.progress ??= []).push({ case: config.name, ...update }); await save(); },
       });
       report.results.push(result);
-      if (fixture) global.gc?.();
       await save();
       console.error(`${result.requests.successful_per_second} successful requests/s; ${result.records.newly_acknowledged_per_second} new events/s; successful p95 ${result.successful_request_latency.p95_ms}ms; failures ${JSON.stringify(result.requests.failures)}; probe thresholds ${result.meets_probe_thresholds ? "met" : "not met"}; full-delivery thresholds ${result.meets_full_delivery_thresholds ? "met" : "not met"}`);
       if (!result.completed) {
@@ -147,7 +127,6 @@ if (process.argv.includes("--list")) {
       break;
     }
   }
-  } finally { if (fixture?.volume) await docker(["volume", "rm", fixture.volume]); }
   if (report.status === "running") report.status = "completed";
   report.finished_at = new Date().toISOString();
   await save();

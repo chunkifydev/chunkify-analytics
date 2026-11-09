@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
@@ -6,6 +6,7 @@ import { configSource } from "../configuration.mjs";
 
 const execute = promisify(execFile);
 export const image = process.env.CHUNKIFY_IMAGE ?? "chunkify-analytics:test";
+export const clickhouseImage = process.env.CHUNKIFY_CLICKHOUSE_IMAGE ?? "clickhouse/clickhouse-server:26.10";
 
 export async function docker(args) {
   const { stdout } = await execute("docker", args, { timeout: 60000, maxBuffer: 1024 * 1024 });
@@ -17,18 +18,69 @@ async function containerLogs(name) {
   return `${stdout}\n${stderr}`;
 }
 
-// Docker CLI and public HTTP interfaces only. Never open the database directly.
+// One ClickHouse container and private network per test process. Each analytics
+// container uses its own database, so tests stay isolated.
+let shared;
+export function clickhouse() {
+  shared ??= (async () => {
+    const id = randomUUID();
+    const network = `chunkify-test-${id}`;
+    const name = `chunkify-clickhouse-test-${id}`;
+    await docker(["network", "create", network]);
+    await docker(["run", "-d", "--name", name, "--network", network, "--network-alias", "clickhouse",
+      "--ulimit", "nofile=262144:262144", "--env", "CLICKHOUSE_SKIP_USER_SETUP=1", clickhouseImage]);
+    process.once("exit", () => {
+      try {
+        execFileSync("docker", ["rm", "-f", name], { stdio: "ignore" });
+        execFileSync("docker", ["network", "rm", network], { stdio: "ignore" });
+      } catch {}
+    });
+    const deadline = Date.now() + 60000;
+    while (true) {
+      try {
+        await docker(["exec", name, "clickhouse-client", "--query", "SELECT 1"]);
+        break;
+      } catch (error) {
+        if (Date.now() > deadline) throw new Error(`ClickHouse did not start: ${await containerLogs(name)}`);
+        await delay(500);
+      }
+    }
+    return { name, network, url: "http://clickhouse:8123" };
+  })();
+  return shared;
+}
+
+// Run SQL inside the shared ClickHouse container.
+export async function clickhouseQuery(query) {
+  const server = await clickhouse();
+  return docker(["exec", server.name, "clickhouse-client", "--query", query]);
+}
+
+async function copyDatabase(source, destination) {
+  await clickhouseQuery(`CREATE DATABASE ${destination}`);
+  for (const table of ["events", "registry"]) {
+    await clickhouseQuery(`CREATE TABLE ${destination}.${table} AS ${source}.${table}`);
+    await clickhouseQuery(`INSERT INTO ${destination}.${table} SELECT * FROM ${source}.${table}`);
+  }
+}
+
+// Docker CLI and public HTTP interfaces only, except ClickHouse snapshots.
 export async function containerCollector({ settings = {}, resources = [], environment = {}, seed } = {}) {
+  const store = await clickhouse();
   const volume = `chunkify-collector-test-${randomUUID()}`;
+  const database = `chunkify_${randomUUID().replaceAll("-", "_")}`;
   let name;
   const server = {
     volume,
+    database,
+    clickhouse: store,
     async start() {
       name = `${volume}-${randomUUID()}`;
       server.name = name;
       await docker(["run", "-d", "--name", name, "--read-only", "--tmpfs", "/tmp:rw,nosuid,noexec,size=64m",
-        "--cap-drop=ALL", "--security-opt=no-new-privileges", "-p", "127.0.0.1::4174",
-        "--mount", `type=volume,src=${volume},dst=/data`,
+        "--cap-drop=ALL", "--security-opt=no-new-privileges", "-p", "127.0.0.1::4174", "--network", store.network,
+        "--mount", `type=volume,src=${volume},dst=/data,readonly`,
+        "--env", `CHUNKIFY_CLICKHOUSE_URL=${store.url}`, "--env", `CHUNKIFY_CLICKHOUSE_DATABASE=${database}`,
         ...Object.entries(environment).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
         ...resources, image]);
       const address = await docker(["port", name, "4174/tcp"]);
@@ -50,12 +102,15 @@ export async function containerCollector({ settings = {}, resources = [], enviro
       name = undefined;
       return state;
     },
+    // Copy this server's database, to start another server from the same data.
     async snapshot() {
       if (name) throw new Error("Stop collector before snapshot");
-      const snapshot = `chunkify-collector-test-${randomUUID()}`;
-      await docker(["volume", "create", snapshot]);
-      try { await copyVolume(volume, snapshot); return snapshot; }
-      catch (error) { await docker(["volume", "rm", snapshot]); throw error; }
+      const snapshot = `chunkify_${randomUUID().replaceAll("-", "_")}`;
+      await copyDatabase(database, snapshot);
+      return snapshot;
+    },
+    async command(...args) {
+      return docker(["exec", name, "chunkify-analytics", ...args]);
     },
     async get(path) {
       const response = await fetch(`${server.url}${path}`, {
@@ -64,18 +119,23 @@ export async function containerCollector({ settings = {}, resources = [], enviro
       if (!response.ok) throw new Error(`Read API returned ${response.status}: ${await response.text()}`);
       return response.json();
     },
-    async close({ preserveVolume = false } = {}) {
+    async close({ preserveDatabase = false } = {}) {
       if (name) await docker(["rm", "-f", name]);
-      if (!preserveVolume) await docker(["volume", "rm", volume]);
+      await docker(["volume", "rm", volume]);
+      if (!preserveDatabase) await clickhouseQuery(`DROP DATABASE IF EXISTS ${database}`);
     },
   };
   await docker(["volume", "create", volume]);
   try {
-    if (seed) await copyVolume(seed, volume);
+    if (seed) await copyDatabase(seed, database);
+    // Servers poll the shared registry; keep CLI changes quick to apply in tests.
+    // Tests read right after ingesting, so reports stay exact unless a test asks for lag.
+    const config = configSource({ "clickhouse.registry_refresh_seconds": "1", "clickhouse.rollup_max_lag_seconds": "0", ...settings });
     await docker(["run", "--rm", "--user=0:0", "--network=none", "--mount", `type=volume,src=${volume},dst=/data`,
       "--entrypoint", "sh", image, "-c", 'umask 077; printf %s "$1" > /data/config.toml; chown 10001:10001 /data/config.toml',
-      "sh", configSource(settings)]);
-    const run = args => docker(["run", "--rm", "--mount", `type=volume,src=${volume},dst=/data`, image, ...args]);
+      "sh", config]);
+    const run = args => docker(["run", "--rm", "--network", store.network, "--mount", `type=volume,src=${volume},dst=/data,readonly`,
+      "--env", `CHUNKIFY_CLICKHOUSE_URL=${store.url}`, "--env", `CHUNKIFY_CLICKHOUSE_DATABASE=${database}`, image, ...args]);
     if (!seed) server.keys = JSON.parse(await run(["init"]));
     else {
       server.keys = {};
@@ -91,8 +151,11 @@ export async function containerCollector({ settings = {}, resources = [], enviro
   }
 }
 
-async function copyVolume(source, destination) {
-  await docker(["run", "--rm", "--user=0:0", "--network=none", "--mount", `type=volume,src=${source},dst=/source,readonly`,
-    "--mount", `type=volume,src=${destination},dst=/data`, "--entrypoint", "sh", image,
-    "-c", "cp -a /source/. /data/ && chown 10001:10001 /data"]);
+// Wait for running servers to adopt a registry change made through the CLI.
+export async function eventually(check, message) {
+  const deadline = Date.now() + 15000;
+  while (!(await check())) {
+    if (Date.now() > deadline) throw new Error(message);
+    await delay(200);
+  }
 }

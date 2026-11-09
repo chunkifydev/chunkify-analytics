@@ -196,6 +196,10 @@ pub struct Project {
     pub keys: Vec<Credential>,
     #[serde(default)]
     pub settings: Settings,
+    /// Events received before this time expired under an earlier retention
+    /// policy. They stay hidden, and are deleted, even if retention grows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expired_before_ms: Option<i64>,
 }
 
 pub fn primary_project(public_key: &str, secret_key: &str) -> Project {
@@ -204,6 +208,7 @@ pub fn primary_project(public_key: &str, secret_key: &str) -> Project {
         id: default_project(),
         name: "Default project".into(),
         settings: Settings::default(),
+        expired_before_ms: None,
         keys: vec![
             Credential {
                 id: "primary-public".into(),
@@ -599,7 +604,7 @@ pub fn apply_command(
                 }
                 output = serde_json::json!({"project_id": id, "name": name, "public_key": public_key, "secret_key": secret_key,
                     "retention_seconds": settings.retention_seconds, "restart_required": true});
-                list.push(Project { id, name: name.clone(), settings, keys: vec![ingest, project_key], deleted: false });
+                list.push(Project { id, name: name.clone(), settings, keys: vec![ingest, project_key], deleted: false, expired_before_ms: None });
             }
             ("project-rename", [id, name]) => {
                 let project = active_project_mut(&mut list, id)?;

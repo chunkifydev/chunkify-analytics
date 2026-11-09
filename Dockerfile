@@ -2,11 +2,7 @@
 FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS build
 WORKDIR /app
 ARG TARGETARCH
-COPY scripts/install-duckdb.sh /tmp/install-duckdb.sh
-RUN sh /tmp/install-duckdb.sh /opt/duckdb "$TARGETARCH"
-ENV DUCKDB_LIB_DIR=/opt/duckdb LD_LIBRARY_PATH=/opt/duckdb
-COPY Cargo.toml Cargo.lock build.rs ./
-COPY .cargo ./.cargo
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY openapi.json ./
 ARG BUILD_JOBS=2
@@ -26,21 +22,19 @@ RUN rm -f /etc/apt/sources.list.d/debian.sources \
        'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/20261005T000000Z bookworm-security main' \
        > /etc/apt/sources.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl libstdc++6 \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 collector \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin collector \
     && install -d -m 0700 -o 10001 -g 10001 /data
 COPY --from=build /usr/local/bin/chunkify-analytics /usr/local/bin/
-COPY --from=build /opt/duckdb/libduckdb.so /usr/local/lib/
 COPY LICENSE /usr/share/doc/chunkify-analytics/LICENSE
-COPY docs/licenses/duckdb.txt /usr/share/doc/chunkify-analytics/LICENSE-DuckDB
 COPY docs/licenses/db-ip.txt /usr/share/doc/chunkify-analytics/LICENSE-DB-IP
 COPY scripts/install-geolocation.sh /tmp/install-geolocation.sh
 RUN sh /tmp/install-geolocation.sh /usr/local/share/chunkify-analytics \
     && rm /tmp/install-geolocation.sh
-RUN ldconfig
-ENV CHUNKIFY_DATA_DIR=/data CHUNKIFY_BIND=0.0.0.0:4174
+# The server keeps no state in the container. /data holds config.toml.
+ENV CHUNKIFY_BIND=0.0.0.0:4174
 USER 10001:10001
 WORKDIR /data
 EXPOSE 4174

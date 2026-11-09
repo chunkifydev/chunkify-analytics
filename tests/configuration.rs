@@ -35,12 +35,58 @@ impl Drop for Fixture {
     }
 }
 
+fn clickhouse() -> String {
+    std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL").unwrap_or_else(|_| "http://127.0.0.1:8123".into())
+}
+
+fn sql(query: &str) -> String {
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let response = reqwest::Client::new()
+            .post(clickhouse())
+            .body(query.to_owned())
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        response.text().await.unwrap()
+    })
+}
+
+/// A new database name, dropped with the guard.
+struct Database(String);
+impl Database {
+    fn new() -> Self {
+        Self(format!(
+            "chunkify_settings_{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+    fn initialized(&self) -> bool {
+        sql(&format!(
+            "SELECT count() FROM system.tables WHERE database = '{}' AND name = 'registry'",
+            self.0
+        ))
+        .trim()
+            == "1"
+    }
+}
+impl Drop for Database {
+    fn drop(&mut self) {
+        sql(&format!("DROP DATABASE IF EXISTS {}", self.0));
+    }
+}
+
 #[test]
 fn dotenv_is_automatic_and_process_environment_has_priority() {
     let fixture = Fixture::new();
+    let database = Database::new();
     std::fs::write(
         fixture.0.join(".env"),
-        "CHUNKIFY_DATA_DIR=from-dotenv\nCHUNKIFY_BIND=invalid\n",
+        format!(
+            "CHUNKIFY_CLICKHOUSE_URL={}\nCHUNKIFY_CLICKHOUSE_DATABASE={}\nCHUNKIFY_BIND=invalid\n",
+            clickhouse(),
+            database.0
+        ),
     )
     .unwrap();
     assert!(!fixture.run(&["config", "check"]).status.success());
@@ -51,18 +97,34 @@ fn dotenv_is_automatic_and_process_environment_has_priority() {
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    assert!(fixture.0.join("from-dotenv/keys.json").is_file());
+    assert!(database.initialized());
 }
 
 #[test]
-fn an_explicit_env_file_replaces_dotenv_and_cli_overrides_its_data_directory() {
+fn an_explicit_env_file_replaces_dotenv() {
     let fixture = Fixture::new();
-    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_BIND=invalid\n").unwrap();
-    std::fs::write(fixture.0.join("custom.env"), "CHUNKIFY_DATA_DIR=unused\n").unwrap();
-    let output = fixture.run(&["--env-file", "custom.env", "init", "--data-dir", "chosen"]);
+    let (chosen, unused) = (Database::new(), Database::new());
+    std::fs::write(
+        fixture.0.join(".env"),
+        format!(
+            "CHUNKIFY_BIND=invalid\nCHUNKIFY_CLICKHOUSE_DATABASE={}\n",
+            unused.0
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        fixture.0.join("custom.env"),
+        format!(
+            "CHUNKIFY_CLICKHOUSE_URL={}\nCHUNKIFY_CLICKHOUSE_DATABASE={}\n",
+            clickhouse(),
+            chosen.0
+        ),
+    )
+    .unwrap();
+    let output = fixture.run(&["--env-file", "custom.env", "init"]);
     assert!(output.status.success(), "{output:?}");
-    assert!(fixture.0.join("chosen/keys.json").is_file());
-    assert!(!fixture.0.join("unused").exists());
+    assert!(chosen.initialized());
+    assert!(!unused.initialized());
 }
 
 #[test]
@@ -99,51 +161,55 @@ fn dotenv_does_not_search_parent_directories() {
 }
 
 #[test]
-fn toml_dotenv_environment_and_cli_are_merged_in_priority_order() {
+fn toml_dotenv_and_environment_are_merged_in_priority_order() {
     let fixture = Fixture::new();
+    let (toml, dotenv, environment) = (Database::new(), Database::new(), Database::new());
     std::fs::write(
         fixture.0.join("config.toml"),
-        "data_dir = 'toml-data'\n[retention]\nseconds = 0\n",
+        format!(
+            "[clickhouse]\nurl = '{}'\ndatabase = '{}'\n[retention]\nseconds = 0\n",
+            clickhouse(),
+            toml.0
+        ),
     )
     .unwrap();
     assert!(fixture.run(&["init"]).status.success());
-    assert!(fixture.0.join("toml-data/keys.json").is_file());
-    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_DATA_DIR=dotenv-data\n").unwrap();
+    assert!(toml.initialized());
+    std::fs::write(
+        fixture.0.join(".env"),
+        format!("CHUNKIFY_CLICKHOUSE_DATABASE={}\n", dotenv.0),
+    )
+    .unwrap();
     assert!(fixture.run(&["init"]).status.success());
-    assert!(fixture.0.join("dotenv-data/keys.json").is_file());
+    assert!(dotenv.initialized());
     let output = fixture
         .command()
         .args(["init"])
-        .env("CHUNKIFY_DATA_DIR", "environment-data")
+        .env("CHUNKIFY_CLICKHOUSE_DATABASE", &environment.0)
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    assert!(fixture.0.join("environment-data/keys.json").is_file());
-    let output = fixture
-        .command()
-        .args(["init", "--data-dir", "cli-data"])
-        .env("CHUNKIFY_DATA_DIR", "unused")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert!(fixture.0.join("cli-data/keys.json").is_file());
-    assert!(!fixture.0.join("unused").exists());
+    assert!(environment.initialized());
 }
 
 #[test]
-fn explicit_toml_replaces_default_and_resolves_data_relative_to_its_location() {
+fn explicit_toml_replaces_the_default_file() {
     let fixture = Fixture::new();
+    let database = Database::new();
     std::fs::write(fixture.0.join("config.toml"), "unknown = true").unwrap();
     std::fs::create_dir(fixture.0.join("settings")).unwrap();
     std::fs::write(
         fixture.0.join("settings/production.toml"),
-        "data_dir = './state'\n",
+        format!(
+            "[clickhouse]\nurl = '{}'\ndatabase = '{}'\n",
+            clickhouse(),
+            database.0
+        ),
     )
     .unwrap();
     let output = fixture.run(&["--config", "settings/production.toml", "init"]);
     assert!(output.status.success(), "{output:?}");
-    assert!(fixture.0.join("settings/state/keys.json").is_file());
-    assert!(!fixture.0.join("state").exists());
+    assert!(database.initialized());
 }
 
 #[test]
@@ -194,6 +260,10 @@ fn application_settings_are_toml_only_except_deployment_overrides() {
     )
     .unwrap();
     let removed = [
+        "CHUNKIFY_DATA_DIR",
+        "CHUNKIFY_STORAGE_BACKEND",
+        "CHUNKIFY_S3_URL",
+        "CHUNKIFY_S3_USE_SSL",
         "CHUNKIFY_LOCAL_PATH",
         "CHUNKIFY_PROFILE",
         "CHUNKIFY_ALLOWED_ORIGINS",
@@ -209,10 +279,6 @@ fn application_settings_are_toml_only_except_deployment_overrides() {
         "CHUNKIFY_BATCH_DELAY_MS",
         "CHUNKIFY_QUEUE_MAX_BYTES",
         "CHUNKIFY_QUEUE_MAX_REQUESTS",
-        "CHUNKIFY_INSERT_MODE",
-        "CHUNKIFY_DUCKDB_THREADS",
-        "CHUNKIFY_CHECKPOINT_THRESHOLD_MIB",
-        "CHUNKIFY_EXPERIMENTAL_READ_WORKER",
         "CHUNKIFY_MCP_ENABLED",
         "CHUNKIFY_MCP_ALLOWED_HOSTS",
     ];
@@ -281,116 +347,50 @@ fn mcp_endpoint_settings_reject_invalid_values_and_empty_host_policies() {
 }
 
 #[test]
-fn s3_toml_accepts_r2_and_checks_settings_without_connecting_or_printing_secrets() {
-    let fixture = Fixture::new();
-    let source = "[storage]\nbackend = 's3'\nurl = 's3://analytics/production/'\nendpoint = 'account.r2.cloudflarestorage.com'\nregion = 'auto'\naccess_key_id = 'test-access'\nsecret_access_key = 'private-test-secret'\nurl_style = 'path'\nuse_ssl = true\n";
-    std::fs::write(fixture.0.join("config.toml"), source).unwrap();
-    let output = fixture.run(&["config", "check"]);
-    assert!(output.status.success(), "{output:?}");
-    assert!(!fixture.0.join("data").exists());
-    for invalid in [
-        source.replace("backend = 's3'", "backend = 'unknown'"),
-        source.replace(
-            "url = 's3://analytics/production/'",
-            "url = 'https://analytics/production/'",
-        ),
-        source.replace("secret_access_key = 'private-test-secret'", ""),
-        source.replace("url_style = 'path'", "url_style = 'unknown'"),
-        source.replace(
-            "account.r2.cloudflarestorage.com",
-            "https://account.r2.cloudflarestorage.com",
-        ),
-        format!("{source}\n[experimental]\ndurable_queue = true"),
-    ] {
-        std::fs::write(fixture.0.join("config.toml"), invalid).unwrap();
-        let output = fixture.run(&["config", "check"]);
-        assert!(!output.status.success(), "{output:?}");
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test-secret"));
-    }
-    std::fs::write(fixture.0.join("config.toml"), source).unwrap();
-    assert!(
-        fixture
-            .command()
-            .args(["config", "check"])
-            .env("CHUNKIFY_S3_REGION", "us-east-1")
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-}
-
-#[test]
-fn storage_backend_dotenv_works_without_toml_and_process_environment_has_priority() {
-    let fixture = Fixture::new();
-    std::fs::write(fixture.0.join(".env"), "CHUNKIFY_STORAGE_BACKEND=s3\n").unwrap();
-    let output = fixture.run(&["config", "check"]);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("S3 storage requires storage.url"));
-
-    let output = fixture
-        .command()
-        .args(["config", "check"])
-        .env("CHUNKIFY_S3_URL", "s3://analytics/production/")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert!(!fixture.0.join("data").exists());
-
-    let output = fixture
-        .command()
-        .args(["config", "check"])
-        .env("CHUNKIFY_STORAGE_BACKEND", "local")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-}
-
-#[test]
-fn s3_environment_overrides_toml_and_validates_addressing() {
+fn clickhouse_environment_overrides_toml_without_printing_secrets() {
     let fixture = Fixture::new();
     std::fs::write(
         fixture.0.join("config.toml"),
-        "[storage]\nbackend = 'local'\nurl_style = 'invalid'\n",
+        "[clickhouse]\nurl = 'invalid url'\npassword = 'private-test-secret'\n",
     )
     .unwrap();
-    let overrides = [
-        ("CHUNKIFY_STORAGE_BACKEND", "s3"),
-        ("CHUNKIFY_S3_URL", "s3://analytics/production/"),
-        ("CHUNKIFY_S3_ENDPOINT", "account.r2.cloudflarestorage.com"),
-        ("CHUNKIFY_S3_REGION", "auto"),
-        ("CHUNKIFY_S3_ACCESS_KEY_ID", "test-access"),
-        ("CHUNKIFY_S3_SECRET_ACCESS_KEY", "private-test-secret"),
-        ("CHUNKIFY_S3_SESSION_TOKEN", "private-test-token"),
-        ("CHUNKIFY_S3_URL_STYLE", "vhost"),
-        ("CHUNKIFY_S3_USE_SSL", "true"),
-    ];
+    let output = fixture.run(&["config", "check"]);
+    assert!(!output.status.success());
+    let message = String::from_utf8_lossy(&output.stderr);
+    assert!(message.contains("clickhouse.url"), "{message}");
+    assert!(!message.contains("private-test-secret"));
     let output = fixture
         .command()
         .args(["config", "check"])
-        .envs(overrides)
+        .env(
+            "CHUNKIFY_CLICKHOUSE_URL",
+            "https://clickhouse.example.com:8443",
+        )
+        .env("CHUNKIFY_CLICKHOUSE_DATABASE", "analytics")
+        .env("CHUNKIFY_CLICKHOUSE_USER", "chunkify")
+        .env("CHUNKIFY_CLICKHOUSE_PASSWORD", "private-test-secret")
+        .env("CHUNKIFY_CLICKHOUSE_NODE_ID", "7")
         .output()
         .unwrap();
     assert!(output.status.success(), "{output:?}");
-    for (key, value) in [
-        ("CHUNKIFY_STORAGE_BACKEND", "invalid"),
-        ("CHUNKIFY_STORAGE_BACKEND", ""),
-        ("CHUNKIFY_S3_URL_STYLE", "invalid"),
-        ("CHUNKIFY_S3_USE_SSL", "invalid"),
-        ("CHUNKIFY_S3_URL", "https://invalid"),
-        ("CHUNKIFY_S3_ENDPOINT", "https://invalid"),
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("private-test-secret"));
+    for (name, value) in [
+        (
+            "CHUNKIFY_CLICKHOUSE_URL",
+            "http://user:private-test-secret@clickhouse:8123",
+        ),
+        ("CHUNKIFY_CLICKHOUSE_DATABASE", "bad-name"),
+        ("CHUNKIFY_CLICKHOUSE_NODE_ID", "64"),
     ] {
         let output = fixture
             .command()
             .args(["config", "check"])
-            .envs(overrides)
-            .env(key, value)
+            .env("CHUNKIFY_CLICKHOUSE_URL", "http://clickhouse:8123")
+            .env(name, value)
             .output()
             .unwrap();
-        assert!(!output.status.success());
-        let error = String::from_utf8_lossy(&output.stderr);
-        assert!(!error.contains("private-test-secret"));
-        assert!(!error.contains("private-test-token"));
+        assert!(!output.status.success(), "{name}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("private-test-secret"));
     }
 }
 

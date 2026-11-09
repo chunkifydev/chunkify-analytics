@@ -79,10 +79,12 @@ their fields; the SDK name does not select a different event format.
 string of 1 to 256 Unicode characters; empty or longer values reject the event.
 Reports use the values from each view's first retained start event.
 
-Local storage deduplicates event IDs within each project. The first accepted
-payload and context win; later duplicates do not enrich or replace them.
-S3 stores every delivery as a separate row, including repeated event IDs, and
-returns 201 with `{"accepted":true,"duplicate":false}` on success.
+Event IDs are deduplicated within each project. The first accepted payload and
+context win; later duplicates return 200 with
+`{"accepted":false,"duplicate":true}` and do not enrich or replace them.
+Servers check repeated IDs received within
+`clickhouse.deduplication_window_seconds` (7 days by default). See
+[duplicate deliveries](storage.md#duplicate-deliveries).
 
 The former `POST /v1/logs` and `GET /v1/ingestion` endpoints have been removed.
 Applications using the OTLP adapter with this analytics server must switch to the
@@ -137,8 +139,8 @@ invalid forwarding information produces unknown continent, country and city; the
 still accepted. Other forwarding headers are ignored. A gateway that batches
 multiple viewers' events will have one request location.
 
-Local storage keeps the first delivery's location. S3 keeps each delivery's
-location separately. Expiration removes location with its event. Arbitrary
+The first delivery's location is kept. Expiration removes location with its
+event. Arbitrary
 caller-supplied event properties remain unchanged; do not send IPs in them.
 Previously stored IP context is not retroactively deleted by this change.
 
@@ -717,7 +719,8 @@ continuous refill and burst capacities equal to those rates. Analytics reads
 have a separate budget of 120 uncached reads/minute with a burst of 20, at most
 16 queued/running per project and 32 executing server-wide. Up to 1024 unique
 reads can wait for a server slot. HTTP and MCP share these limits. Identical
-reports share queries and S3 reports can reuse results for up to one minute.
+reports share queries, and the optional report cache can reuse results for up
+to one minute.
 Cache hits consume no database slots or read-rate allowance; authentication
 still runs on every request. Raw events, sessions and exports bypass caching. See
 [configuration](configuration.md#read-and-export-limits) to override them.
@@ -747,10 +750,13 @@ cells. Strings that could be interpreted as spreadsheet formulas receive an
 apostrophe prefix. Empty exports contain headers.
 
 Normal analytics endpoints continue returning JSON. Interrupted or failed downloads
-terminate the stream; discard the partial file and retry the download. Reads
-use a consistent local database snapshot during ingestion and retention, including
-S3-backed installations. Large queries still consume database CPU, memory and
-storage I/O.
+terminate the stream; discard the partial file and retry the download. Raw
+event listings see the events stored when their query begins. Summary,
+engagement, quality, time series, breakdown and video reports, and their CSV
+exports, may lag them by up to about a minute; see
+[report rollups](storage.md#report-rollups). Paged
+reports keep the cohort of their first page. Large queries still consume ClickHouse CPU, memory
+and storage I/O.
 
 Behind an HTTPS ingress or a URL prefix, set `server.public_url` to the externally
 reachable analytics server base, for example `https://analytics.example.com/collector/`.

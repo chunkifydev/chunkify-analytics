@@ -1,4 +1,5 @@
-//! Manual, local CSV throughput check. Generated data and reports are disposable.
+//! Manual CSV throughput check against a disposable ClickHouse database
+//! (CHUNKIFY_TEST_CLICKHOUSE_URL, default http://127.0.0.1:8123).
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader},
@@ -67,6 +68,7 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }
+// The ClickHouse database is left for inspection; drop it after the run.
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "manual CSV throughput benchmark; run with --ignored --nocapture"]
@@ -80,29 +82,48 @@ async fn stream_large_exports_while_ingestion_continues() {
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir(&directory).unwrap();
-    std::fs::write(directory.join("config.toml"),"data_dir=\"state\"\nserver.bind=\"127.0.0.1:0\"\nserver.ingest_per_second=10000\nretention.seconds=0\nduckdb.threads=1\nbatch.delay_ms=1\nmcp.enabled=false\nrate_limits.export_downloads_per_minute=1000\n").unwrap();
+    let clickhouse = std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL")
+        .unwrap_or_else(|_| "http://127.0.0.1:8123".into());
+    let database = format!(
+        "chunkify_export_benchmark_{}",
+        uuid::Uuid::new_v4().simple()
+    );
+    std::fs::write(directory.join("config.toml"), format!("server.bind=\"127.0.0.1:0\"\nserver.ingest_per_second=10000\nretention.seconds=0\nbatch.delay_ms=1\nmcp.enabled=false\nrate_limits.export_downloads_per_minute=1000\nclickhouse.url={clickhouse:?}\nclickhouse.database={database:?}\n")).unwrap();
     let mut fixture = Fixture {
         directory,
         child: None,
     };
     let output = fixture.command().arg("init").output().unwrap();
     assert!(output.status.success());
-    fixture.start();
-    fixture.stop();
     let keys: Value = serde_json::from_slice(&output.stdout).unwrap();
     let started = Instant::now();
     {
-        let connection =
-            duckdb::Connection::open(fixture.directory.join("state/analytics.duckdb")).unwrap();
+        // Seed directly with one INSERT ... SELECT. Seeded event orders are
+        // small, so live events sort after them.
         let payload =
             json!({"benchmark_payload":"x".repeat(256),"sdk_name":"benchmark","sdk_version":"1"})
                 .to_string();
         let from = chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z")
             .unwrap()
             .timestamp_millis();
-        connection.execute("INSERT INTO events (event_id,project_id,view_id,video_id,viewer_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,context_browser_name,playing_time_ms)
-            SELECT 'event-'||i,'default','view-'||i,'video-'||(i%1000),'benchmark','chunkify.video.view_started',1,?+(i%2592000)*1000,?, ?,0,CASE WHEN i%2=0 THEN 'Chrome' ELSE 'Safari' END,0 FROM range(?) fixture(i)",duckdb::params![from,chrono::Utc::now().timestamp_millis(),payload,count as i64]).unwrap();
-        connection.execute_batch("CHECKPOINT").unwrap();
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut target = reqwest::Url::parse(&clickhouse).unwrap();
+        target
+            .query_pairs_mut()
+            .append_pair("database", &database)
+            .append_pair("param_payload", &payload);
+        let response = reqwest::Client::new()
+            .post(target)
+            .body(format!("INSERT INTO events (ingest_id,event_id,project_id,view_id,video_id,viewer_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,context_browser_name,playing_time_ms)
+                SELECT number + 1, concat('event-', toString(number)), 'default', concat('view-', toString(number)), concat('video-', toString(number % 1000)), 'benchmark', 'chunkify.video.view_started', 1, {from} + (number % 2592000) * 1000, {now}, {{payload:String}}, 0, if(number % 2 = 0, 'Chrome', 'Safari'), 0 FROM numbers({count})"))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            response.status().is_success(),
+            "{}",
+            response.text().await.unwrap()
+        );
     }
     eprintln!(
         "Seeded {count} synthetic events across a 30-day timestamp range in {:.2}s",

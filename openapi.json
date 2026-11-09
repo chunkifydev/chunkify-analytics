@@ -133,6 +133,9 @@
             "$ref": "#/components/parameters/viewer_id"
           },
           {
+            "$ref": "#/components/parameters/user_id"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -743,6 +746,9 @@
             "$ref": "#/components/parameters/viewer_id"
           },
           {
+            "$ref": "#/components/parameters/user_id"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -946,6 +952,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -1152,6 +1161,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -1367,6 +1379,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -1608,6 +1623,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -2920,6 +2938,9 @@
             "$ref": "#/components/parameters/viewer_id"
           },
           {
+            "$ref": "#/components/parameters/user_id"
+          },
+          {
             "$ref": "#/components/parameters/view_id"
           },
           {
@@ -2983,7 +3004,9 @@
                     {
                       "view_id": "616992d2-6db6-4578-8361-3f8813e963be",
                       "video_id": "video-123",
+                      "video_title": null,
                       "viewer_id": null,
+                      "user_id": null,
                       "started_at": "2026-10-19T12:00:00.000Z",
                       "browser_name": "Chrome",
                       "os_name": "Linux",
@@ -3149,7 +3172,9 @@
                   "view": {
                     "view_id": "616992d2-6db6-4578-8361-3f8813e963be",
                     "video_id": "video-123",
+                    "video_title": null,
                     "viewer_id": null,
+                    "user_id": null,
                     "started_at": "2026-10-19T12:00:00.000Z",
                     "browser_name": "Chrome",
                     "os_name": "Linux",
@@ -3319,6 +3344,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/view_id"
@@ -3512,6 +3540,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/view_id"
@@ -4140,6 +4171,9 @@
             "$ref": "#/components/parameters/viewer_id"
           },
           {
+            "$ref": "#/components/parameters/user_id"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -4349,6 +4383,9 @@
           },
           {
             "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -4637,7 +4674,17 @@
         "schema": {
           "type": "string"
         },
-        "description": "Exact supplied viewer ID. Missing/null viewer IDs do not match."
+        "description": "Exact viewer ID. The Chunkify player SDK generates one per browser; missing/null viewer IDs do not match."
+      },
+      "user_id": {
+        "name": "user_id",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "description": "Exact integrator-supplied user ID. Selects views by their start event; event lists match each event's own value. Missing/null user IDs do not match."
       },
       "event_name": {
         "name": "event_name",
@@ -4859,6 +4906,7 @@
             "device_type",
             "video_id",
             "viewer_id",
+            "user_id",
             "continent",
             "country",
             "city",
@@ -5087,7 +5135,26 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Anonymous browser identifier generated by the Chunkify player SDK and stored in the page's localStorage."
+          },
+          "user_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Optional integrator-supplied user ID, used to link views to the integrator's own users."
+          },
+          "video_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Optional human-readable video title for reports."
           },
           "reason": {
             "enum": [
@@ -6066,6 +6133,13 @@
           "video_id": {
             "type": "string"
           },
+          "video_title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Title from the most recently received selected start that supplied one."
+          },
           "views": {
             "type": "integer",
             "minimum": 0
@@ -6084,6 +6158,7 @@
         },
         "required": [
           "video_id",
+          "video_title",
           "views",
           "unique_viewers",
           "total_playing_time_ms",
@@ -8181,7 +8256,19 @@
           "video_id": {
             "type": "string"
           },
+          "video_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "viewer_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
             "type": [
               "string",
               "null"
@@ -8243,7 +8330,9 @@
         "required": [
           "view_id",
           "video_id",
+          "video_title",
           "viewer_id",
+          "user_id",
           "started_at",
           "browser_name",
           "os_name",
@@ -8372,6 +8461,7 @@
               "device_type",
               "video_id",
               "viewer_id",
+              "user_id",
               "continent",
               "country",
               "city",
@@ -8432,6 +8522,11 @@
           },
           "viewer_id": {
             "type": "string"
+          },
+          "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
           },
           "browser_name": {
             "type": "string",
@@ -8532,6 +8627,7 @@
               "device_type",
               "video_id",
               "viewer_id",
+              "user_id",
               "continent",
               "country",
               "city",

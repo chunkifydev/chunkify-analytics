@@ -838,6 +838,48 @@ test("ingestion validates SDK payloads and separates browser writes from private
   assert.equal(read.headers.get("access-control-allow-origin"), null);
 });
 
+test("optional user IDs and video titles are validated, filtered and reported", async (t) => {
+  const server = await collector(t);
+  const post = (body) => fetch(`${server.url}/v1/events`, {
+    method: "POST", headers: { "Content-Type": "application/json", "X-Chunkify-Ingest-Key": server.keys.public_key },
+    body: JSON.stringify(body),
+  });
+  const [start] = sdkEvents();
+  for (const bad of [{ user_id: 3 }, { user_id: "" }, { user_id: "u".repeat(257) },
+    { video_title: false }, { video_title: "" }, { video_title: "t".repeat(257) }]) {
+    assert.equal((await post({ ...start, ...bad })).status, 400, JSON.stringify(bad));
+  }
+  const tag = (events, changes) => events.map((event) => ({ ...event, ...changes }));
+  const first = tag(sdkEvents("video-a", "viewer-a"),
+    { user_id: "user-1", video_title: "Old title", occurred_at: "2026-10-15T12:00:00Z" });
+  // Limits count Unicode characters, not bytes.
+  const latestTitle = "🎬".repeat(256);
+  // Received last but with an earlier device clock: arrival order picks the title.
+  const second = tag(sdkEvents("video-a", "viewer-b"),
+    { user_id: "user-2", video_title: latestTitle, occurred_at: "2026-10-15T11:00:00Z" });
+  const third = tag(sdkEvents("video-b", "viewer-c"), { occurred_at: "2026-10-15T14:00:00Z" });
+  for (const event of [...first, ...second, ...third]) assert.equal((await post(event)).status, 201);
+
+  assert.equal((await server.get("/v1/summary?user_id=user-1")).views, 1);
+  const events = (await server.get("/v1/events?user_id=user-2")).events;
+  assert.equal(events.length, second.length);
+  assert.ok(events.every((record) => record.event.user_id === "user-2"));
+  const videos = (await server.get("/v1/videos")).videos;
+  assert.deepEqual(videos.map(({ video_id, video_title }) => ({ video_id, video_title })),
+    [{ video_id: "video-a", video_title: latestTitle }, { video_id: "video-b", video_title: null }]);
+  const [view] = (await server.get("/v1/views?user_id=user-1")).views;
+  assert.equal(view.user_id, "user-1");
+  assert.equal(view.video_title, "Old title");
+  assert.deepEqual((await server.get("/v1/dimensions/user_id")).values,
+    [{ value: null, views: 1 }, { value: "user-1", views: 1 }, { value: "user-2", views: 1 }]);
+  for (const query of ["user_id=", `user_id=${"u".repeat(257)}`]) {
+    const response = await fetch(`${server.url}/v1/summary?${query}`, {
+      headers: { Authorization: `Bearer ${server.keys.secret_key}` },
+    });
+    assert.equal(response.status, 400, query);
+  }
+});
+
 test("all seven SDK event types can be filtered and paged while new events arrive", async (t) => {
   const events = sdkPlayback(t);
   assert.equal(new Set(events.map((event) => event.event_name)).size, 7);
@@ -898,11 +940,11 @@ test("summaries count views and viewers and use final or latest cumulative playt
     { views: 2, unique_viewers: 1, total_playing_time_ms: 2500 });
   assert.deepEqual(await server.get("/v1/summary?video_id=absent"), { views: 0, unique_viewers: 0, total_playing_time_ms: 0 });
   const videos = await server.get("/v1/videos?limit=1");
-  assert.deepEqual(videos.videos, [{ video_id: "video-a", views: 2, unique_viewers: 1, total_playing_time_ms: 6000, playback_score: { value: null, sample_views: 0 } }]);
+  assert.deepEqual(videos.videos, [{ video_id: "video-a", video_title: null, views: 2, unique_viewers: 1, total_playing_time_ms: 6000, playback_score: { value: null, sample_views: 0 } }]);
   assert.ok(videos.next_cursor);
   await server.send(at(second.at(-1), "2026-10-15T12:00:03Z", { sequence: 4, playing_time_ms: 2500 }));
   const next = await server.get(`/v1/videos?limit=1&cursor=${encodeURIComponent(videos.next_cursor)}`);
-  assert.deepEqual(next.videos, [{ video_id: "video-b", views: 1, unique_viewers: 0, total_playing_time_ms: 500, playback_score: { value: null, sample_views: 0 } }]);
+  assert.deepEqual(next.videos, [{ video_id: "video-b", video_title: null, views: 1, unique_viewers: 0, total_playing_time_ms: 500, playback_score: { value: null, sample_views: 0 } }]);
   assert.equal(next.next_cursor, null);
   assert.equal((await server.get("/v1/summary")).total_playing_time_ms, 7000);
   await server.stop();

@@ -573,6 +573,7 @@ impl Contract {
                             | "page_path"
                             | "video_id"
                             | "viewer_id"
+                            | "user_id"
                     )
                 )
                 && data["values"].as_array().is_some_and(|rows| {
@@ -631,8 +632,9 @@ fn event_rows(data: &Value, max: usize) -> bool {
 fn view_metrics(v: &Value) -> bool {
     v["view_id"].is_string()
         && v["video_id"].is_string()
-        && v.get("viewer_id")
-            .is_some_and(|s| s.is_string() || s.is_null())
+        && ["viewer_id", "user_id", "video_title"]
+            .iter()
+            .all(|name| v.get(*name).is_some_and(|s| s.is_string() || s.is_null()))
         && v["started_at"]
             .as_str()
             .is_some_and(|s| crate::event::timestamp(s).is_ok())

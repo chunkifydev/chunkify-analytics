@@ -175,26 +175,13 @@ impl RemoteStore {
             .into_iter()
             .filter(|file| file.max_received >= policy.project_cutoff(&file.project, now))
             .collect();
-        let source = if retained.is_empty() {
-            "SELECT *, CAST(NULL AS VARCHAR) AS source_object FROM collector_parquet_stage"
-                .to_owned()
-        } else {
-            let paths = retained
-                .iter()
-                .map(|file| literal(&store.config.uri(&file.key)))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                "SELECT * EXCLUDE(filename), filename AS source_object FROM read_parquet([{paths}], filename = true, hive_partitioning = false)"
-            )
-        };
+        let paths: Vec<_> = retained
+            .iter()
+            .map(|file| store.config.uri(&file.key))
+            .collect();
         // The local index is disposable. S3 remains authoritative on every start.
         connection
-            .execute_batch(&format!(
-                "CREATE TABLE collector_query_index AS {source};
-            CREATE UNIQUE INDEX collector_query_order ON collector_query_index(ingest_id);
-            CREATE INDEX collector_query_project ON collector_query_index(project_id);"
-            ))
+            .execute_batch(&index_sql(&paths))
             .map_err(|_| "Cannot rebuild the S3 query index")?;
         store.next_id.store(
             previous
@@ -266,7 +253,7 @@ impl RemoteStore {
             .map(|file| literal(&self.config.uri(&file.key)))
             .collect();
         format!(
-            "read_parquet([{}], hive_partitioning = false)",
+            "read_parquet([{}], hive_partitioning = false, union_by_name = true)",
             paths.join(",")
         )
     }
@@ -388,5 +375,118 @@ impl RemoteStore {
             }
         }
         Ok(removed)
+    }
+}
+
+/// Builds the local query index from retained event files. Files written before
+/// a storage column existed lack it: matching by name fills such columns with
+/// NULL, so the index keeps the current layout that publishing appends to.
+fn index_sql(paths: &[String]) -> String {
+    let load = if paths.is_empty() {
+        String::new()
+    } else {
+        let paths = paths
+            .iter()
+            .map(|path| literal(path))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "INSERT INTO collector_query_index BY NAME SELECT * EXCLUDE(filename), filename AS source_object FROM read_parquet([{paths}], filename = true, hive_partitioning = false, union_by_name = true);"
+        )
+    };
+    format!(
+        "CREATE TABLE collector_query_index AS SELECT *, CAST(NULL AS VARCHAR) AS source_object FROM collector_parquet_stage LIMIT 0;
+        {load}
+        CREATE UNIQUE INDEX collector_query_order ON collector_query_index(ingest_id);
+        CREATE INDEX collector_query_project ON collector_query_index(project_id);"
+    )
+}
+
+#[cfg(test)]
+mod index_tests {
+    use super::*;
+    use duckdb::{params_from_iter, types::Value as SqlValue};
+    use serde_json::{Value, json};
+
+    fn stage(connection: &Connection, id: i64, changes: Value) {
+        let mut event = json!({"event_id": format!("event-{id}"), "view_id": "view", "video_id": "video",
+            "viewer_id": null, "event_name": "chunkify.video.view_started", "sequence": id,
+            "occurred_at": "2026-10-19T12:00:00Z", "schema_version": 1});
+        event
+            .as_object_mut()
+            .unwrap()
+            .extend(changes.as_object().unwrap().clone());
+        let values = crate::storage::encode(&event, None, 1_000 + id, "default", None)
+            .map_err(|e| e.message)
+            .unwrap();
+        let placeholders = vec!["?"; values.len() + 2].join(", ");
+        connection
+            .execute(
+                &format!("INSERT INTO collector_parquet_stage VALUES ({placeholders})"),
+                params_from_iter(
+                    std::iter::once(SqlValue::BigInt(id))
+                        .chain(values)
+                        .chain(std::iter::once(SqlValue::Null)),
+                ),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn index_loads_files_written_before_version_6_columns() {
+        let directory =
+            std::env::temp_dir().join(format!("chunkify-index-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let old = directory.join("old.parquet").display().to_string();
+        let new = directory.join("new.parquet").display().to_string();
+        let connection = Connection::open_in_memory().unwrap();
+        crate::storage::create_parquet_stage(&connection).unwrap();
+        // A version 5 file: no columns, values kept only in the remainder.
+        stage(&connection, 1, json!({}));
+        stage(&connection, 2, json!({}));
+        connection
+            .execute_batch(&format!(
+                "UPDATE collector_parquet_stage SET event_remainder = CASE ingest_id
+                    WHEN 1 THEN '{{\"user_id\":\"old-user\",\"video_title\":\"Old\"}}'
+                    ELSE '{{\"user_id\":\"\"}}' END;
+                COPY (SELECT * EXCLUDE(e_user_id, e_video_title, context_continent, context_country,
+                    context_city, context_page_origin, context_page_path) FROM collector_parquet_stage) TO {} (FORMAT parquet);
+                DELETE FROM collector_parquet_stage;",
+                literal(&old)
+            ))
+            .unwrap();
+        stage(&connection, 3, json!({"user_id": "new-user"}));
+        connection
+            .execute_batch(&format!(
+                "COPY (SELECT * FROM collector_parquet_stage) TO {} (FORMAT parquet);
+                DELETE FROM collector_parquet_stage;",
+                literal(&new)
+            ))
+            .unwrap();
+
+        connection.execute_batch(&index_sql(&[old, new])).unwrap();
+        let rows: Vec<(i64, Option<String>, Option<String>)> = connection
+            .prepare("SELECT ingest_id, e_user_id, e_video_title FROM collector_query_index ORDER BY ingest_id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<duckdb::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            [
+                (1, None, None),
+                (2, None, None),
+                (3, Some("new-user".into()), None),
+            ]
+        );
+        // Publishing appends staged rows by position, so the layout must match.
+        stage(&connection, 4, json!({}));
+        connection
+            .execute_batch(
+                "INSERT INTO collector_query_index SELECT *, 'batch' FROM collector_parquet_stage;",
+            )
+            .unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

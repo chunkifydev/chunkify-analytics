@@ -20,7 +20,7 @@ See the [OpenAPI specification](../openapi.json) for request and response schema
 | `GET /v1/engagement` | `Authorization: Bearer SECRET_KEY` | Average playing time per attempt and observed reached-end count/rate. |
 | `GET /v1/quality` | `Authorization: Bearer SECRET_KEY` | Startup percentiles, buffering and observed fatal errors, with sample counts. |
 | `GET /v1/timeseries` | `Authorization: Bearer SECRET_KEY` | Hourly/daily views, unique viewers and playing time; requires `from`, `to`, `interval`. |
-| `GET /v1/videos` | `Authorization: Bearer SECRET_KEY` | `{"videos":[{"video_id":"video-123","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
+| `GET /v1/videos` | `Authorization: Bearer SECRET_KEY` | `{"videos":[{"video_id":"video-123","video_title":"Pilot","views":3,"unique_viewers":1,"total_playing_time_ms":6500}],"next_cursor":null}` |
 
 Native ingestion accepts `Content-Type: application/json` and one complete schema
 version 1 event. It validates all seven event shapes emitted by the SDK. Malformed
@@ -64,6 +64,20 @@ that produced the event. It must be a string containing at least one
 non-whitespace character and is stored and returned unchanged. The server
 validates the event format through `schema_version`, supported event names, and
 their fields; the SDK name does not select a different event format.
+
+### Viewer, user and title fields
+
+- `viewer_id` identifies a browser, not a person. The Chunkify player SDK
+  generates a random ID, stores it in the page's `localStorage` and sends it with
+  every event. The same person on another browser or device, or after clearing
+  site data, gets a new ID. Other integrations may send `null`.
+- `user_id` is optional. Send your own user identifier to link views to your
+  users. Use an opaque ID, not an email or other personal data. It is not verified.
+- `video_title` is optional and is shown next to `video_id` in reports.
+
+`user_id` and `video_title` may be omitted or `null`. When present, each must be a
+string of 1 to 256 Unicode characters; empty or longer values reject the event.
+Reports use the values from each view's first retained start event.
 
 Local storage deduplicates event IDs within each project. The first accepted
 payload and context win; later duplicates do not enrich or replace them.
@@ -133,7 +147,7 @@ Pages displaying or using bundled DB-IP location results must include an
 
 ### Filters and pagination
 
-Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `view_id`,
+Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `user_id`, `view_id`,
 `browser_name`, `os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, and `page_path`. View detail accepts only timeline
 pagination; export downloads use their saved query. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
@@ -169,6 +183,10 @@ Ranking applies to all matching videos before pagination. Metric ties use
 GET /v1/videos?sort_by=total_playing_time_ms&order=desc&limit=10
 ```
 
+Each video includes `video_title` from the most recently received selected start
+that supplied one, or `null`. Arrival order is used rather than the client's
+occurrence time, so a viewer's wrong device clock cannot keep an old title.
+
 Keep the same filters, `sort_by` and `order` with every cursor; changing them
 returns 400. Video cursors from earlier versions are invalid; start a new
 pagination sequence after upgrading. A pagination sequence is limited to events
@@ -199,9 +217,10 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
 - A view without a retained start event is excluded from summaries. Its events
   remain available through raw queries. Duplicate starts for one view use the
   first start by SDK sequence, occurrence time, then ingestion order.
-- Unique viewers are distinct non-null supplied `viewer_id` values on selected
-  starts. Anonymous views still count as views. This does not identify verified
-  people, and per-video viewer counts should not be summed for a global count.
+- Unique viewers are distinct non-null `viewer_id` values on selected starts.
+  Views without a viewer ID still count as views. A viewer ID approximates a
+  browser, not a verified person, and per-video viewer counts should not be
+  summed for a global count.
 - Final events do not imply video completion. Missing events can make metrics
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
@@ -586,7 +605,7 @@ report through `get_metrics` with `kind=renditions`, bounded to 100 ranked rows.
 ### Playback attempts and event history
 
 `GET /v1/views` returns `views` and `next_cursor`. Each row describes one attempt
-with a retained start: `view_id`, `video_id`, `viewer_id`, `started_at`, browser,
+with a retained start: `view_id`, `video_id`, `video_title`, `viewer_id`, `user_id`, `started_at`, browser,
 OS and device names, `playing_time_ms`, optional `startup_time_ms` and
 `rebuffer_duration_ms`, and the booleans `reached_end`, `has_ended_event` and
 `has_fatal_error`. Measurements use the same final/latest selection as totals.
@@ -634,7 +653,7 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 
 `GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
 Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `page_origin`, `page_path`, `video_id` and `viewer_id`. Each value has `value` and `views`;
+`country`, `city`, `page_origin`, `page_path`, `video_id`, `viewer_id` and `user_id`. Each value has `value` and `views`;
 values and counts come from first retained starts after applying the usual date, identity and context filters.
 Values sort by views descending, then value ascending with null first for ties.
 Literal `unknown` remains distinct from

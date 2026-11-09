@@ -1,25 +1,39 @@
-use super::metrics::{CohortMetrics, score_json, utc_timestamp, view_cohort};
+use super::metrics::{
+    CohortMetrics, score_json, utc_timestamp, view_cohort, view_cohort_with_labels,
+};
 use super::*;
 use crate::query::{Dimension, GroupPosition, ViewsQuery};
 
-const VIEW_COLUMNS: &str = "view_id, video_id, viewer_id, occurred_at_ms,
+// Every column is named; rows are read by name, never by position.
+const VIEW_COLUMNS: &str = "view_id, video_id, viewer_id, e_user_id AS user_id,
+    e_video_title AS video_title, occurred_at_ms,
     context_browser_name, context_os_name, context_device_type, playing_time_ms,
-    measurement.startup_time_ms, measurement.rebuffer_duration_ms,
-    COALESCE(measurement.reached_end, FALSE), COALESCE(measurement.has_ended_event, FALSE),
-    COALESCE(has_fatal_error, FALSE), playback_score";
+    measurement.startup_time_ms AS startup_time_ms,
+    measurement.rebuffer_duration_ms AS rebuffer_duration_ms,
+    COALESCE(measurement.reached_end, FALSE) AS reached_end,
+    COALESCE(measurement.has_ended_event, FALSE) AS has_ended_event,
+    COALESCE(has_fatal_error, FALSE) AS has_fatal_error, playback_score";
 
 fn view_row(row: &duckdb::Row<'_>) -> duckdb::Result<Value> {
-    let score: Option<f64> = row.get(13)?;
-    Ok(
-        json!({"view_id":row.get::<_, String>(0)?, "video_id":row.get::<_, String>(1)?,
-        "viewer_id":row.get::<_, Option<String>>(2)?, "started_at":utc_timestamp(row.get(3)?),
-        "browser_name":row.get::<_, Option<String>>(4)?, "os_name":row.get::<_, Option<String>>(5)?,
-        "device_type":row.get::<_, Option<String>>(6)?, "playing_time_ms":row.get::<_, f64>(7)?,
-        "startup_time_ms":row.get::<_, Option<f64>>(8)?, "rebuffer_duration_ms":row.get::<_, Option<f64>>(9)?,
-        "reached_end":row.get::<_, bool>(10)?, "has_ended_event":row.get::<_, bool>(11)?,
-        "has_fatal_error":row.get::<_, bool>(12)?,
-        "playback_score":score_json(score, i64::from(score.is_some()))}),
-    )
+    let score: Option<f64> = row.get("playback_score")?;
+    Ok(json!({
+        "view_id": row.get::<_, String>("view_id")?,
+        "video_id": row.get::<_, String>("video_id")?,
+        "video_title": row.get::<_, Option<String>>("video_title")?,
+        "viewer_id": row.get::<_, Option<String>>("viewer_id")?,
+        "user_id": row.get::<_, Option<String>>("user_id")?,
+        "started_at": utc_timestamp(row.get("occurred_at_ms")?),
+        "browser_name": row.get::<_, Option<String>>("context_browser_name")?,
+        "os_name": row.get::<_, Option<String>>("context_os_name")?,
+        "device_type": row.get::<_, Option<String>>("context_device_type")?,
+        "playing_time_ms": row.get::<_, f64>("playing_time_ms")?,
+        "startup_time_ms": row.get::<_, Option<f64>>("startup_time_ms")?,
+        "rebuffer_duration_ms": row.get::<_, Option<f64>>("rebuffer_duration_ms")?,
+        "reached_end": row.get::<_, bool>("reached_end")?,
+        "has_ended_event": row.get::<_, bool>("has_ended_event")?,
+        "has_fatal_error": row.get::<_, bool>("has_fatal_error")?,
+        "playback_score": score_json(score, i64::from(score.is_some())),
+    }))
 }
 
 fn validate(query: &Query) -> Result<(), ApiError> {
@@ -88,10 +102,10 @@ impl Store {
             values.push(SqlValue::BigInt((limit + 1) as i64));
             let conditions = if conditions.is_empty() { "TRUE".into() } else { conditions.join(" AND ") };
             let projection = if sort.is_text() { column.to_owned() } else { format!("{column}::DOUBLE") };
-            let mut statement = db.prepare(&format!("{sql} SELECT {VIEW_COLUMNS}, {projection} FROM view_metrics WHERE {conditions} ORDER BY {column} {direction} NULLS LAST, view_id {direction} LIMIT ?"))?;
+            let mut statement = db.prepare(&format!("{sql} SELECT {VIEW_COLUMNS}, {projection} AS sort_key FROM view_metrics WHERE {conditions} ORDER BY {column} {direction} NULLS LAST, view_id {direction} LIMIT ?"))?;
             let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|row| {
-                let value = if sort.is_text() { row.get::<_, Option<String>>(14)?.map(ViewSortValue::Text) }
-                    else { row.get::<_, Option<f64>>(14)?.map(ViewSortValue::Number) };
+                let value = if sort.is_text() { row.get::<_, Option<String>>("sort_key")?.map(ViewSortValue::Text) }
+                    else { row.get::<_, Option<f64>>("sort_key")?.map(ViewSortValue::Number) };
                 Ok((view_row(row)?, value))
             });
             let mut views = Vec::new(); let mut next_cursor = None; let mut last = None;
@@ -120,6 +134,7 @@ impl Store {
             || query.to.is_some()
             || query.video_id.is_some()
             || query.viewer_id.is_some()
+            || query.user_id.is_some()
             || query.view_id.is_some()
             || query.browser_name.is_some()
             || query.os_name.is_some()
@@ -231,7 +246,7 @@ impl Store {
             .transpose()?;
         self.read_report("dimension", project.clone(), (&query, dimension.column()), export.is_some(), move |db| {
             let through = match &cursor { Some(c) => c.through, None => watermark(db, &project)? };
-            let (sql, mut values) = view_cohort(project.clone(), through, &filters, CohortMetrics::Basic);
+            let (sql, mut values) = view_cohort_with_labels(project.clone(), through, &filters, CohortMetrics::Basic, matches!(dimension, Dimension::UserId));
             let column = dimension.column();
             let continuation = match cursor { None => "TRUE".into(), Some(c) => c.after.continuation(column, &mut values) };
             values.push(SqlValue::BigInt((limit + 1) as i64));

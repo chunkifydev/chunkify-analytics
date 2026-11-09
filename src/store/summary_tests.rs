@@ -167,7 +167,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(
             first["videos"],
-            json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-a","views":1,"unique_viewers":0,"total_playing_time_ms":0.0}])
+            json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-a","video_title":null,"views":1,"unique_viewers":0,"total_playing_time_ms":0.0}])
         );
         // An earlier start arriving after page one must not alter its frozen cohort.
         store.call("test_late_start", |connection| {
@@ -190,7 +190,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(
             second["videos"],
-            json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-b","views":1,"unique_viewers":1,"total_playing_time_ms":2500.0}])
+            json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-b","video_title":null,"views":1,"unique_viewers":1,"total_playing_time_ms":2500.0}])
         );
         let third = store
             .summary(
@@ -206,7 +206,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
             .unwrap_or_else(|error| panic!("{}", error.message));
         assert_eq!(
             third["videos"],
-            json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-c","views":1,"unique_viewers":1,"total_playing_time_ms":0.0}])
+            json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-c","video_title":null,"views":1,"unique_viewers":1,"total_playing_time_ms":0.0}])
         );
         assert!(third["next_cursor"].is_null());
         assert_eq!(

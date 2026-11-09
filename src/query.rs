@@ -52,6 +52,7 @@ pub struct Query {
     pub to: Option<String>,
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
+    pub user_id: Option<String>,
     pub view_id: Option<String>,
     pub event_name: Option<String>,
     pub browser_name: Option<String>,
@@ -172,6 +173,7 @@ pub enum Dimension {
     PagePath,
     VideoId,
     ViewerId,
+    UserId,
 }
 
 impl Dimension {
@@ -180,23 +182,14 @@ impl Dimension {
             Self::BrowserName => "context_browser_name",
             Self::OsName => "context_os_name",
             Self::DeviceType => "context_device_type",
-            Self::Continent => {
-                "CASE WHEN json_type(context_remainder, '$.continent') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.continent') END"
-            }
-            Self::Country => {
-                "CASE WHEN json_type(context_remainder, '$.country') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.country') END"
-            }
-            Self::City => {
-                "CASE WHEN json_type(context_remainder, '$.city') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.city') END"
-            }
-            Self::PageOrigin => {
-                "CASE WHEN json_type(context_remainder, '$.page_origin') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_origin') END"
-            }
-            Self::PagePath => {
-                "CASE WHEN json_type(context_remainder, '$.page_path') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_path') END"
-            }
+            Self::Continent => "context_continent",
+            Self::Country => "context_country",
+            Self::City => "context_city",
+            Self::PageOrigin => "context_page_origin",
+            Self::PagePath => "context_page_path",
             Self::VideoId => "video_id",
             Self::ViewerId => "viewer_id",
+            Self::UserId => "e_user_id",
         }
     }
 }
@@ -269,6 +262,7 @@ pub struct TimeseriesQuery {
     pub interval: TimeInterval,
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
+    pub user_id: Option<String>,
     pub view_id: Option<String>,
     pub browser_name: Option<String>,
     pub os_name: Option<String>,
@@ -302,6 +296,7 @@ impl TimeseriesQuery {
             to: Some(self.to),
             video_id: self.video_id,
             viewer_id: self.viewer_id,
+            user_id: self.user_id,
             view_id: self.view_id,
             browser_name: self.browser_name,
             os_name: self.os_name,
@@ -341,6 +336,8 @@ pub struct Filters {
     to_ms: Option<i64>,
     video_id: Option<String>,
     viewer_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
     #[serde(default)]
     view_id: Option<String>,
     event_name: Option<String>,
@@ -425,6 +422,16 @@ impl Query {
             }
         }
         if self
+            .user_id
+            .as_ref()
+            .is_some_and(|value| !(1..=event::MAX_LABEL_CHARS).contains(&value.chars().count()))
+        {
+            return Err(ApiError::bad(format!(
+                "user_id must contain between 1 and {} characters",
+                event::MAX_LABEL_CHARS
+            )));
+        }
+        if self
             .view_id
             .as_ref()
             .is_some_and(|value| !(1..=4096).contains(&value.chars().count()))
@@ -438,6 +445,7 @@ impl Query {
             to_ms,
             video_id: self.video_id.clone(),
             viewer_id: self.viewer_id.clone(),
+            user_id: self.user_id.clone(),
             view_id: self.view_id.clone(),
             event_name: self.event_name.clone(),
             browser_name: self.browser_name.clone(),
@@ -464,6 +472,10 @@ impl Query {
 }
 
 impl Filters {
+    /// Whether `sql()` reads the view's `user_id`.
+    pub fn selects_user_id(&self) -> bool {
+        self.user_id.is_some()
+    }
     pub fn sql(&self) -> (String, Vec<SqlValue>) {
         let mut conditions = vec!["TRUE".to_owned()];
         let mut values = Vec::new();
@@ -481,6 +493,10 @@ impl Filters {
         }
         if let Some(value) = &self.viewer_id {
             conditions.push("viewer_id = ?".into());
+            values.push(SqlValue::Text(value.clone()));
+        }
+        if let Some(value) = &self.user_id {
+            conditions.push(format!("{} = ?", Dimension::UserId.column()));
             values.push(SqlValue::Text(value.clone()));
         }
         if let Some(value) = &self.view_id {

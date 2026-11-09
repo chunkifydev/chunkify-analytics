@@ -540,6 +540,7 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
     let fields: &[&str] = match kind {
         "videos" => &[
             "video_id",
+            "video_title",
             "views",
             "unique_viewers",
             "total_playing_time_ms",
@@ -560,7 +561,9 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
         "views" => &[
             "view_id",
             "video_id",
+            "video_title",
             "viewer_id",
+            "user_id",
             "started_at",
             "browser_name",
             "os_name",

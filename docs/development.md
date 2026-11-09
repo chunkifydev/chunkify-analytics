@@ -133,7 +133,9 @@ of analytics servers, default 1), `CHUNKIFY_CAPACITY_SECONDS` (per phase,
 default 30), `CHUNKIFY_CAPACITY_WRITERS` and `CHUNKIFY_CAPACITY_READERS`
 (concurrent clients, default 512 and 64), `CHUNKIFY_CAPACITY_WRITE_RATE` (offered events
 per second during the read phases, default 200), `CHUNKIFY_CAPACITY_VIEWS`
-(seeded playback attempts per project, default 1000), and
+(seeded playback attempts per project, default 1000),
+`CHUNKIFY_CAPACITY_SEED_HOURS` (seeded views start up to this many hours back,
+spread evenly; default 1, at most 144 so a seven-day report covers them), and
 `CHUNKIFY_TEST_CLICKHOUSE_URL`. `CHUNKIFY_CAPACITY_SETTINGS` adds `config.toml`
 fields as JSON, for example `{"clickhouse.async_insert": "false"}`. The load generator, servers and ClickHouse share
 the machine unless you point the benchmark at a remote ClickHouse server, so

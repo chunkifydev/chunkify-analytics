@@ -2,7 +2,7 @@
 // database. See docs/development.md#ingestion-and-read-capacity.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { Agent, request as httpRequest } from "node:http";
@@ -24,6 +24,8 @@ const writers = integer("CHUNKIFY_CAPACITY_WRITERS", 512, 1, 4096);
 const readers = integer("CHUNKIFY_CAPACITY_READERS", 64, 1, 1024);
 const writeRate = integer("CHUNKIFY_CAPACITY_WRITE_RATE", 200, 1, 100000);
 const views = integer("CHUNKIFY_CAPACITY_VIEWS", 1000, 1, 100000);
+// Seeded views start this many hours back at most, spread evenly per view.
+const seedHours = integer("CHUNKIFY_CAPACITY_SEED_HOURS", 1, 1, 24 * 6);
 const projects = 10;
 const maxOutstandingWrites = 256;
 const binary = resolve(process.env.CHUNKIFY_BINARY ?? "target/release/chunkify-analytics");
@@ -155,7 +157,7 @@ const report = {
   machine: { cpus: cpus().length, cpu_model: cpus()[0]?.model, memory_gib: +(totalmem() / 2 ** 30).toFixed(1),
     note: "Load generator, analytics servers and ClickHouse share this machine unless the ClickHouse URL is remote." },
   settings: { servers, overrides: JSON.parse(process.env.CHUNKIFY_CAPACITY_SETTINGS ?? "{}"), seconds_per_phase: seconds, writers, readers, offered_write_rate: writeRate,
-    projects, views_per_project: views, max_outstanding_writes: maxOutstandingWrites, one_event_per_request: true },
+    projects, views_per_project: views, seed_hours: seedHours, max_outstanding_writes: maxOutstandingWrites, one_event_per_request: true },
   phases: {},
 };
 
@@ -179,10 +181,12 @@ try {
   const workload = await captureWorkload();
   report.workload = workload.description;
   const generators = tenants.map(() => workload.generator());
-  const write = (urls, index, shift = 0) => {
+  // Every event of one seeded view moves back by the same whole number of hours.
+  const seedShift = view => 3600000 * (1 + createHash("sha256").update(view).digest().readUInt32BE(0) % seedHours);
+  const write = (urls, index, seeding = false) => {
     const tenant = index % projects;
     const event = generators[tenant]().event;
-    if (shift) event.occurred_at = new Date(Date.parse(event.occurred_at) - shift).toISOString();
+    if (seeding) event.occurred_at = new Date(Date.parse(event.occurred_at) - seedShift(event.view_id)).toISOString();
     return send(urls[index % urls.length], "/v1/events", { body: event, headers: { "x-chunkify-ingest-key": tenants[tenant].public_key } });
   };
   const read = (urls, index, distinct) => {
@@ -190,7 +194,7 @@ try {
     return send(urls[index % urls.length], readPath(distinct), { headers: { authorization: `Bearer ${tenants[tenant].secret_key}` } });
   };
 
-  // Seed one hour in the past: a fixed dataset for the read phases.
+  // Seed in the past hours: a fixed dataset for the read phases.
   const seedEvents = views * workload.description.events_per_view * projects;
   console.error(`Seeding ${seedEvents} events...`);
   const seed = new Recorder(201);
@@ -200,7 +204,7 @@ try {
     while (seeded < seedEvents) {
       const index = seeded++;
       seed.offered++;
-      seed.record(await write(active.urls, index, 3600000));
+      seed.record(await write(active.urls, index, true));
     }
   }));
   report.phases.seed = { events: seedEvents, ...seed.summary((performance.now() - seedStart) / 1000) };

@@ -315,7 +315,8 @@ RESTORE DATABASE chunkify_analytics AS chunkify_restored
 FROM Disk('backups', 'analytics-2026-11-08.zip');
 ```
 
-Include both the `events` and `registry` tables. Use the same analytics server
+Include both the `events` and `registry` tables. Rollup tables are derived from
+`events`: without them, the first refresh rebuilds every hour. Use the same analytics server
 version or a newer one. Check `/healthz`, events and summaries before sending
 traffic. A restore also restores old credentials and retention settings;
 reapply later changes as needed. Startup expiration still applies to restored

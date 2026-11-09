@@ -21,9 +21,13 @@ struct Fixture {
 
 impl Fixture {
     async fn new(projects: &[&str]) -> Self {
-        let config = testing::config(
-            "retention.seconds = 0\nrate_limits.read_per_minute = 1000000\nrate_limits.read_burst = 1000000",
-        );
+        Self::with_settings(projects, "").await
+    }
+
+    async fn with_settings(projects: &[&str], extra: &str) -> Self {
+        let config = testing::config(&format!(
+            "retention.seconds = 0\nrate_limits.read_per_minute = 1000000\nrate_limits.read_burst = 1000000\n{extra}"
+        ));
         let mut list = vec![crate::projects::primary_project(
             "test-public",
             "test-secret",
@@ -1810,4 +1814,423 @@ async fn ingestion_keeps_first_deliveries_per_project_and_parameterizes_ids() {
         1
     );
     assert_eq!(listed("a").await.last().unwrap().1, "retry");
+}
+
+/// Compare report JSON, allowing floating-point sums to differ in the last
+/// bits: rollups add partial sums in another order than one pass over views.
+fn assert_same(rollup: &Value, raw: &Value, path: &str) {
+    match (rollup, raw) {
+        (Value::Number(a), Value::Number(b)) if a.is_f64() || b.is_f64() => {
+            let (a, b) = (a.as_f64().unwrap(), b.as_f64().unwrap());
+            assert!(
+                (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0),
+                "{path}: {a} != {b}"
+            );
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            assert_eq!(a.len(), b.len(), "{path}: {rollup} != {raw}");
+            for (index, (a, b)) in a.iter().zip(b).enumerate() {
+                assert_same(a, b, &format!("{path}[{index}]"));
+            }
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            let keys = |o: &serde_json::Map<String, Value>| o.keys().cloned().collect::<Vec<_>>();
+            assert_eq!(keys(a), keys(b), "{path}");
+            for (key, a) in a {
+                // Cursors encode the same position; sums inside may differ in the last bits.
+                if key == "next_cursor" {
+                    assert_eq!(a.is_null(), b[key].is_null(), "{path}.{key}");
+                    continue;
+                }
+                assert_same(a, &b[key], &format!("{path}.{key}"));
+            }
+        }
+        _ => assert_eq!(rollup, raw, "{path}"),
+    }
+}
+
+const HOUR: i64 = 3_600_000;
+
+/// Views over four hours with contexts, two videos, errors, progress, a view
+/// with two identities and a view with starts in two hours.
+fn rollup_rows(base: i64) -> Vec<Value> {
+    let mut rows = Vec::new();
+    let browsers = ["Chrome", "Firefox", "Safari"];
+    let countries = ["FR", "US"];
+    for index in 0..24i64 {
+        let view = format!("v{index}");
+        let hour = base + (index % 4) * HOUR;
+        let start = hour + 60_000 * (index + 1);
+        let video = if index % 3 == 0 { "video-b" } else { "video-a" };
+        let viewer = format!("viewer-{}", index % 5);
+        let context = json!({
+            "context_browser_name": browsers[(index % 3) as usize],
+            "context_os_name": "Linux", "context_device_type": "desktop",
+            "context_remainder": json!({"continent": "EU", "country": countries[(index % 2) as usize],
+                "city": format!("city-{}", index % 4), "page_origin": "https://a.example",
+                "page_path": "/watch"}).to_string(),
+        });
+        let event = |kind: &str, sequence: i64, at: i64| {
+            event(
+                &format!("{view}-{kind}-{sequence}"),
+                "default",
+                &view,
+                video,
+                Some(&viewer),
+                kind,
+                sequence,
+                at,
+            )
+        };
+        rows.push(with(event("view_started", 1, start), context.clone()));
+        rows.push(with(
+            event("view_snapshot", 2, start + 10_000),
+            json!({"playing_time_ms": (1000 * (index + 1)) as f64,
+                "e_startup_time_ms": (100 * (index % 7)) as f64, "e_rebuffer_duration_ms": 0.0,
+                "e_media_duration_seconds": 600.0, "e_furthest_progress_ratio": 0.1}),
+        ));
+        if index % 2 == 0 {
+            rows.push(with(
+                event("view_ended", 3, start + 20_000),
+                json!({"playing_time_ms": (2000 * (index + 1)) as f64,
+                    "e_startup_time_ms": (100 * (index % 7)) as f64,
+                    "e_rebuffer_duration_ms": (50 * (index % 3)) as f64,
+                    "e_startup_outcome": if index % 8 == 0 { "failed_before_start" } else { "started" },
+                    "e_reason": if index % 4 == 0 { "ended" } else { "exit" },
+                    "e_media_duration_seconds": 600.0,
+                    "e_furthest_progress_ratio": (index % 5) as f64 / 4.0}),
+            ));
+        }
+        if index % 5 == 0 {
+            rows.push(with(
+                event("playback_error", 4, start + 5_000),
+                json!({"e_error_fatal": true}),
+            ));
+        }
+    }
+    // A second identity of v1 and a second start of v2 in a later hour.
+    rows.push(event(
+        "v1-other",
+        "default",
+        "v1",
+        "video-z",
+        Some("other"),
+        "view_started",
+        1,
+        base + HOUR + 1_800_000,
+    ));
+    rows.push(event(
+        "v2-again",
+        "default",
+        "v2",
+        "video-a",
+        Some("viewer-2"),
+        "view_started",
+        9,
+        base + 3 * HOUR + 1_000,
+    ));
+    rows
+}
+
+#[tokio::test]
+async fn rollups_match_event_reports_through_refreshes_late_events_and_pages() {
+    let fixture = Fixture::with_settings(&["default"], "cache.report_ttl_seconds = 0").await;
+    let store = &fixture.store;
+    let base = 1_000 * HOUR;
+    fixture.insert(rollup_rows(base)).await;
+    let iso = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    };
+    let query = |fields: Value| -> Query { serde_json::from_value(fields).unwrap() };
+    let ranges = [
+        json!({}),
+        json!({"from": iso(base), "to": iso(base + 4 * HOUR)}),
+        // Partial first and last hours read events; the middle reads rollups.
+        json!({"from": iso(base + 1_200_000), "to": iso(base + 3 * HOUR + 600_000)}),
+    ];
+    // Every report that can read rollups, with all pages of paginated ones.
+    let ranges = &ranges;
+    let reports = move || async move {
+        let mut all = Vec::new();
+        for range in ranges {
+            let mut filtered = vec![range.clone()];
+            for extra in [
+                json!({"browser_name": "Chrome"}),
+                json!({"video_id": "video-a"}),
+                json!({"country": "FR", "video_id": "video-b"}),
+            ] {
+                let mut fields = range.clone();
+                fields
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(extra.as_object().unwrap().clone());
+                filtered.push(fields);
+            }
+            for fields in &filtered {
+                all.push(ok(store
+                    .summary("default".into(), query(fields.clone()), false)
+                    .await));
+                all.push(ok(store
+                    .engagement("default".into(), query(fields.clone()))
+                    .await));
+                all.push(ok(store
+                    .quality("default".into(), query(fields.clone()))
+                    .await));
+                for sort in [
+                    "views",
+                    "video_id",
+                    "unique_viewers",
+                    "total_playing_time_ms",
+                ] {
+                    let mut cursor = Value::Null;
+                    loop {
+                        let mut page = fields.clone();
+                        page["sort_by"] = json!(sort);
+                        page["limit"] = json!(1);
+                        if let Some(cursor) = cursor.as_str() {
+                            page["cursor"] = json!(cursor);
+                        }
+                        let result = ok(store.summary("default".into(), query(page), true).await);
+                        cursor = result["next_cursor"].clone();
+                        all.push(result);
+                        if cursor.is_null() {
+                            break;
+                        }
+                    }
+                }
+            }
+            for group in ["browser_name", "country"] {
+                for kind in [
+                    MetricKind::Summary,
+                    MetricKind::Engagement,
+                    MetricKind::Quality,
+                ] {
+                    let values = if group == "country" {
+                        [None, Some("FR"), Some("US")]
+                    } else {
+                        [None, Some("Chrome"), Some("Edge")]
+                    };
+                    for value in values {
+                        let mut filter = json!({});
+                        if let Some(value) = value {
+                            filter[group] = json!(value);
+                        }
+                        let mut cursor = Value::Null;
+                        loop {
+                            let mut page = range.clone();
+                            page.as_object_mut()
+                                .unwrap()
+                                .extend(filter.as_object().unwrap().clone());
+                            page["group_by"] = json!(group);
+                            page["limit"] = json!(1);
+                            if let Some(cursor) = cursor.as_str() {
+                                page["cursor"] = json!(cursor);
+                            }
+                            let result = ok(match kind {
+                                MetricKind::Summary => {
+                                    store.summary("default".into(), query(page), false).await
+                                }
+                                MetricKind::Engagement => {
+                                    store.engagement("default".into(), query(page)).await
+                                }
+                                MetricKind::Quality => {
+                                    store.quality("default".into(), query(page)).await
+                                }
+                            });
+                            cursor = result["next_cursor"].clone();
+                            all.push(result);
+                            if cursor.is_null() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (interval, kind) in [
+            ("hour", "summary"),
+            ("hour", "quality"),
+            ("day", "engagement"),
+        ] {
+            let series: crate::query::TimeseriesQuery = serde_json::from_value(json!({
+                "from": iso(base + 1_200_000), "to": iso(base + 5 * HOUR),
+                "interval": interval, "kind": kind}))
+            .unwrap();
+            all.push(ok(store.timeseries("default".into(), series).await));
+        }
+        Value::Array(all)
+    };
+    let compare = move |label: &'static str| async move {
+        store.rollup_reads.store(false, Ordering::Relaxed);
+        let raw = reports().await;
+        store.rollup_reads.store(true, Ordering::Relaxed);
+        let combined = reports().await;
+        assert_same(&combined, &raw, label);
+    };
+    let whole = query(json!({"from": iso(base), "to": iso(base + 4 * HOUR)}))
+        .filters()
+        .unwrap();
+    let whole = &whole;
+    let planned = move || async move {
+        store
+            .rollup_plan("default", whole, None, i64::MIN, i64::MAX)
+            .await
+            .unwrap()
+            .map(|plan| plan.hours)
+    };
+    assert_eq!(planned().await, None, "no hour is settled before a refresh");
+    compare("before refresh").await;
+
+    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(4));
+    let all_hours: Vec<i64> = (0..4).map(|h| base + h * HOUR).collect();
+    assert_eq!(planned().await, Some(all_hours.clone()));
+    compare("after refresh").await;
+
+    // A late snapshot changes v5 (hour 1); an earlier start moves v6 from hour
+    // 2 to hour 0; a new view starts in hour 3. Those hours read events again.
+    fixture
+        .insert(vec![
+            with(
+                event(
+                    "v5-late",
+                    "default",
+                    "v5",
+                    "video-a",
+                    Some("viewer-0"),
+                    "view_snapshot",
+                    5,
+                    base + HOUR + 900_000,
+                ),
+                json!({"playing_time_ms": 99000.0}),
+            ),
+            with(
+                event(
+                    "v6-early",
+                    "default",
+                    "v6",
+                    "video-a",
+                    Some("viewer-1"),
+                    "view_started",
+                    0,
+                    base + 1_000,
+                ),
+                json!({"context_browser_name": "Edge"}),
+            ),
+            event(
+                "v99-start",
+                "default",
+                "v99",
+                "video-c",
+                Some("new"),
+                "view_started",
+                1,
+                base + 3 * HOUR + 5_000,
+            ),
+        ])
+        .await;
+    assert_eq!(planned().await, None);
+    let partial = query(json!({"from": iso(base), "to": iso(base + 2 * HOUR)}))
+        .filters()
+        .unwrap();
+    assert!(
+        store
+            .rollup_plan("default", &partial, None, i64::MIN, i64::MAX)
+            .await
+            .unwrap()
+            .is_none(),
+        "hours 0 and 1 changed"
+    );
+    compare("after late events").await;
+
+    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(4));
+    assert_eq!(planned().await, Some(all_hours.clone()));
+    compare("after second refresh").await;
+
+    // Hours with an expired event read events, where the event is hidden.
+    let cutoff = base + HOUR + 30 * 60_000;
+    let plan = store
+        .rollup_plan("default", whole, None, cutoff, i64::MAX)
+        .await
+        .unwrap()
+        .unwrap();
+    // Hour 2 holds a start of v6, whose earlier start in hour 0 has expired.
+    assert_eq!(plan.hours, vec![base + 3 * HOUR]);
+
+    // A page cursor freezes its snapshot: events stored after page one, even
+    // once refreshed into rollups, stay out of later pages.
+    let page = |cursor: Option<&str>| {
+        let mut fields = json!({"group_by": "browser_name", "limit": 1, "from": iso(base), "to": iso(base + 4 * HOUR)});
+        if let Some(cursor) = cursor {
+            fields["cursor"] = json!(cursor);
+        }
+        query(fields)
+    };
+    let first = ok(store.summary("default".into(), page(None), false).await);
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    fixture
+        .insert(vec![with(
+            event(
+                "v100-start",
+                "default",
+                "v100",
+                "video-a",
+                Some("late"),
+                "view_started",
+                1,
+                base + 2 * HOUR + 7_000,
+            ),
+            json!({"context_browser_name": "Chrome"}),
+        )])
+        .await;
+    store.refresh_rollups_with(0, 0).await.unwrap();
+    let combined = ok(store
+        .summary("default".into(), page(Some(&cursor)), false)
+        .await);
+    store.rollup_reads.store(false, Ordering::Relaxed);
+    let raw = ok(store
+        .summary("default".into(), page(Some(&cursor)), false)
+        .await);
+    assert_same(&combined, &raw, "second page");
+}
+
+#[tokio::test]
+async fn rollup_runs_claim_once_and_skip_until_the_interval() {
+    let fixture = Fixture::new(&["default"]).await;
+    let store = &fixture.store;
+    fixture
+        .insert(vec![event(
+            "a",
+            "default",
+            "a",
+            "video",
+            None,
+            "view_started",
+            1,
+            5000,
+        )])
+        .await;
+    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(1));
+    // Another server checking within the interval does nothing.
+    assert_eq!(store.refresh_rollups_with(0, 60_000).await.unwrap(), None);
+    // A later run with nothing new completes without recomputing.
+    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(0));
+    let runs = store
+        .client
+        .all(
+            "SELECT version, completed FROM rollup_runs ORDER BY version, completed",
+            &Params::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runs,
+        vec![
+            vec![json!(1), json!(0)],
+            vec![json!(1), json!(1)],
+            vec![json!(2), json!(0)],
+            vec![json!(2), json!(1)]
+        ]
+    );
 }

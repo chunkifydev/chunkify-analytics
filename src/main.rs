@@ -113,6 +113,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             });
+            // Any server may refresh rollups; a claimed run keeps others idle.
+            // Shutdown waits for a run in progress, so the next run need not
+            // wait for its claim to time out.
+            let rollup_store = store.clone();
+            let rollup_interval = store.rollup_interval();
+            let (stop_rollups, mut stopping) = tokio::sync::watch::channel(false);
+            let rollups = tokio::spawn(async move {
+                if rollup_interval.is_zero() {
+                    return;
+                }
+                loop {
+                    if rollup_store.refresh_rollups().await.is_err() {
+                        tracing::warn!(backend = "clickhouse", "rollup_refresh_failed");
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(rollup_interval) => {}
+                        _ = stopping.changed() => return,
+                    }
+                }
+            });
             let shutdown = shutdown();
             println!("Listening on http://{}", listener.local_addr()?);
             let result = axum::serve(
@@ -128,6 +148,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = refresh.await;
             maintenance.abort();
             let _ = maintenance.await;
+            let _ = stop_rollups.send(true);
+            let rollups_abort = rollups.abort_handle();
+            if tokio::time::timeout(std::time::Duration::from_secs(30), rollups)
+                .await
+                .is_err()
+            {
+                rollups_abort.abort();
+            }
             result?;
             Ok(())
         }

@@ -31,6 +31,7 @@ user = "chunkify"
 | `clickhouse.registry_refresh_seconds` | — | `5` | How often each server checks the shared registry for project and key changes. 1 to 3600. |
 | `clickhouse.deduplication_window_seconds` | — | `604800` (7 days) | Repeated event IDs received within this window are reported as duplicates and not stored again. `0` stores every delivery. |
 | `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Random | 0 to 63. Part of each event's internal order. Give each server a different value for strict uniqueness. |
+| `clickhouse.rollup_interval_seconds` | — | `15` | How often servers refresh [report rollups](#report-rollups). 0 to 3600. `0` turns rollups off: reports then read events only. |
 
 The user needs permission to create the database and tables, and to read,
 insert and delete rows in them. Run `init` once per database, not once per
@@ -65,6 +66,9 @@ your own host.
   or the CLI works on every server at once, because an unknown key makes a
   server check the registry first. Rotated or revoked keys stop working on other
   servers at their next refresh.
+- **Report rollups.** One server at a time refreshes the hourly rollups, every
+  `rollup_interval_seconds`; the others skip that interval. See
+  [report rollups](#report-rollups).
 - **Retention.** Reports hide expired events immediately and every server runs
   the expiration sweep, which deletes them. When a project's retention changes,
   events that had already expired stay expired, even if retention grows.
@@ -78,6 +82,45 @@ docker compose exec analytics chunkify-analytics project create "Customer"
 
 They return `"restart_required": false`, except `project configure`, whose
 ingestion limits apply when a server starts.
+
+## Report rollups
+
+Reports count each view once, from its first start and its final or latest
+measurement. Working that out from events on every request costs ClickHouse CPU
+in proportion to the views in the date range. Hourly rollups store the result
+for each hour, video and first-start context value, so a report over many hours
+merges a few rows per hour instead.
+
+Results stay exact. A report reads an hour from rollups only when the hour lies
+entirely inside its date range and is *settled*: no event of a view that
+started in that hour was stored after the last completed refresh, and none of
+them has expired. The report reads every other hour from events, as it would
+without rollups, and ClickHouse merges both parts in the same query. Unique
+viewers and percentiles merge exactly. Totals can differ from an events-only
+result in the last digits of floating-point sums, because the additions happen
+in another order.
+
+These reports use rollups when their filters are at most a date range, a
+video and one context value (for a breakdown, the context value must be of its
+`group_by` dimension):
+
+- summary, engagement and quality totals and breakdowns;
+- time series;
+- videos sorted by `video_id`, `views` or `unique_viewers`.
+
+Other filters (viewer, view, event name, or two context values), other video
+sort orders, and every other report read events. The hour that is still
+receiving events and the partial hours at either end of a date range always
+read events, so a dashboard over days benefits most and a range of one recent
+hour does not.
+
+Each refresh recomputes only the hours whose views received events since the
+previous refresh. A refresh claims its run in the `rollup_runs` table, so one
+server works at a time; if a server stops in the middle of a run, another takes
+over after four intervals (at least one minute). Until the next refresh, hours
+with new events read events, so freshness never depends on the interval; a
+shorter interval keeps more hours settled at the cost of refreshing the current
+hour more often.
 
 ## Duplicate deliveries
 
@@ -114,8 +157,10 @@ in the ClickHouse user's profile.
 
 | Table | Contents |
 | --- | --- |
-| `events` | One row per stored event, ordered by project and receipt order and partitioned by receipt month. Location, page and the numeric fields reports measure are extracted at insert time. |
+| `events` | One row per stored event, ordered by project and receipt order and partitioned by receipt month. Location, page and the numeric fields reports measure are extracted at insert time, and ClickHouse records when it stored each row. |
 | `registry` | Versioned project registry documents. The highest version is active. |
+| `rollup`, `rollup_hours`, `rollup_views` | [Report rollups](#report-rollups): partial aggregates per hour, each hour's receipt range, and per-view results. Derived from `events`; superseded rows are deleted after 20 refreshes and expired hours by the expiration sweep. |
+| `rollup_runs` | Rollup refresh claims and completions. |
 
 `init` and `serve` create missing tables. Do not change these tables by hand.
 See [backup and restore](administration.md#backup-and-restore).

@@ -24,6 +24,9 @@ pub struct Store {
     sender: mpsc::Sender<WriteRequest>,
     budget: Arc<Semaphore>,
     batch: BatchConfig,
+    pub(super) rollup_interval: std::time::Duration,
+    /// Whether reports read settled hours from rollups.
+    pub(super) rollup_reads: std::sync::atomic::AtomicBool,
 }
 
 struct Row {
@@ -149,10 +152,17 @@ impl Store {
             cache: crate::cache::ReportCache::new(config.report_cache_seconds),
             budget: Arc::new(Semaphore::new(config.batch.queue_bytes)),
             batch: config.batch.clone(),
+            rollup_interval: settings.rollup_interval,
+            rollup_reads: (!settings.rollup_interval.is_zero()).into(),
             client,
             projects,
             sender,
         }))
+    }
+
+    /// Time between rollup refreshes; zero when rollups are disabled.
+    pub fn rollup_interval(&self) -> std::time::Duration {
+        self.rollup_interval
     }
 
     pub async fn health(&self) -> Result<(), ApiError> {
@@ -279,6 +289,10 @@ impl Store {
         {
             return Ok(0);
         }
+        // Rollups hide hours with expired events from reads at once; drop the
+        // rows of hours whose events have all expired.
+        self.purge_rollups(|params, column| retained_by(&self.projects, params, column))
+            .await?;
         let mut params = Params::default();
         let condition = format!("NOT ({})", retained(&self.projects, &mut params)?);
         let expired = self
@@ -303,6 +317,15 @@ impl Store {
 /// Rows still within each project's retention period. Expired rows are hidden
 /// from reads and duplicate checks before the background sweep deletes them.
 fn retained(projects: &crate::projects::Registry, params: &mut Params) -> Result<String, ApiError> {
+    retained_by(projects, params, "received_at_ms")
+}
+
+/// [`retained`] for another receipt time expression, such as a rollup's latest receipt.
+fn retained_by(
+    projects: &crate::projects::Registry,
+    params: &mut Params,
+    received: &str,
+) -> Result<String, ApiError> {
     let policy = projects
         .retention
         .read()
@@ -313,7 +336,7 @@ fn retained(projects: &crate::projects::Registry, params: &mut Params) -> Result
         .map(|id| (id.to_owned(), policy.project_cutoff(id, now)))
         .unzip();
     Ok(format!(
-        "received_at_ms >= transform(project_id, {}, {}, {})",
+        "{received} >= transform(project_id, {}, {}, {})",
         params.texts(&ids),
         params.ints(&cutoffs),
         params.int(policy.default_cutoff(now))

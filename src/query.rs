@@ -292,7 +292,7 @@ impl TimeseriesQuery {
     }
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Filters {
     from_ms: Option<i64>,
     to_ms: Option<i64>,
@@ -453,24 +453,48 @@ impl Filters {
     }
 
     pub fn is_empty(&self) -> bool {
-        *self
-            == Self {
-                from_ms: None,
-                to_ms: None,
-                video_id: None,
-                viewer_id: None,
-                view_id: None,
-                event_name: None,
-                browser_name: None,
-                os_name: None,
-                device_type: None,
-                continent: None,
-                country: None,
-                city: None,
-                page_origin: None,
-                page_path: None,
-            }
+        *self == Self::default()
     }
+
+    /// The filters hourly rollups can answer: a date range, a video, and at
+    /// most one first-start context value. Viewer, view and event filters
+    /// always read events.
+    pub fn rollup_scope(&self) -> Option<RollupScope> {
+        if self.viewer_id.is_some() || self.view_id.is_some() || self.event_name.is_some() {
+            return None;
+        }
+        let mut dimensions = [
+            (&self.browser_name, "context_browser_name"),
+            (&self.os_name, "context_os_name"),
+            (&self.device_type, "context_device_type"),
+            (&self.continent, "ctx_continent"),
+            (&self.country, "ctx_country"),
+            (&self.city, "ctx_city"),
+            (&self.page_origin, "ctx_page_origin"),
+            (&self.page_path, "ctx_page_path"),
+        ]
+        .into_iter()
+        .filter_map(|(value, column)| value.as_ref().map(|value| (column, value.clone())));
+        let dimension = dimensions.next();
+        if dimensions.next().is_some() {
+            return None;
+        }
+        Some(RollupScope {
+            from_ms: self.from_ms,
+            to_ms: self.to_ms,
+            video_id: self.video_id.clone(),
+            dimension,
+        })
+    }
+}
+
+/// Filters a report can read from hourly rollups. See [`Filters::rollup_scope`].
+pub struct RollupScope {
+    pub from_ms: Option<i64>,
+    pub to_ms: Option<i64>,
+    pub video_id: Option<String>,
+    /// A first-start context column and the value it must equal.
+    pub dimension: Option<(&'static str, String)>,
 }
 
 impl Dimension {

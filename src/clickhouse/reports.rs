@@ -1,7 +1,10 @@
 //! Analytics reports in ClickHouse SQL. Each report mirrors the local storage
 //! report in `crate::store`, including its cohort rules, ordering, cursors and
 //! response shape, so HTTP, MCP, exports and dashboards see the same API.
-use super::{Params, Store};
+use super::{
+    Params, Store,
+    rollup::{Combined, Partials},
+};
 use crate::{
     api::ApiError,
     exports::emit_async,
@@ -18,13 +21,27 @@ const ENDED: &str = "'chunkify.video.view_ended'";
 const ERROR: &str = "'chunkify.video.playback_error'";
 
 #[derive(Clone, Copy)]
-enum Cohort {
+pub(super) enum Cohort {
     Basic,
     Quality,
     Engagement,
     Complete,
     Renditions,
     Retention,
+    /// Every measurement the rollups store, plus each view's start hours and
+    /// receipt range across all of its identities.
+    Rollup,
+}
+
+/// Further limits on a cohort, used by rollup refreshes and combined reads.
+#[derive(Default)]
+pub(super) struct Narrow {
+    /// A condition on every event read.
+    pub events: Option<String>,
+    /// A condition on view starts. Candidates need a matching start.
+    pub starts: Option<String>,
+    /// Also require the condition of each view's first start.
+    pub first_start: bool,
 }
 
 // Numeric report fields materialized at insert time; see `REPORT_NUMBERS`.
@@ -63,7 +80,7 @@ pub(super) const PLAYBACK_SCORE: &str = ", multiIf(
                 + m_rebuffer_duration_ms / greatest(m_playing_time_ms, m_rebuffer_duration_ms))),
     NULL) AS playback_score";
 
-const QUALITY_SAMPLES: &str = ", quality_samples AS (
+pub(super) const QUALITY_SAMPLES: &str = ", quality_samples AS (
     SELECT *, m_startup_time_ms AS startup_time_ms,
         m_rebuffer_duration_ms AS rebuffer_duration_ms,
         ifNull(m_startup_outcome,
@@ -75,7 +92,7 @@ const QUALITY_SAMPLES: &str = ", quality_samples AS (
 )";
 
 /// Context recorded on a view's first start, available to filters and callers.
-const START_CONTEXT: &[&str] = &[
+pub(super) const START_CONTEXT: &[&str] = &[
     "context_browser_name",
     "context_os_name",
     "context_device_type",
@@ -93,7 +110,8 @@ const VIEW_CONTEXT: &[&str] = &[
 
 /// Select each view's earliest retained start and its final or latest cumulative
 /// measurement, exactly as local storage does, then apply cohort filters.
-fn view_cohort(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn view_cohort(
     params: &mut Params,
     project: &str,
     through: i64,
@@ -101,14 +119,26 @@ fn view_cohort(
     filters: &Filters,
     cohort: Cohort,
     context: &[&str],
+    narrow: &Narrow,
 ) -> String {
-    let scope = format!(
+    let mut scope = format!(
         "project_id = {} AND ingest_id <= {} AND received_at_ms >= {}",
         params.text(project),
         params.int(through),
         params.int(cutoff)
     );
-    let conditions = filters.clickhouse(params);
+    if let Some(events) = &narrow.events {
+        scope = format!("{scope} AND {events}");
+    }
+    let filtered = filters.clickhouse(params);
+    let (candidate_conditions, conditions) = match &narrow.starts {
+        None => (filtered.clone(), filtered),
+        Some(starts) if narrow.first_start => {
+            let both = format!("{filtered} AND {starts}");
+            (both.clone(), both)
+        }
+        Some(starts) => (format!("{filtered} AND {starts}"), filtered),
+    };
     // Carry only the first-start context that filters or the caller read: each
     // extra column makes the per-view aggregation noticeably more expensive.
     let starts: Vec<&str> = START_CONTEXT
@@ -130,6 +160,11 @@ fn view_cohort(
         .map(|(index, column)| format!(", first_start.{} AS {column}", index + 1))
         .collect();
     let reached_end = format!("event_name = {ENDED} AND e_reason = 'ended'");
+    let progress_ratio = || {
+        let duration = stored_number("media_duration_seconds");
+        let progress = stored_number("furthest_progress_ratio");
+        format!("if({duration} > 0 AND {progress} BETWEEN 0 AND 1, {progress}, NULL)")
+    };
     let measurement: Vec<(&str, String)> = match cohort {
         Cohort::Basic => Vec::new(),
         Cohort::Retention => vec![
@@ -156,19 +191,41 @@ fn view_cohort(
             ("reached_end", reached_end),
             ("has_ended_event", format!("event_name = {ENDED}")),
         ],
-        Cohort::Engagement => {
-            let duration = stored_number("media_duration_seconds");
-            let progress = stored_number("furthest_progress_ratio");
-            vec![
-                ("reached_end", reached_end),
-                (
-                    "progress_ratio",
-                    format!("if({duration} > 0 AND {progress} BETWEEN 0 AND 1, {progress}, NULL)"),
-                ),
-            ]
-        }
+        Cohort::Engagement => vec![
+            ("reached_end", reached_end),
+            ("progress_ratio", progress_ratio()),
+        ],
+        Cohort::Rollup => vec![
+            ("startup_time_ms", stored_number("startup_time_ms")),
+            (
+                "rebuffer_duration_ms",
+                stored_number("rebuffer_duration_ms"),
+            ),
+            (
+                "startup_outcome",
+                format!("if(event_name = {ENDED}, e_startup_outcome, NULL)"),
+            ),
+            ("reached_end", reached_end),
+            ("progress_ratio", progress_ratio()),
+        ],
     };
-    let errors = matches!(cohort, Cohort::Quality | Cohort::Complete);
+    let errors = matches!(cohort, Cohort::Quality | Cohort::Complete | Cohort::Rollup);
+    // Rollups record every hour in which a view started and the receipt range
+    // of its events, across identities, to know which hours a view affects.
+    let (meta_aggregate, meta_projection) = if matches!(cohort, Cohort::Rollup) {
+        (
+            format!(
+                ", groupUniqArrayIf({}, event_name = {STARTED}) AS start_hours,
+                min(received_at_ms) AS min_received, max(received_at_ms) AS max_received",
+                super::rollup::hour_of("occurred_at_ms")
+            ),
+            ", arrayDistinct(arrayFlatten(groupArray(start_hours) OVER (PARTITION BY view_id))) AS hours,
+            min(min_received) OVER (PARTITION BY view_id) AS min_received_ms,
+            max(max_received) OVER (PARTITION BY view_id) AS max_received_ms",
+        )
+    } else {
+        (String::new(), "")
+    };
     let values = std::iter::once("playing_time_ms".to_owned())
         .chain(measurement.iter().map(|(_, expression)| expression.clone()))
         .map(|expression| format!("toNullable({expression})"))
@@ -193,11 +250,11 @@ fn view_cohort(
     };
     // A view qualifies only through a start with matching values, so first
     // narrowing to views with such a start keeps every result unchanged.
-    let candidates = if filters.is_empty() {
+    let candidates = if filters.is_empty() && narrow.starts.is_none() {
         String::new()
     } else {
         format!(
-            " AND view_id IN (SELECT view_id FROM events WHERE {scope} AND event_name = {STARTED} AND {conditions})"
+            " AND view_id IN (SELECT view_id FROM events WHERE {scope} AND event_name = {STARTED} AND {candidate_conditions})"
         )
     };
     format!(
@@ -208,7 +265,7 @@ fn view_cohort(
             argMaxIf(tuple({values}),
                 tuple(event_name = {ENDED}, sequence, occurred_at_ms, ingest_id),
                 event_name IN ({SNAPSHOT}, {ENDED})) AS measurement
-            {error_aggregate}
+            {error_aggregate}{meta_aggregate}
         FROM events
         WHERE {scope}
             AND event_name IN ({STARTED}, {SNAPSHOT}, {ENDED}{error_events}){candidates}
@@ -217,7 +274,7 @@ fn view_cohort(
         SELECT view_id, video_id, viewer_id,
             start_order.2 AS occurred_at_ms{start_columns},
             ifNull(measurement.1, 0) AS playing_time_ms,
-            measurement.1 AS m_playing_time_ms{projections}{error_projection}
+            measurement.1 AS m_playing_time_ms{projections}{error_projection}{meta_projection}
         FROM per_identity WHERE start_count > 0
         ORDER BY view_id, start_order LIMIT 1 BY view_id
     ), view_metrics AS (
@@ -268,6 +325,14 @@ fn cohort_for(metrics: MetricSet) -> Cohort {
         MetricSet::Summary => Cohort::Basic,
         MetricSet::Quality => Cohort::Quality,
         MetricSet::Engagement => Cohort::Engagement,
+    }
+}
+
+fn partials_for(metrics: MetricSet) -> Partials {
+    match metrics {
+        MetricSet::Summary => Partials::Summary,
+        MetricSet::Engagement => Partials::Engagement,
+        MetricSet::Quality => Partials::Quality,
     }
 }
 
@@ -641,28 +706,66 @@ impl Store {
                 None => self.watermark(&project, cutoff).await?,
             };
             let mut params = Params::default();
-            let cohort = view_cohort(
-                &mut params,
-                &project,
-                through,
-                cutoff,
-                &filters,
-                cohort_for(metrics),
-                &[group_by.column()],
-            );
             let column = group_by.column();
-            let continuation = match &cursor {
-                None => "1".to_owned(),
-                Some(cursor) => cursor.after.continuation(column, &mut params),
+            let plan = self
+                .rollup_plan(&project, &filters, Some(column), cutoff, through)
+                .await?;
+            let sql = if let Some(plan) = plan {
+                let parts = self.combined(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &filters,
+                    &plan,
+                    Combined {
+                        partials: partials_for(metrics),
+                        cohort: cohort_for(metrics),
+                        context: &[column],
+                        raw_key: Some(column.to_owned()),
+                        stored_key: Some("value"),
+                        dimension: Some(column),
+                    },
+                )?;
+                // Each merged row counts views as `sum(views)`.
+                let continuation = match &cursor {
+                    None => "1".to_owned(),
+                    Some(cursor) => cursor
+                        .after
+                        .continuation(column, &mut params)
+                        .replace("count()", "sum(views)"),
+                };
+                format!(
+                    "{parts} SELECT key AS {column}, {} FROM parts
+                    GROUP BY {column} HAVING {continuation}
+                    ORDER BY sum(views) DESC, {column} ASC NULLS FIRST LIMIT {}",
+                    partials_for(metrics).finals(),
+                    limit + 1
+                )
+            } else {
+                let cohort = view_cohort(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &filters,
+                    cohort_for(metrics),
+                    &[column],
+                    &Narrow::default(),
+                );
+                let continuation = match &cursor {
+                    None => "1".to_owned(),
+                    Some(cursor) => cursor.after.continuation(column, &mut params),
+                };
+                let (samples, source) = source_for(metrics);
+                format!(
+                    "{cohort}{samples} SELECT {column}, {} FROM {source}
+                    GROUP BY {column} HAVING {continuation}
+                    ORDER BY count() DESC, {column} ASC NULLS FIRST LIMIT {}",
+                    metric_columns(metrics),
+                    limit + 1
+                )
             };
-            let (samples, source) = source_for(metrics);
-            let sql = format!(
-                "{cohort}{samples} SELECT {column}, {} FROM {source}
-                GROUP BY {column} HAVING {continuation}
-                ORDER BY count() DESC, {column} ASC NULLS FIRST LIMIT {}",
-                metric_columns(metrics),
-                limit + 1
-            );
             let mut rows = self.client.rows(&sql, &params).await?;
             let mut groups = Vec::new();
             let mut last = None;
@@ -757,30 +860,69 @@ impl Store {
                 None => self.watermark(&project, cutoff).await?,
             };
             let mut params = Params::default();
-            let cohort = view_cohort(
-                &mut params,
-                &project,
-                through,
-                cutoff,
-                &filters,
-                if per_video {
-                    Cohort::Quality
-                } else {
-                    Cohort::Basic
-                },
-                &[],
-            );
+            let cohort = if per_video {
+                Cohort::Quality
+            } else {
+                Cohort::Basic
+            };
+            // Floating-point sort keys must be identical on every page, which
+            // only one aggregation path guarantees; those orders read events.
+            let plan = if per_video
+                && matches!(
+                    sort,
+                    VideoSort::TotalPlayingTimeMs | VideoSort::PlaybackScore
+                ) {
+                None
+            } else {
+                self.rollup_plan(&project, &filters, None, cutoff, through)
+                    .await?
+            };
+            let partials = if per_video {
+                Partials::Videos
+            } else {
+                Partials::Summary
+            };
+            let combined = match &plan {
+                Some(plan) => Some(self.combined(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &filters,
+                    plan,
+                    Combined {
+                        partials,
+                        cohort,
+                        context: &[],
+                        raw_key: per_video.then(|| "video_id".to_owned()),
+                        stored_key: per_video.then_some("video_id"),
+                        dimension: None,
+                    },
+                )?),
+                None => None,
+            };
+            let cohort = match &combined {
+                Some(_) => String::new(),
+                None => view_cohort(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &filters,
+                    cohort,
+                    &[],
+                    &Narrow::default(),
+                ),
+            };
             if !per_video {
-                let row = self
-                    .client
-                    .one(
-                        &format!(
-                            "{cohort} SELECT {} FROM view_metrics",
-                            metric_columns(MetricSet::Summary)
-                        ),
-                        &params,
-                    )
-                    .await?;
+                let sql = match &combined {
+                    Some(parts) => format!("{parts} SELECT {} FROM parts", partials.finals()),
+                    None => format!(
+                        "{cohort} SELECT {} FROM view_metrics",
+                        metric_columns(MetricSet::Summary)
+                    ),
+                };
+                let row = self.client.one(&sql, &params).await?;
                 return metric_json(&row, 0, MetricSet::Summary);
             }
             let (direction, comparison) = match order {
@@ -829,15 +971,26 @@ impl Store {
             // Aggregate the whole filtered cohort before ranking or applying the
             // cursor. Summing sorted values keeps floating-point sort keys
             // identical when the next page recomputes the same cohort.
+            let video_metrics = match &combined {
+                Some(parts) => format!(
+                    "{parts}, video_metrics AS (
+                        SELECT key AS video_id, {} FROM parts GROUP BY video_id
+                    )",
+                    Partials::Videos.finals()
+                ),
+                None => format!(
+                    "{cohort}, video_metrics AS (
+                        SELECT video_id, count() AS views, uniqExact(viewer_id) AS unique_viewers,
+                            arraySum(arraySort(groupArray(playing_time_ms))) AS total_playing_time_ms,
+                            if(count(playback_score) = 0, NULL,
+                                arraySum(arraySort(groupArray(playback_score))) / count(playback_score)) AS score,
+                            count(playback_score) AS score_samples
+                        FROM view_metrics GROUP BY video_id
+                    )"
+                ),
+            };
             let sql = format!(
-                "{cohort}, video_metrics AS (
-                    SELECT video_id, count() AS views, uniqExact(viewer_id) AS unique_viewers,
-                        arraySum(arraySort(groupArray(playing_time_ms))) AS total_playing_time_ms,
-                        if(count(playback_score) = 0, NULL,
-                            arraySum(arraySort(groupArray(playback_score))) / count(playback_score)) AS score,
-                        count(playback_score) AS score_samples
-                    FROM view_metrics GROUP BY video_id
-                )
+                "{video_metrics}
                 SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples FROM video_metrics
                 WHERE {continuation} ORDER BY {column} {direction} NULLS LAST{tie_breaker} LIMIT {}",
                 limit + 1
@@ -913,26 +1066,48 @@ impl Store {
             // One query reads one consistent snapshot; no watermark round trip.
             let through = i64::MAX;
             let mut params = Params::default();
-            let cohort = view_cohort(
-                &mut params,
-                &project,
-                through,
-                cutoff,
-                &filters,
-                cohort_for(metrics),
-                &[],
-            );
-            let (samples, source) = source_for(metrics);
-            let row = self
-                .client
-                .one(
-                    &format!(
-                        "{cohort}{samples} SELECT {} FROM {source}",
-                        metric_columns(metrics)
-                    ),
-                    &params,
-                )
+            let plan = self
+                .rollup_plan(&project, &filters, None, cutoff, through)
                 .await?;
+            let sql = if let Some(plan) = plan {
+                let parts = self.combined(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &filters,
+                    &plan,
+                    Combined {
+                        partials: partials_for(metrics),
+                        cohort: cohort_for(metrics),
+                        context: &[],
+                        raw_key: None,
+                        stored_key: None,
+                        dimension: None,
+                    },
+                )?;
+                format!(
+                    "{parts} SELECT {} FROM parts",
+                    partials_for(metrics).finals()
+                )
+            } else {
+                let cohort = view_cohort(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &filters,
+                    cohort_for(metrics),
+                    &[],
+                    &Narrow::default(),
+                );
+                let (samples, source) = source_for(metrics);
+                format!(
+                    "{cohort}{samples} SELECT {} FROM {source}",
+                    metric_columns(metrics)
+                )
+            };
+            let row = self.client.one(&sql, &params).await?;
             metric_json(&row, 0, metrics)
         };
         self.cached(name, &project, &query, query.export.is_some(), work)
@@ -973,24 +1148,55 @@ impl Store {
             // One query reads one consistent snapshot; no watermark round trip.
             let through = i64::MAX;
             let mut params = Params::default();
-            let cohort = view_cohort(
-                &mut params,
-                &project,
-                through,
-                cutoff,
-                &window.filters,
-                cohort_for(metrics),
-                &[],
-            );
             let width = window.interval.milliseconds();
-            let (samples, source) = source_for(metrics);
-            let sql = format!(
-                "{cohort}{samples} SELECT intDiv(occurred_at_ms - {}, {}) AS bucket_index,
-                {} FROM {source} GROUP BY bucket_index ORDER BY bucket_index",
-                params.int(window.first_bucket_ms),
-                params.int(width),
-                metric_columns(metrics)
-            );
+            // Buckets start on UTC hours, so each rollup hour falls in one bucket.
+            let plan = self
+                .rollup_plan(&project, &window.filters, None, cutoff, through)
+                .await?;
+            let sql = if let Some(plan) = plan {
+                let first = params.int(window.first_bucket_ms);
+                let size = params.int(width);
+                let parts = self.combined(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &window.filters,
+                    &plan,
+                    Combined {
+                        partials: partials_for(metrics),
+                        cohort: cohort_for(metrics),
+                        context: &[],
+                        raw_key: Some(format!("intDiv(occurred_at_ms - {first}, {size})")),
+                        stored_key: Some(&format!("intDiv(hour_ms - {first}, {size})")),
+                        dimension: None,
+                    },
+                )?;
+                format!(
+                    "{parts} SELECT key AS bucket_index, {} FROM parts
+                    GROUP BY bucket_index ORDER BY bucket_index",
+                    partials_for(metrics).finals()
+                )
+            } else {
+                let cohort = view_cohort(
+                    &mut params,
+                    &project,
+                    through,
+                    cutoff,
+                    &window.filters,
+                    cohort_for(metrics),
+                    &[],
+                    &Narrow::default(),
+                );
+                let (samples, source) = source_for(metrics);
+                format!(
+                    "{cohort}{samples} SELECT intDiv(occurred_at_ms - {}, {}) AS bucket_index,
+                    {} FROM {source} GROUP BY bucket_index ORDER BY bucket_index",
+                    params.int(window.first_bucket_ms),
+                    params.int(width),
+                    metric_columns(metrics)
+                )
+            };
             let mut rows = self.client.rows(&sql, &params).await?;
             let empty = empty_metrics(metrics)?;
             let bucket = |mut data: Value, index: usize| {
@@ -1059,6 +1265,7 @@ impl Store {
                 &filters,
                 Cohort::Renditions,
                 &[],
+                &Narrow::default(),
             );
             // Expand only the selected final/latest cumulative snapshot. Summing
             // every snapshot would count the same watch time repeatedly.
@@ -1165,6 +1372,7 @@ impl Store {
                 &filters,
                 Cohort::Retention,
                 &[],
+                &Narrow::default(),
             );
             let sql = format!(
                 "{cohort}, measured AS (
@@ -1287,6 +1495,7 @@ impl Store {
             &filters,
             Cohort::Complete,
             VIEW_CONTEXT,
+            &Narrow::default(),
         );
         let column = sort.column();
         let (direction, comparison) = match order {
@@ -1417,6 +1626,7 @@ impl Store {
             &filters,
             Cohort::Complete,
             VIEW_CONTEXT,
+            &Narrow::default(),
         );
         let view = self
             .client
@@ -1507,6 +1717,7 @@ impl Store {
                 &filters,
                 Cohort::Basic,
                 &[dimension.column()],
+                &Narrow::default(),
             );
             let column = dimension.column();
             let continuation = match &cursor {
@@ -1588,6 +1799,7 @@ impl Store {
                 &filters,
                 Cohort::Basic,
                 &[],
+                &Narrow::default(),
             );
             let scope = format!(
                 "project_id = {} AND ingest_id <= {} AND received_at_ms >= {}",

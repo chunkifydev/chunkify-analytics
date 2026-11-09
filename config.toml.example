@@ -21,6 +21,8 @@ registry_refresh_seconds = 5
 deduplication_window_seconds = 604800
 # Optional 0..63, distinct for each server sharing the database.
 # node_id = 1
+# Seconds between refreshes of the hourly report rollups. 0 reads events only.
+rollup_interval_seconds = 15
 
 [server]
 # External base URL for CSV download links behind an ingress or URL prefix:

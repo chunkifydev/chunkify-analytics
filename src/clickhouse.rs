@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::{fmt::Write as _, sync::atomic::Ordering, time::Duration};
 
 pub mod reports;
+pub mod rollup;
 pub mod store;
 #[cfg(test)]
 mod tests;
@@ -312,7 +313,11 @@ impl Client {
             SETTINGS non_replicated_deduplication_window = 100000",
             &none,
         )
-        .await
+        .await?;
+        for table in rollup::tables() {
+            self.execute(table, &none).await?;
+        }
+        Ok(())
     }
 }
 
@@ -432,7 +437,11 @@ fn events_table() -> String {
             "n_{field} Nullable(Float64) MATERIALIZED if(event_name NOT IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended'), NULL, if(isNotNull(e_{field}), e_{field}, if(JSONType(event_remainder, '{field}') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, '{field}'), NULL)))"
         ));
     }
+    // ClickHouse's own clock when the row is written, which rollups use to find
+    // rows stored since their last refresh. Callers cannot set it.
+    columns.push("stored_at_ms Int64 MATERIALIZED toUnixTimestamp64Milli(now64(3))".into());
     columns.push("INDEX events_event event_id TYPE bloom_filter(0.0001) GRANULARITY 1".into());
+    columns.push("INDEX events_stored stored_at_ms TYPE minmax GRANULARITY 1".into());
     columns.push("INDEX events_view view_id TYPE bloom_filter GRANULARITY 4".into());
     columns.push("INDEX events_video video_id TYPE bloom_filter GRANULARITY 4".into());
     columns.push("INDEX events_occurred occurred_at_ms TYPE minmax GRANULARITY 4".into());

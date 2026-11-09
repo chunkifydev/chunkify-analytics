@@ -70,6 +70,7 @@ struct ClickHouse {
     registry_refresh_seconds: Option<u64>,
     node_id: Option<u16>,
     deduplication_window_seconds: Option<u64>,
+    rollup_interval_seconds: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -140,6 +141,12 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             "clickhouse.deduplication_window_seconds",
             clickhouse
                 .deduplication_window_seconds
+                .map(|value| value.to_string()),
+        ),
+        (
+            "clickhouse.rollup_interval_seconds",
+            clickhouse
+                .rollup_interval_seconds
                 .map(|value| value.to_string()),
         ),
     ] {

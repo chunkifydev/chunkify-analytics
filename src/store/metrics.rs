@@ -826,7 +826,11 @@ pub(super) fn view_cohort_with_labels(
                 context_browser_name := context_browser_name,
                 context_os_name := context_os_name,
                 context_device_type := context_device_type,
-                context_remainder := context_remainder{label_fields}
+                context_continent := context_continent,
+                context_country := context_country,
+                context_city := context_city,
+                context_page_origin := context_page_origin,
+                context_page_path := context_page_path{label_fields}
             ), (sequence, occurred_at_ms, ingest_id))
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS first_start,
             min((sequence, occurred_at_ms, ingest_id))
@@ -845,13 +849,17 @@ pub(super) fn view_cohort_with_labels(
             first_start.context_browser_name AS context_browser_name,
             first_start.context_os_name AS context_os_name,
             first_start.context_device_type AS context_device_type,
-            first_start.context_remainder AS context_remainder,
+            first_start.context_continent AS context_continent,
+            first_start.context_country AS context_country,
+            first_start.context_city AS context_city,
+            first_start.context_page_origin AS context_page_origin,
+            first_start.context_page_path AS context_page_path,
             {label_projection}
             COALESCE(measurement.playing_time_ms, 0) AS playing_time_ms{measurement_projection}
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT view_id, occurred_at_ms, video_id, viewer_id, e_user_id, e_video_title, context_browser_name, context_os_name, context_device_type, context_remainder, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, e_user_id, e_video_title, context_browser_name, context_os_name, context_device_type, context_continent, context_country, context_city, context_page_origin, context_page_path, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

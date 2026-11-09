@@ -433,7 +433,7 @@ mod index_tests {
     }
 
     #[test]
-    fn index_loads_files_written_before_user_and_title_columns() {
+    fn index_loads_files_written_before_version_6_columns() {
         let directory =
             std::env::temp_dir().join(format!("chunkify-index-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
@@ -449,7 +449,8 @@ mod index_tests {
                 "UPDATE collector_parquet_stage SET event_remainder = CASE ingest_id
                     WHEN 1 THEN '{{\"user_id\":\"old-user\",\"video_title\":\"Old\"}}'
                     ELSE '{{\"user_id\":\"\"}}' END;
-                COPY (SELECT * EXCLUDE(e_user_id, e_video_title) FROM collector_parquet_stage) TO {} (FORMAT parquet);
+                COPY (SELECT * EXCLUDE(e_user_id, e_video_title, context_continent, context_country,
+                    context_city, context_page_origin, context_page_path) FROM collector_parquet_stage) TO {} (FORMAT parquet);
                 DELETE FROM collector_parquet_stage;",
                 literal(&old)
             ))

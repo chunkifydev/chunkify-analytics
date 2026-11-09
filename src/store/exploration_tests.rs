@@ -25,9 +25,10 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
         )
         .unwrap();
         store.call("group_ranking_fixture", |db| {
-            db.execute_batch("INSERT INTO events(event_id,project_id,view_id,video_id,viewer_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,context_browser_name,context_os_name,context_device_type,context_remainder)
+            db.execute_batch("INSERT INTO events(event_id,project_id,view_id,video_id,viewer_id,event_name,sequence,occurred_at_ms,received_at_ms,event_remainder,context_format,context_browser_name,context_os_name,context_device_type,context_remainder,context_continent,context_country,context_city,context_page_origin,context_page_path)
                 SELECT id,project,id,'video',id,'chunkify.video.view_started',1,1000,1000,'{}',0,label,label,label,
-                    json_object('continent',label,'country',label,'city',label,'page_origin',label,'page_path',label)
+                    json_object('continent',label,'country',label,'city',label,'page_origin',label,'page_path',label),
+                    label,label,label,label,label
                 FROM (VALUES ('z1','default','Z'),('z2','default','Z'),('z3','default','Z'),('z4','default','Z'),
                     ('n1','default',NULL),('n2','default',NULL),('a1','default','A'),('a2','default','A'),
                     ('b1','default','B'),('b2','default','B'),('c1','default','C'),('other','other','A')) fixture(id,project,label)")?;

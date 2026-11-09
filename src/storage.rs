@@ -115,6 +115,26 @@ const BASE: &[(&str, &str)] = &[
     ("context_browser_name", "VARCHAR"),
     ("context_os_name", "VARCHAR"),
     ("context_device_type", "VARCHAR"),
+    // Storage version 6. Like the three above, these are query copies of
+    // string context values; decoding rebuilds context from JSON only.
+    ("context_continent", "VARCHAR"),
+    ("context_country", "VARCHAR"),
+    ("context_city", "VARCHAR"),
+    ("context_page_origin", "VARCHAR"),
+    ("context_page_path", "VARCHAR"),
+];
+
+/// String context values copied into `context_*` columns for filters and
+/// breakdowns, in storage column order.
+const QUERY_CONTEXT_FIELDS: [&str; 8] = [
+    "browser_name",
+    "os_name",
+    "device_type",
+    "continent",
+    "country",
+    "city",
+    "page_origin",
+    "page_path",
 ];
 
 static COLUMNS: LazyLock<Vec<(String, &'static str)>> = LazyLock::new(|| {
@@ -304,7 +324,7 @@ pub fn encode(
     };
     values.push(stored.map_or(SqlValue::Null, |v| SqlValue::Text(v.to_string())));
     values.push(SqlValue::Int(format));
-    for key in ["browser_name", "os_name", "device_type"] {
+    for key in QUERY_CONTEXT_FIELDS {
         values.push(text(context.and_then(|c| c.get(key))));
     }
     for &(key, kind) in EVENT_FIELDS {
@@ -491,9 +511,9 @@ fn migrate_v5(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Adds `e_user_id` and `e_video_title`. Existing rows keep any such values
-/// only in `event_remainder`, which decoding still returns; their columns stay
-/// NULL.
+/// Adds `e_user_id`, `e_video_title` and the location and page `context_*`
+/// columns. Existing rows keep these values only in their event and context
+/// JSON, which decoding still returns; their columns stay NULL.
 fn migrate_v6(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     create_events(connection, "events_v6")?;
     connection.execute_batch(
@@ -761,9 +781,17 @@ mod tests {
         }
     }
     #[test]
-    fn version_6_adds_user_and_title_columns() {
+    fn version_6_adds_new_columns() {
         let mut connection = Connection::open_in_memory().unwrap();
-        let new_columns = ["e_user_id", "e_video_title"];
+        let new_columns = [
+            "e_user_id",
+            "e_video_title",
+            "context_continent",
+            "context_country",
+            "context_city",
+            "context_page_origin",
+            "context_page_path",
+        ];
         let old: Vec<_> = COLUMNS
             .iter()
             .filter(|(name, _)| !new_columns.contains(&name.as_str()))
@@ -777,9 +805,15 @@ mod tests {
             CREATE SEQUENCE event_order START 10;
             CREATE TABLE events(ingest_id BIGINT PRIMARY KEY DEFAULT nextval('event_order'), {definitions}, UNIQUE(project_id, event_id));
             CREATE TABLE event_otlp(project_id VARCHAR NOT NULL, event_id VARCHAR NOT NULL, payload VARCHAR NOT NULL, PRIMARY KEY(project_id, event_id));")).unwrap();
-        // A version 5 collector kept these optional properties in the remainder.
+        // A version 5 collector kept these optional properties in the remainder
+        // and location and page context only in the context JSON.
         let mut stored = event(1);
-        let values = encode(&stored, None, 123, "default", None)
+        let context = event_context_v1(
+            &stored,
+            Some(&json!({"country": "GB", "city": "London", "page_path": "/watch", "continent": null})),
+        )
+        .unwrap();
+        let values = encode(&stored, Some(&context), 123, "default", None)
             .map_err(|e| e.message)
             .unwrap();
         let values: Vec<_> = COLUMNS
@@ -829,9 +863,18 @@ mod tests {
             .unwrap();
         // Stored values are not copied; decoding still returns them.
         assert_eq!(columns, (None, None));
+        let location: [Option<String>; 5] = connection
+            .query_row(
+                "SELECT context_continent, context_country, context_city, context_page_origin, context_page_path FROM events",
+                [],
+                |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?]),
+            )
+            .unwrap();
+        assert_eq!(location, [None, None, None, None, None]);
         let records = read(&connection);
         assert_eq!(records[0].0, 10);
         assert_eq!(records[0].1["event"], stored);
+        assert_eq!(records[0].1["event_context"], context);
         // New writes use the version 6 layout and keep the sequence.
         let mut next = event(2);
         next["user_id"] = json!("user-2");

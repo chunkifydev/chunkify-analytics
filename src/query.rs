@@ -182,21 +182,11 @@ impl Dimension {
             Self::BrowserName => "context_browser_name",
             Self::OsName => "context_os_name",
             Self::DeviceType => "context_device_type",
-            Self::Continent => {
-                "CASE WHEN json_type(context_remainder, '$.continent') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.continent') END"
-            }
-            Self::Country => {
-                "CASE WHEN json_type(context_remainder, '$.country') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.country') END"
-            }
-            Self::City => {
-                "CASE WHEN json_type(context_remainder, '$.city') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.city') END"
-            }
-            Self::PageOrigin => {
-                "CASE WHEN json_type(context_remainder, '$.page_origin') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_origin') END"
-            }
-            Self::PagePath => {
-                "CASE WHEN json_type(context_remainder, '$.page_path') = 'VARCHAR' THEN json_extract_string(context_remainder, '$.page_path') END"
-            }
+            Self::Continent => "context_continent",
+            Self::Country => "context_country",
+            Self::City => "context_city",
+            Self::PageOrigin => "context_page_origin",
+            Self::PagePath => "context_page_path",
             Self::VideoId => "video_id",
             Self::ViewerId => "viewer_id",
             Self::UserId => "e_user_id",

@@ -405,6 +405,17 @@ pub const CONTEXT_DIMENSIONS: &[(&str, &str)] = &[
     ("ctx_page_path", "page_path"),
 ];
 
+/// Numeric report fields of snapshot and end events, the only events reports
+/// measure, extracted once at insert time. Storage keeps integral floats in the
+/// event JSON to preserve their representation, so a field falls back to that
+/// JSON when its typed column is empty.
+pub const REPORT_NUMBERS: &[&str] = &[
+    "startup_time_ms",
+    "rebuffer_duration_ms",
+    "media_duration_seconds",
+    "furthest_progress_ratio",
+];
+
 fn events_table() -> String {
     let mut columns = vec!["ingest_id Int64".to_owned()];
     for (name, kind) in crate::storage::COLUMNS.iter() {
@@ -414,6 +425,11 @@ fn events_table() -> String {
     for (column, key) in CONTEXT_DIMENSIONS {
         columns.push(format!(
             "{column} Nullable(String) MATERIALIZED if(JSONType(ifNull(context_remainder, '{{}}'), '{key}') = 'String', JSONExtractString(ifNull(context_remainder, '{{}}'), '{key}'), NULL)"
+        ));
+    }
+    for field in REPORT_NUMBERS {
+        columns.push(format!(
+            "n_{field} Nullable(Float64) MATERIALIZED if(event_name NOT IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended'), NULL, if(isNotNull(e_{field}), e_{field}, if(JSONType(event_remainder, '{field}') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, '{field}'), NULL)))"
         ));
     }
     columns.push("INDEX events_event event_id TYPE bloom_filter(0.0001) GRANULARITY 1".into());

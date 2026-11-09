@@ -114,7 +114,7 @@ in the ClickHouse user's profile.
 
 | Table | Contents |
 | --- | --- |
-| `events` | One row per stored event, ordered by project and receipt order and partitioned by receipt month. Location and page columns are extracted at insert time. |
+| `events` | One row per stored event, ordered by project and receipt order and partitioned by receipt month. Location, page and the numeric fields reports measure are extracted at insert time. |
 | `registry` | Versioned project registry documents. The highest version is active. |
 
 `init` and `serve` create missing tables. Do not change these tables by hand.

@@ -27,12 +27,11 @@ enum Cohort {
     Retention,
 }
 
-// Storage preserves some numeric representations in JSON, notably integral
-// floats. These field names are fixed by this module, never supplied by callers.
+// Numeric report fields materialized at insert time; see `REPORT_NUMBERS`.
+// These field names are fixed by this module, never supplied by callers.
 fn stored_number(field: &str) -> String {
-    format!(
-        "if(isNotNull(e_{field}), e_{field}, if(JSONType(event_remainder, '{field}') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, '{field}'), NULL))"
-    )
+    debug_assert!(super::REPORT_NUMBERS.contains(&field));
+    format!("n_{field}")
 }
 
 fn json_array(field: &str) -> String {
@@ -75,6 +74,23 @@ const QUALITY_SAMPLES: &str = ", quality_samples AS (
     FROM view_metrics
 )";
 
+/// Context recorded on a view's first start, available to filters and callers.
+const START_CONTEXT: &[&str] = &[
+    "context_browser_name",
+    "context_os_name",
+    "context_device_type",
+    "ctx_continent",
+    "ctx_country",
+    "ctx_city",
+    "ctx_page_origin",
+    "ctx_page_path",
+];
+const VIEW_CONTEXT: &[&str] = &[
+    "context_browser_name",
+    "context_os_name",
+    "context_device_type",
+];
+
 /// Select each view's earliest retained start and its final or latest cumulative
 /// measurement, exactly as local storage does, then apply cohort filters.
 fn view_cohort(
@@ -84,6 +100,7 @@ fn view_cohort(
     cutoff: i64,
     filters: &Filters,
     cohort: Cohort,
+    context: &[&str],
 ) -> String {
     let scope = format!(
         "project_id = {} AND ingest_id <= {} AND received_at_ms >= {}",
@@ -92,6 +109,26 @@ fn view_cohort(
         params.int(cutoff)
     );
     let conditions = filters.clickhouse(params);
+    // Carry only the first-start context that filters or the caller read: each
+    // extra column makes the per-view aggregation noticeably more expensive.
+    let starts: Vec<&str> = START_CONTEXT
+        .iter()
+        .copied()
+        .filter(|column| context.contains(column) || conditions.contains(column))
+        .collect();
+    let first_start = if starts.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "argMinIf(tuple({}), tuple(sequence, occurred_at_ms, ingest_id), event_name = {STARTED}) AS first_start,",
+            starts.join(", ")
+        )
+    };
+    let start_columns: String = starts
+        .iter()
+        .enumerate()
+        .map(|(index, column)| format!(", first_start.{} AS {column}", index + 1))
+        .collect();
     let reached_end = format!("event_name = {ENDED} AND e_reason = 'ended'");
     let measurement: Vec<(&str, String)> = match cohort {
         Cohort::Basic => Vec::new(),
@@ -165,10 +202,7 @@ fn view_cohort(
     };
     format!(
         "WITH per_identity AS (
-        SELECT view_id, video_id, viewer_id,
-            argMinIf(tuple(occurred_at_ms, context_browser_name, context_os_name, context_device_type,
-                    ctx_continent, ctx_country, ctx_city, ctx_page_origin, ctx_page_path),
-                tuple(sequence, occurred_at_ms, ingest_id), event_name = {STARTED}) AS first_start,
+        SELECT view_id, video_id, viewer_id, {first_start}
             minIf(tuple(sequence, occurred_at_ms, ingest_id), event_name = {STARTED}) AS start_order,
             countIf(event_name = {STARTED}) AS start_count,
             argMaxIf(tuple({values}),
@@ -181,15 +215,7 @@ fn view_cohort(
         GROUP BY view_id, video_id, viewer_id
     ), started AS (
         SELECT view_id, video_id, viewer_id,
-            first_start.1 AS occurred_at_ms,
-            first_start.2 AS context_browser_name,
-            first_start.3 AS context_os_name,
-            first_start.4 AS context_device_type,
-            first_start.5 AS ctx_continent,
-            first_start.6 AS ctx_country,
-            first_start.7 AS ctx_city,
-            first_start.8 AS ctx_page_origin,
-            first_start.9 AS ctx_page_path,
+            start_order.2 AS occurred_at_ms{start_columns},
             ifNull(measurement.1, 0) AS playing_time_ms,
             measurement.1 AS m_playing_time_ms{projections}{error_projection}
         FROM per_identity WHERE start_count > 0
@@ -622,6 +648,7 @@ impl Store {
                 cutoff,
                 &filters,
                 cohort_for(metrics),
+                &[group_by.column()],
             );
             let column = group_by.column();
             let continuation = match &cursor {
@@ -741,6 +768,7 @@ impl Store {
                 } else {
                     Cohort::Basic
                 },
+                &[],
             );
             if !per_video {
                 let row = self
@@ -882,7 +910,8 @@ impl Store {
         let filters = query.filters()?;
         let work = async {
             let cutoff = self.cutoff(&project)?;
-            let through = self.watermark(&project, cutoff).await?;
+            // One query reads one consistent snapshot; no watermark round trip.
+            let through = i64::MAX;
             let mut params = Params::default();
             let cohort = view_cohort(
                 &mut params,
@@ -891,6 +920,7 @@ impl Store {
                 cutoff,
                 &filters,
                 cohort_for(metrics),
+                &[],
             );
             let (samples, source) = source_for(metrics);
             let row = self
@@ -940,7 +970,8 @@ impl Store {
         };
         let work = async {
             let cutoff = self.cutoff(&project)?;
-            let through = self.watermark(&project, cutoff).await?;
+            // One query reads one consistent snapshot; no watermark round trip.
+            let through = i64::MAX;
             let mut params = Params::default();
             let cohort = view_cohort(
                 &mut params,
@@ -949,6 +980,7 @@ impl Store {
                 cutoff,
                 &window.filters,
                 cohort_for(metrics),
+                &[],
             );
             let width = window.interval.milliseconds();
             let (samples, source) = source_for(metrics);
@@ -1026,6 +1058,7 @@ impl Store {
                 cutoff,
                 &filters,
                 Cohort::Renditions,
+                &[],
             );
             // Expand only the selected final/latest cumulative snapshot. Summing
             // every snapshot would count the same watch time repeatedly.
@@ -1131,6 +1164,7 @@ impl Store {
                 cutoff,
                 &filters,
                 Cohort::Retention,
+                &[],
             );
             let sql = format!(
                 "{cohort}, measured AS (
@@ -1252,6 +1286,7 @@ impl Store {
             cutoff,
             &filters,
             Cohort::Complete,
+            VIEW_CONTEXT,
         );
         let column = sort.column();
         let (direction, comparison) = match order {
@@ -1381,6 +1416,7 @@ impl Store {
             cutoff,
             &filters,
             Cohort::Complete,
+            VIEW_CONTEXT,
         );
         let view = self
             .client
@@ -1470,6 +1506,7 @@ impl Store {
                 cutoff,
                 &filters,
                 Cohort::Basic,
+                &[dimension.column()],
             );
             let column = dimension.column();
             let continuation = match &cursor {
@@ -1550,6 +1587,7 @@ impl Store {
                 cutoff,
                 &filters,
                 Cohort::Basic,
+                &[],
             );
             let scope = format!(
                 "project_id = {} AND ingest_id <= {} AND received_at_ms >= {}",

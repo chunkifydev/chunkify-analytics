@@ -24,7 +24,7 @@ With Docker, this also works:
 ```sh
 docker run -d --name chunkify-clickhouse -p 127.0.0.1:8123:8123 \
   -e CLICKHOUSE_SKIP_USER_SETUP=1 --ulimit nofile=262144:262144 \
-  clickhouse/clickhouse-server:25.8
+  clickhouse/clickhouse-server:26.10
 ```
 
 Tests create one database per test server, named `chunkify_*`, and use

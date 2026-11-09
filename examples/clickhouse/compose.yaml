@@ -6,7 +6,7 @@ name: chunkify-analytics
 
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:25.8
+    image: clickhouse/clickhouse-server:26.10
     restart: unless-stopped
     environment:
       CLICKHOUSE_USER: chunkify

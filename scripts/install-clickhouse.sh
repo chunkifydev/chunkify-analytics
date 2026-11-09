@@ -4,26 +4,26 @@ set -eu
 # Install a pinned ClickHouse server binary for local development, tests and the
 # native demo. Production installations can use any supported ClickHouse server.
 # Usage: sh scripts/install-clickhouse.sh [DESTINATION] [ARCHITECTURE]
-version=25.8.12.129
+version=26.10.2.103
 destination=${1:-target/clickhouse}
 architecture=${2:-$(uname -m)}
-base="https://github.com/ClickHouse/ClickHouse/releases/download/v$version-lts"
+base="https://github.com/ClickHouse/ClickHouse/releases/download/v$version-stable"
 case "$(uname -s)/$architecture" in
     Linux/amd64|Linux/x86_64)
         asset=clickhouse-common-static-$version-amd64.tgz
-        checksum=9fd023ffc2446ba00d817bd8cfadfbfd6d161b5710e0a8c4ab5e7a76f8a84b39
+        checksum=ec811478449184dea496ba17c3f76fdd3aeb2013dd5041676bd00041fed98d17
         ;;
     Linux/arm64|Linux/aarch64)
         asset=clickhouse-common-static-$version-arm64.tgz
-        checksum=3365105838c502884359f18e3aa64f1b97cad002d8e2fe60aa7a4daa6d198b8e
+        checksum=bd59e072630c8884037575c59dad664330fd69c4247da334c9cf1b3f79a1a4c4
         ;;
     Darwin/x86_64)
         asset=clickhouse-macos
-        checksum=9a1df34b6ec2d60dfa699670f1bf3ae565e4da46f0b63610c39967a312143d7a
+        checksum=8bdb041c299a849ebd9bbba72ffca925a24482abec690ae698be63818eece1ab
         ;;
     Darwin/arm64)
         asset=clickhouse-macos-aarch64
-        checksum=541b149c0b73c44524cf3aff38541697736de266b36b6233811451a7922ee588
+        checksum=7f43a3c4d5f41e42ae6ec275c1531ca44b6018caae15217394fd85181ca1df59
         ;;
     *)
         echo "Unsupported ClickHouse platform: $(uname -s)/$architecture" >&2

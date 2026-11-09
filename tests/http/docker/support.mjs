@@ -6,7 +6,7 @@ import { configSource } from "../configuration.mjs";
 
 const execute = promisify(execFile);
 export const image = process.env.CHUNKIFY_IMAGE ?? "chunkify-analytics:test";
-export const clickhouseImage = process.env.CHUNKIFY_CLICKHOUSE_IMAGE ?? "clickhouse/clickhouse-server:25.8";
+export const clickhouseImage = process.env.CHUNKIFY_CLICKHOUSE_IMAGE ?? "clickhouse/clickhouse-server:26.10";
 
 export async function docker(args) {
   const { stdout } = await execute("docker", args, { timeout: 60000, maxBuffer: 1024 * 1024 });

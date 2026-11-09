@@ -33,7 +33,7 @@ jobs:
     services:
       # Disposable ClickHouse for every test that starts an analytics server.
       clickhouse:
-        image: clickhouse/clickhouse-server:25.8
+        image: clickhouse/clickhouse-server:26.10
         env:
           CLICKHOUSE_SKIP_USER_SETUP: "1"
         ports:

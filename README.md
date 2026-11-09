@@ -130,7 +130,7 @@ integration and revoke them independently.
 Run the executable directly on your computer without a container. Published
 [GitHub Releases](https://github.com/chunkifydev/chunkify-analytics/releases)
 include executables. No Rust or Node.js runtime is required to run them. You
-also need a ClickHouse server; ClickHouse 25.8 LTS is tested.
+also need a ClickHouse server; ClickHouse 26.10 is tested.
 
 ### 1. Get and install the executable
 

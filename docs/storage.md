@@ -3,7 +3,7 @@
 Chunkify Analytics stores events, projects and credential hashes in a
 [ClickHouse](https://clickhouse.com/) database. ClickHouse is open source
 (Apache 2.0) and runs in its own container or on its own host; no hosted service
-is required. ClickHouse 25.8 LTS is tested.
+is required. ClickHouse 26.10 is tested.
 
 Analytics servers keep no data of their own. Any number of servers can use the
 same database: add servers behind a load balancer to handle more ingestion and

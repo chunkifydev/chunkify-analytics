@@ -1,7 +1,7 @@
 # Chunkify Analytics on ClickHouse. Analytics servers keep no state of their
 # own, so you can run several behind the gateway:
 #   docker compose up -d --scale analytics=3
-# See README.md in this directory and docs/clickhouse.md.
+# See README.md in this directory and docs/storage.md.
 name: chunkify-analytics
 
 services:
@@ -30,7 +30,6 @@ services:
       clickhouse:
         condition: service_healthy
     environment:
-      CHUNKIFY_STORAGE_BACKEND: clickhouse
       CHUNKIFY_CLICKHOUSE_URL: http://clickhouse:8123
       CHUNKIFY_CLICKHOUSE_USER: chunkify
       CHUNKIFY_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}

@@ -50,7 +50,7 @@ docker compose exec analytics chunkify-analytics project list
 
 Every server applies project and key changes within a few seconds.
 
-## Before a release includes ClickHouse support
+## Use a locally built image
 
 To use a locally built image, build it from the repository root and select it:
 

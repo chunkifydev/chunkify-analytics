@@ -6,6 +6,12 @@ set -eu
 # Usage: sh scripts/start-clickhouse.sh [DIRECTORY] [BINARY]
 directory=${1:-target/clickhouse/data}
 binary=${2:-target/clickhouse/clickhouse}
+# Another server on the port would answer the readiness check below while this
+# one fails to bind, and tests would then use the wrong server.
+if curl --fail --silent --max-time 2 http://127.0.0.1:8123/ping > /dev/null 2>&1; then
+    echo "A server already answers on 127.0.0.1:8123; stop it first" >&2
+    exit 1
+fi
 mkdir -p "$directory"
 directory=$(cd "$directory" && pwd)
 (cd "$directory" && nohup "$binary" server -- --path="$directory/" \

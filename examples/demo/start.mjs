@@ -44,15 +44,23 @@ async function lock(dir) {
   const busy = new Error('A demo is already running for this data directory. Stop it first.');
   if (running.has(dir)) throw busy;
   const file = path.join(dir, 'demo.lock');
-  try {
-    const pid = Number(await readFile(file, 'utf8'));
+  // Create the lock exclusively, so two launches cannot both claim it. A lock
+  // left by a process that no longer runs is removed once, then claimed.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await writeFile(file, String(process.pid), { mode: 0o600, flag: 'wx' });
+      break;
+    } catch (error) {
+      if (error.code !== 'EEXIST' || attempt > 0) throw error.code === 'EEXIST' ? busy : error;
+    }
+    const pid = Number(await readFile(file, 'utf8').catch(() => ''));
     if (pid && pid !== process.pid) {
       try { process.kill(pid, 0); throw busy; }
       catch (error) { if (error.code !== 'ESRCH') throw error; }
     }
-  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    await rm(file, { force: true });
+  }
   running.add(dir);
-  await writeFile(file, String(process.pid), { mode: 0o600 });
   return async () => { running.delete(dir); await rm(file, { force: true }); };
 }
 async function prepareData(dir, binary, env, signal, clickhouse) {

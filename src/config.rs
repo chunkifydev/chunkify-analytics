@@ -203,7 +203,8 @@ impl Config {
 
     /// The current project registry, which stores only credential hashes.
     pub fn keys(&self) -> Result<Keys> {
-        let (version, bytes) = crate::clickhouse::load_registry(&self.clickhouse)?
+        // Reads never create a database, for example under a mistyped name.
+        let (version, bytes) = crate::clickhouse::read_registry(&self.clickhouse)?
             .ok_or("This ClickHouse database is not initialized; run init first")?;
         let keys: Keys = serde_json::from_slice(&bytes)?;
         crate::projects::validate(&keys.projects)?;

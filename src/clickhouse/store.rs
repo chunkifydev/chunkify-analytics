@@ -22,8 +22,8 @@ pub struct Store {
     pub(super) control: Client,
     /// Identifies this server in shared claims.
     instance: String,
-    /// This server's node ID, configured or leased.
-    pub(super) node: Arc<AtomicI64>,
+    /// This server's node ID, configured or leased, and its lease.
+    pub(super) node: Arc<NodeLease>,
     pub(super) projects: Arc<crate::projects::Registry>,
     limits: crate::limits::Reads,
     cache: crate::cache::ReportCache,
@@ -67,64 +67,91 @@ pub(super) fn first_id_at(milliseconds: i64) -> i64 {
 }
 
 struct Ids {
-    /// This server's identifier: configured, or leased while it runs.
-    node: Arc<AtomicI64>,
+    lease: Arc<NodeLease>,
     last_unit: AtomicI64,
 }
 
 /// Length of a node ID lease. A server holds the current and the next term,
 /// and renews well before the current one ends.
 const NODE_TERM_MS: i64 = 60_000;
+/// Taken off a lease's end, for clock differences and request time.
+const LEASE_MARGIN_MS: i64 = 5_000;
 
-/// Lease a node ID that no other running server holds for this term or the
-/// next, preferring `prefer`. IDs then stay unique across servers.
-async fn lease_node(client: &Client, owner: &str, prefer: Option<i64>) -> Result<i64, ApiError> {
+/// This server's node ID, and until when (local clock) it is known to hold
+/// it. Event IDs are assigned only while the lease is valid, so two servers
+/// never use one node ID at the same time.
+pub(super) struct NodeLease {
+    node: AtomicI64,
+    valid_until_ms: AtomicI64,
+    configured: bool,
+}
+
+impl NodeLease {
+    pub(super) fn node(&self) -> i64 {
+        self.node.load(Ordering::Acquire)
+    }
+
+    fn valid(&self) -> bool {
+        self.valid_until_ms.load(Ordering::Acquire) > chrono::Utc::now().timestamp_millis()
+    }
+}
+
+/// Claim `node` for the current term and the next. On success, returns until
+/// when the claims cover this server, by the local clock.
+async fn hold_node(client: &Client, owner: &str, node: i64) -> Result<Option<i64>, ApiError> {
+    let local = chrono::Utc::now().timestamp_millis();
+    let now = client.now_ms().await?;
+    let term = now / NODE_TERM_MS;
+    if client.claim("node", node, term, owner).await?
+        && client.claim("node", node, term + 1, owner).await?
+    {
+        return Ok(Some(
+            local + (term + 2) * NODE_TERM_MS - now - LEASE_MARGIN_MS,
+        ));
+    }
+    Ok(None)
+}
+
+/// Lease a node ID that no other running server holds, configured or leased,
+/// for this term or the next.
+async fn lease_node(client: &Client, owner: &str) -> Result<(i64, i64), ApiError> {
     let term = client.now_ms().await? / NODE_TERM_MS;
     let taken = client
         .claimed_by_others("node", term..=term + 1, owner)
         .await?;
     let start = (uuid::Uuid::new_v4().as_u128() % (1 << NODE_BITS)) as i64;
-    let candidates = prefer
-        .into_iter()
-        .chain((0..1 << NODE_BITS).map(|offset| (start + offset) % (1 << NODE_BITS)));
-    for node in candidates {
+    for node in (0..1 << NODE_BITS).map(|offset| (start + offset) % (1 << NODE_BITS)) {
         if taken.contains(&node) {
             continue;
         }
-        if client.claim("node", node, term, owner).await?
-            && client.claim("node", node, term + 1, owner).await?
-        {
-            return Ok(node);
+        if let Some(valid_until) = hold_node(client, owner, node).await? {
+            return Ok((node, valid_until));
         }
     }
     Err(ApiError::unavailable())
 }
 
-/// Keep this server's node lease one term ahead, moving to another free node
-/// if another server took it while this one could not renew.
-async fn renew_node(client: Client, owner: String, node: Arc<AtomicI64>) {
+/// Renew the lease a term ahead. A leased ID moves to another free node if
+/// another server took it; a configured ID waits until it is free again.
+async fn renew_node(client: Client, owner: String, lease: Arc<NodeLease>) {
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(NODE_TERM_MS as u64 / 3)).await;
-        let current = node.load(Ordering::Acquire);
-        let renewed = async {
-            let term = client.now_ms().await? / NODE_TERM_MS;
-            Ok::<_, ApiError>(
-                client.claim("node", current, term, &owner).await?
-                    && client.claim("node", current, term + 1, &owner).await?,
-            )
-        }
-        .await;
-        match renewed {
-            Ok(true) => {}
-            Ok(false) => match lease_node(&client, &owner, None).await {
-                Ok(next) => {
+        let current = lease.node();
+        match hold_node(&client, &owner, current).await {
+            Ok(Some(valid_until)) => lease.valid_until_ms.store(valid_until, Ordering::Release),
+            Ok(None) if lease.configured => {
+                tracing::error!(backend = "clickhouse", node = current, "node_id_in_use")
+            }
+            Ok(None) => match lease_node(&client, &owner).await {
+                Ok((next, valid_until)) => {
                     tracing::warn!(
                         backend = "clickhouse",
                         from = current,
                         to = next,
                         "node_id_moved"
                     );
-                    node.store(next, Ordering::Release);
+                    lease.node.store(next, Ordering::Release);
+                    lease.valid_until_ms.store(valid_until, Ordering::Release);
                 }
                 Err(_) => tracing::error!(backend = "clickhouse", "node_id_lease_failed"),
             },
@@ -134,14 +161,19 @@ async fn renew_node(client: Client, owner: String, node: Arc<AtomicI64>) {
 }
 
 impl Ids {
-    fn new(node: Arc<AtomicI64>) -> Self {
+    fn new(lease: Arc<NodeLease>) -> Self {
         Self {
-            node,
+            lease,
             last_unit: AtomicI64::new(0),
         }
     }
 
     fn next(&self, count: usize) -> Result<Vec<i64>, ApiError> {
+        // Without a valid lease another server may hold this node ID.
+        if !self.lease.valid() {
+            return Err(ApiError::unavailable());
+        }
+        let node = self.lease.node();
         let now = id_unit(chrono::Utc::now().timestamp_micros());
         let mut first = 0;
         self.last_unit
@@ -155,7 +187,7 @@ impl Ids {
                 (first + offset)
                     .checked_shl(NODE_BITS)
                     .filter(|id| *id < 1 << 53)
-                    .map(|id| id | self.node.load(Ordering::Acquire))
+                    .map(|id| id | node)
                     .ok_or_else(ApiError::internal)
             })
             .collect()
@@ -204,18 +236,29 @@ impl Store {
             .await
             .map_err(|_| "Cannot create the ClickHouse schema; check clickhouse.url, credentials and permissions")?;
         let (sender, receiver) = mpsc::channel(config.batch.queue_requests);
-        // Servers without a configured node ID lease one while they run.
+        // Every server leases its node ID, configured or not, so leased IDs
+        // never collide with configured ones; configured IDs never move.
         let control = client.with_timeout(super::CONTROL_TIMEOUT);
         let instance = uuid::Uuid::new_v4().to_string();
-        let node = Arc::new(AtomicI64::new(match settings.node_id {
-            Some(node) => i64::from(node),
-            None => lease_node(&control, &instance, None).await.map_err(|_| {
+        let (node, valid_until) = match settings.node_id {
+            Some(node) => {
+                let node = i64::from(node);
+                let valid_until = hold_node(&control, &instance, node)
+                    .await
+                    .map_err(|_| "Cannot lease the configured node ID: ClickHouse is unavailable")?
+                    .ok_or("clickhouse.node_id is used by another running server; give each server its own")?;
+                (node, valid_until)
+            }
+            None => lease_node(&control, &instance).await.map_err(|_| {
                 "Cannot lease a node ID: all 64 are in use or ClickHouse is unavailable; set clickhouse.node_id"
             })?,
-        }));
-        if settings.node_id.is_none() {
-            tokio::spawn(renew_node(control.clone(), instance.clone(), node.clone()));
-        }
+        };
+        let node = Arc::new(NodeLease {
+            node: AtomicI64::new(node),
+            valid_until_ms: AtomicI64::new(valid_until),
+            configured: settings.node_id.is_some(),
+        });
+        tokio::spawn(renew_node(control.clone(), instance.clone(), node.clone()));
         let ids = Ids::new(node.clone());
         tokio::spawn(write_batches(
             client.clone(),
@@ -250,7 +293,7 @@ impl Store {
     /// This server's node ID: configured, or leased while it runs. A leased ID
     /// can move to another free value if the lease could not be renewed.
     pub fn node_id(&self) -> i64 {
-        self.node.load(Ordering::Acquire)
+        self.node.node()
     }
 
     /// Time between rollup refreshes; zero when rollups are disabled.
@@ -650,7 +693,16 @@ mod tests {
 
     #[test]
     fn ids_increase_stay_json_safe_and_keep_the_server_identifier() {
-        let ids = Ids::new(Arc::new(AtomicI64::new(7)));
+        let lease = |valid_until_ms| {
+            Arc::new(NodeLease {
+                node: AtomicI64::new(7),
+                valid_until_ms: AtomicI64::new(valid_until_ms),
+                configured: true,
+            })
+        };
+        // An expired lease assigns no IDs: another server may hold the node.
+        assert!(Ids::new(lease(0)).next(1).is_err());
+        let ids = Ids::new(lease(i64::MAX));
         let first = ids.next(3).unwrap();
         let second = ids.next(1).unwrap();
         assert!(first.windows(2).all(|pair| pair[0] < pair[1]));

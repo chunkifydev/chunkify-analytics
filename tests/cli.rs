@@ -210,6 +210,12 @@ fn commands_fail_clearly_before_initialization_or_without_clickhouse() {
     let output = run_in(Some(&database.0), &["project", "list"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("run init first"));
+    // Reading a registry never creates a database, for example under a typo.
+    let created = sql(&format!(
+        "SELECT count() FROM system.databases WHERE name = '{}'",
+        database.0
+    ));
+    assert_eq!(created.trim(), "0");
     let mut command = Command::new(BINARY);
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("CHUNKIFY_")) {
         command.env_remove(key);

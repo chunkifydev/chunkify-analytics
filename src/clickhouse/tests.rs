@@ -2290,10 +2290,7 @@ async fn servers_lease_distinct_node_ids_and_one_sweeps_each_interval() {
                 .unwrap(),
         );
     }
-    let mut nodes: Vec<i64> = stores
-        .iter()
-        .map(|store| store.node.load(Ordering::Acquire))
-        .collect();
+    let mut nodes: Vec<i64> = stores.iter().map(|store| store.node_id()).collect();
     nodes.sort();
     nodes.dedup();
     assert_eq!(
@@ -2310,6 +2307,36 @@ async fn servers_lease_distinct_node_ids_and_one_sweeps_each_interval() {
         }
     }
     assert_eq!(swept, 1, "one server sweeps per interval");
+}
+
+#[tokio::test]
+async fn configured_node_ids_are_leased_too() {
+    let fixture = Fixture::new(&["default"]).await;
+    let leased = fixture.store.node_id();
+    let configured = |node: i64| {
+        testing::config(&format!(
+            "clickhouse.database = {:?}\nclickhouse.node_id = {node}",
+            fixture.config.clickhouse.database
+        ))
+    };
+    // A configured ID already held by a running server refuses to start.
+    assert!(
+        Store::open(&configured(leased), fixture.registry.clone())
+            .await
+            .is_err()
+    );
+    // A free configured ID starts, and leased servers then avoid it.
+    let free = (leased + 1) % 64;
+    let held = Store::open(&configured(free), fixture.registry.clone())
+        .await
+        .unwrap();
+    assert_eq!(held.node_id(), free);
+    for _ in 0..3 {
+        let store = Store::open(&fixture.config, fixture.registry.clone())
+            .await
+            .unwrap();
+        assert!(![leased, free].contains(&store.node_id()));
+    }
 }
 
 #[test]

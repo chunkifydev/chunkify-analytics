@@ -215,23 +215,32 @@ impl Controller {
     /// refresh that started after they arrived. A request gives up after
     /// `MISS_REFRESH_WAIT`.
     pub async fn sync_after_miss(self: &Arc<Self>, arrived: std::time::Instant) -> bool {
-        let refresh = async {
-            let mut started = self.missed.lock().await;
+        let controller = self.clone();
+        // The refresh runs in its own task, which keeps the lock until the
+        // registry read ends: refreshes stay single-flight even when callers
+        // give up, as they do while ClickHouse stalls.
+        let refresh = tokio::spawn(async move {
+            let mut started = controller.missed.lock().await;
             if started.is_some_and(|at| at >= arrived) {
                 return true;
+            }
+            // Its caller has given up; another request will ask again.
+            if arrived.elapsed() >= MISS_REFRESH_WAIT {
+                return false;
             }
             if let Some(at) = *started {
                 tokio::time::sleep(MISS_REFRESH_INTERVAL.saturating_sub(at.elapsed())).await;
             }
             *started = Some(std::time::Instant::now());
-            let controller = self.clone();
-            tokio::task::spawn_blocking(move || controller.sync().is_ok())
+            let registry = controller.clone();
+            tokio::task::spawn_blocking(move || registry.sync().is_ok())
                 .await
                 .unwrap_or(false)
-        };
-        tokio::time::timeout(MISS_REFRESH_WAIT, refresh)
-            .await
-            .unwrap_or(false)
+        });
+        matches!(
+            tokio::time::timeout(MISS_REFRESH_WAIT, refresh).await,
+            Ok(Ok(true))
+        )
     }
 
     // Mutations start from the newest shared registry to avoid stale writes.
@@ -463,6 +472,52 @@ mod tests {
         fn drop(&mut self) {
             crate::clickhouse::testing::drop_database(&self.config.clickhouse);
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_key_refreshes_stay_single_flight_while_clickhouse_stalls() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // A ClickHouse that accepts connections and never answers.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let counted = connections.clone();
+        tokio::spawn(async move {
+            let mut open = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                open.push(socket);
+            }
+        });
+        let mut config = crate::clickhouse::testing::config("");
+        config.clickhouse.url = reqwest::Url::parse(&format!("http://{address}/")).unwrap();
+        let keys = Keys {
+            projects: vec![crate::projects::primary_project("public", "secret")],
+        };
+        let registry = Arc::new(Registry::new(&keys, &config).unwrap());
+        let controller = Arc::new(Controller::new(Arc::new(config), registry, keys));
+        // Two waves of unknown keys, each outliving the callers' wait.
+        for _ in 0..2 {
+            let waves: Vec<_> = (0..20)
+                .map(|_| {
+                    let controller = controller.clone();
+                    tokio::spawn(async move {
+                        controller.sync_after_miss(std::time::Instant::now()).await
+                    })
+                })
+                .collect();
+            for wave in waves {
+                assert!(
+                    !wave.await.unwrap(),
+                    "callers give up while ClickHouse stalls"
+                );
+            }
+        }
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "one refresh at a time, even after callers give up"
+        );
     }
     fn request(command: &str, args: &[&str]) -> Request {
         Request {

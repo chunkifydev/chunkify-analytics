@@ -543,12 +543,30 @@ pub fn prepare(config: &ClickHouseConfig) -> Result<()> {
     })
 }
 
-/// The latest registry document and its version, without creating the schema.
-/// For servers, which created it at startup.
+/// The latest registry document and its version, if `init` has run. Unlike
+/// `load_registry`, it never creates the database or tables.
 pub fn read_registry(config: &ClickHouseConfig) -> Result<Option<(u64, Vec<u8>)>> {
     let config = config.clone();
     block_on(move || async move {
-        let client = Client::new(config)?.with_timeout(CONTROL_TIMEOUT);
+        let client = Client::new(config.clone())?.with_timeout(CONTROL_TIMEOUT);
+        // A missing database or registry is not initialized; reads never
+        // create one, so a mistyped database name creates nothing.
+        // Without a default database: the configured one may not exist.
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT count() FROM system.tables WHERE database = {} AND name = 'registry' FORMAT TSV",
+            params.text(&config.database)
+        );
+        let exists = client
+            .send(sql, &params, &[], false)
+            .await
+            .map_err(registry_error)?
+            .text()
+            .await
+            .map_err(|_| "Cannot reach the ClickHouse project registry")?;
+        if exists.trim() == "0" {
+            return Ok(None);
+        }
         latest(&client).await.map_err(registry_error)
     })
 }
@@ -665,7 +683,15 @@ pub mod testing {
         std::fs::create_dir(&directory).unwrap();
         let url = std::env::var("CHUNKIFY_TEST_CLICKHOUSE_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:8123".into());
-        let database = format!("chunkify_unit_{}", uuid::Uuid::new_v4().simple());
+        // A test can share another test server's database by naming it.
+        let database = if extra.contains("clickhouse.database") {
+            String::new()
+        } else {
+            format!(
+                "clickhouse.database = \"chunkify_unit_{}\"\n",
+                uuid::Uuid::new_v4().simple()
+            )
+        };
         let file = directory.join("config.toml");
         let env = directory.join("empty.env");
         std::fs::write(&env, "").unwrap();
@@ -678,7 +704,7 @@ pub mod testing {
         };
         std::fs::write(
             &file,
-            format!("clickhouse.url = {url:?}\nclickhouse.database = {database:?}\n{lag}{extra}\n"),
+            format!("clickhouse.url = {url:?}\n{database}{lag}{extra}\n"),
         )
         .unwrap();
         let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();

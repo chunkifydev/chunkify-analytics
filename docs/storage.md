@@ -32,6 +32,7 @@ user = "chunkify"
 | `clickhouse.deduplication_window_seconds` | — | `604800` (7 days) | Repeated event IDs received within this window are reported as duplicates and not stored again. `0` stores every delivery. |
 | `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Random | 0 to 63. Part of each event's internal order. Give each server a different value for strict uniqueness. |
 | `clickhouse.rollup_interval_seconds` | — | `15` | How often servers refresh [report rollups](#report-rollups). 0 to 3600. `0` turns rollups off: reports then read events only. |
+| `clickhouse.rollup_max_lag_seconds` | — | `0` | Let reports read every hour from the last refresh while it is at most this old. 0 to 3600. `0` keeps reports exact. See [lagged reports](#lagged-reports). |
 
 The user needs permission to create the database and tables, and to read,
 insert and delete rows in them. Run `init` once per database, not once per
@@ -121,6 +122,22 @@ over after four intervals (at least one minute). Until the next refresh, hours
 with new events read events, so freshness never depends on the interval; a
 shorter interval keeps more hours settled at the cost of refreshing the current
 hour more often.
+
+### Lagged reports
+
+Exact reports still compute the hour that is receiving events, and the partial
+hours at the ends of their range, from events. With
+`rollup_max_lag_seconds` above zero, reports instead read every hour as of the
+last completed refresh: whole hours from rollup rows and partial hours from
+per-view results. They then do no per-view work at all, and lag stored events
+by the refresh interval plus about ten seconds. Hours with expired events are
+still read from events, so expired events stay hidden at once.
+
+If no refresh completed within `rollup_max_lag_seconds`, for example because
+refreshes fail, reports return to exact reads until one does. The next pages of
+a breakdown or video list read the same refresh as their first page, so a
+refresh between pages does not move items across pages; a cursor older than
+about 20 refreshes reads the latest one instead.
 
 ## Duplicate deliveries
 

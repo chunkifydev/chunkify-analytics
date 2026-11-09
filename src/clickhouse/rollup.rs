@@ -228,6 +228,7 @@ const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("video_id", "String"),
     ("viewer_id", "Nullable(String)"),
     ("hour_ms", "Int64"),
+    ("occurred_at_ms", "Int64"),
     ("hours", "Array(Int64)"),
     ("min_received_ms", "Int64"),
     ("max_received_ms", "Int64"),
@@ -295,12 +296,24 @@ pub(super) fn tables() -> Vec<String> {
 
 /// Hours a report reads from rollups, and the date ranges it reads from events.
 pub(super) struct Plan {
+    /// Whole hours read from rollup rows, with the generation of each.
     pub(super) hours: Vec<i64>,
     generations: Vec<i64>,
+    /// Partly covered hours read from per-view rows (lagged reads only).
+    partial: Vec<(i64, i64)>,
     raw: Vec<(i64, i64)>,
+    from: i64,
+    to: i64,
+    /// The refresh run a lagged read uses; page cursors keep it.
+    pub(super) run: Option<i64>,
 }
 
 impl Plan {
+    /// Whether the report needs events at all.
+    pub(super) fn reads_events(&self) -> bool {
+        !self.raw.is_empty()
+    }
+
     /// The condition on a view's first start for the hours read from events,
     /// or `None` when rollups cover the whole range.
     pub(super) fn raw_starts(&self, params: &mut Params) -> Option<String> {
@@ -328,18 +341,35 @@ impl Plan {
         Some(format!("({})", ranges.join(" OR ")))
     }
 
-    /// The condition on rollup rows of the planned generations.
-    fn stored(&self, params: &mut Params) -> String {
-        let first = *self.hours.first().expect("planned hours");
-        let last = *self.hours.last().expect("planned hours");
+    /// The condition on rows of the planned hours and generations.
+    fn generations(params: &mut Params, hours: &[i64], generations: &[i64]) -> String {
+        let first = *hours.first().expect("planned hours");
+        let last = *hours.last().expect("planned hours");
         format!(
             "hour_ms >= {} AND hour_ms <= {} AND has(arrayZip({}, {}), (hour_ms, generation))",
             params.int(first),
             params.int(last),
-            params.ints(&self.hours),
-            params.ints(&self.generations)
+            params.ints(hours),
+            params.ints(generations)
         )
     }
+}
+
+/// The date range of a report rollups can answer, or `None` when its filters
+/// need events. `group` is the breakdown column, if any.
+fn scope_range(filters: &Filters, group: Option<&str>) -> Option<(i64, i64)> {
+    let scope = filters.rollup_scope()?;
+    // Rollup rows hold one context value each: a breakdown can only be
+    // filtered by its own column.
+    if let (Some((column, _)), Some(group)) = (&scope.dimension, group)
+        && *column != group
+    {
+        return None;
+    }
+    Some((
+        scope.from_ms.unwrap_or(i64::MIN),
+        scope.to_ms.unwrap_or(i64::MAX),
+    ))
 }
 
 /// Date ranges not covered by the planned hours, within the report's range.
@@ -376,6 +406,142 @@ impl Store {
         self.rollup_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The snapshot a report reads (its event order watermark) and its rollup
+    /// plan. A lagged read is tried first, pinned to `cursor`'s run on later
+    /// pages; otherwise settled hours, as of `cursor`'s watermark. `paged`
+    /// reports need a watermark for their cursors when they read events.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn report_plan(
+        &self,
+        project: &str,
+        filters: &Filters,
+        group: Option<&str>,
+        cutoff: i64,
+        cursor: Option<(i64, Option<i64>)>,
+        paged: bool,
+        rollups: bool,
+    ) -> Result<(i64, Option<Plan>), ApiError> {
+        let lagged = match cursor {
+            _ if !rollups => None,
+            None => {
+                self.lagged_plan(project, filters, group, cutoff, None)
+                    .await?
+            }
+            Some((_, Some(run))) => {
+                self.lagged_plan(project, filters, group, cutoff, Some(run))
+                    .await?
+            }
+            Some((_, None)) => None,
+        };
+        let watermark = |needed: bool| async move {
+            match cursor {
+                Some((through, _)) => Ok(through),
+                None if needed => self.watermark(project, cutoff).await,
+                None => Ok(i64::MAX),
+            }
+        };
+        if let Some(plan) = lagged {
+            let through = watermark(paged && plan.reads_events()).await?;
+            return Ok((through, Some(plan)));
+        }
+        let through = watermark(paged).await?;
+        let plan = if rollups {
+            self.rollup_plan(project, filters, group, cutoff, through)
+                .await?
+        } else {
+            None
+        };
+        Ok((through, plan))
+    }
+
+    fn lag_enabled(&self) -> bool {
+        self.rollups_enabled() && !self.rollup_max_lag.is_zero()
+    }
+
+    /// A read of every hour as of one completed refresh, up to
+    /// `rollup_max_lag_seconds` old: hours with no rollup row had no views
+    /// then. `run` pins the refresh a previous page used. `None` when lagged
+    /// reads are off, the filters need events, or the last refresh is too old.
+    pub(super) async fn lagged_plan(
+        &self,
+        project: &str,
+        filters: &Filters,
+        group: Option<&str>,
+        cutoff: i64,
+        run: Option<i64>,
+    ) -> Result<Option<Plan>, ApiError> {
+        if !self.lag_enabled() {
+            return Ok(None);
+        }
+        let Some((from, to)) = scope_range(filters, group) else {
+            return Ok(None);
+        };
+        let mut params = Params::default();
+        let project_id = params.text(project);
+        // A pinned run stays readable while its generations are kept.
+        let pinned = match run {
+            Some(run) => format!(
+                "AND version = {} AND version > (SELECT max(version) FROM rollup_runs WHERE completed = 1) - {KEEP_RUNS}",
+                params.int(run)
+            ),
+            None => String::new(),
+        };
+        let first = from.div_euclid(HOUR_MS).saturating_mul(HOUR_MS);
+        let sql = format!(
+            "WITH run AS (
+                SELECT version, through_ms FROM rollup_runs WHERE completed = 1 {pinned}
+                ORDER BY version DESC LIMIT 1)
+            SELECT (SELECT version FROM run), (SELECT through_ms FROM run),
+                toUnixTimestamp64Milli(now64(3)),
+                (SELECT groupArray((hour_ms, latest, low)) FROM (
+                    SELECT hour_ms, max(generation) AS latest,
+                        argMax(min_received_ms, generation) AS low
+                    FROM rollup_hours
+                    WHERE project_id = {project_id} AND hour_ms >= {first} AND hour_ms < {to}
+                        AND generation <= (SELECT version FROM run)
+                    GROUP BY hour_ms ORDER BY hour_ms))",
+            first = params.int(first),
+            to = params.int(to),
+        );
+        let row = self.client.one(&sql, &params).await?;
+        let int = |value: Option<&Value>| value.and_then(Value::as_i64);
+        let (Some(version), Some(through), Some(now)) =
+            (int(row.first()), int(row.get(1)), int(row.get(2)))
+        else {
+            return Ok(None);
+        };
+        if run.is_none() && now - through > self.rollup_max_lag.as_millis() as i64 {
+            return Ok(None);
+        }
+        let mut plan = Plan {
+            hours: Vec::new(),
+            generations: Vec::new(),
+            partial: Vec::new(),
+            raw: Vec::new(),
+            from,
+            to,
+            run: Some(version),
+        };
+        for hour in row.get(3).and_then(Value::as_array).into_iter().flatten() {
+            let (Some(hour), Some(generation), Some(low)) =
+                (int(hour.get(0)), int(hour.get(1)), int(hour.get(2)))
+            else {
+                return Err(ApiError::internal());
+            };
+            let end = hour.saturating_add(HOUR_MS);
+            if low < cutoff {
+                // Expired events must be hidden: read this hour from events.
+                plan.raw.push((hour.max(from), end.min(to)));
+            } else if hour >= from && end <= to {
+                plan.hours.push(hour);
+                plan.generations.push(generation);
+            } else {
+                plan.partial.push((hour, generation));
+            }
+        }
+        Ok(Some(plan))
+    }
+
     /// Settled hours this report can read from rollups. `None` when rollups
     /// are off, the filters need events, or no whole hour is settled. `group`
     /// is the breakdown column, if any.
@@ -387,18 +553,12 @@ impl Store {
         cutoff: i64,
         through: i64,
     ) -> Result<Option<Plan>, ApiError> {
-        let Some(scope) = filters.rollup_scope().filter(|_| self.rollups_enabled()) else {
-            return Ok(None);
-        };
-        // Rollup rows hold one context value each: a breakdown can only be
-        // filtered by its own column.
-        if let (Some((column, _)), Some(group)) = (&scope.dimension, group)
-            && *column != group
-        {
+        if !self.rollups_enabled() {
             return Ok(None);
         }
-        let from = scope.from_ms.unwrap_or(i64::MIN);
-        let to = scope.to_ms.unwrap_or(i64::MAX);
+        let Some((from, to)) = scope_range(filters, group) else {
+            return Ok(None);
+        };
         // Whole hours inside [from, to).
         let first = if from == i64::MIN {
             i64::MIN
@@ -461,6 +621,10 @@ impl Store {
             raw: uncovered(from, to, &hours),
             hours,
             generations,
+            partial: Vec::new(),
+            from,
+            to,
+            run: None,
         }))
     }
 
@@ -514,39 +678,90 @@ impl Store {
                 ))
             }
         };
-        let mut stored = vec![
-            format!("project_id = {}", params.text(project)),
-            plan.stored(params),
-        ];
-        let dimension = query
-            .dimension
-            .or(scope.dimension.as_ref().map(|(c, _)| *c));
-        match (&scope.dimension, dimension) {
-            (Some((column, value)), Some(dimension)) if *column == dimension => {
-                stored.push(format!("dim = {}", params.text(dimension)));
-                stored.push(format!("value = {}", params.text(value)));
+        let mut ctes: Vec<String> = Vec::new();
+        let mut sources: Vec<&str> = Vec::new();
+        if let Some(raw) = raw {
+            ctes.push(raw);
+            sources.push("raw_parts");
+        }
+        let project_id = params.text(project);
+        let video = scope
+            .video_id
+            .as_ref()
+            .map(|video| format!(" AND video_id = {}", params.text(video)));
+        if !plan.hours.is_empty() {
+            let mut stored = vec![
+                format!("project_id = {project_id}"),
+                Plan::generations(params, &plan.hours, &plan.generations),
+            ];
+            let dimension = query
+                .dimension
+                .or(scope.dimension.as_ref().map(|(c, _)| *c));
+            match (&scope.dimension, dimension) {
+                (Some((column, value)), Some(dimension)) if *column == dimension => {
+                    stored.push(format!("dim = {}", params.text(dimension)));
+                    stored.push(format!("value = {}", params.text(value)));
+                }
+                // Plans decline a filter on another column than the breakdown.
+                (Some(_), _) => return Err(ApiError::internal()),
+                (None, Some(dimension)) => stored.push(format!("dim = {}", params.text(dimension))),
+                (None, None) => stored.push("dim = 'all'".into()),
             }
-            // `rollup_plan` declines a filter on another column than the breakdown.
-            (Some(_), _) => return Err(ApiError::internal()),
-            (None, Some(dimension)) => stored.push(format!("dim = {}", params.text(dimension))),
-            (None, None) => stored.push("dim = 'all'".into()),
+            let stored_key = query
+                .stored_key
+                .map_or(String::new(), |key| format!("{key} AS key, "));
+            ctes.push(format!(
+                "stored_parts AS (SELECT {stored_key}{names} FROM rollup WHERE {}{})",
+                stored.join(" AND "),
+                video.clone().unwrap_or_default()
+            ));
+            sources.push("stored_parts");
         }
-        if let Some(video) = &scope.video_id {
-            stored.push(format!("video_id = {}", params.text(video)));
+        if !plan.partial.is_empty() {
+            // Per-view rows carry the same columns as the cohort's view rows,
+            // so the same keys and partials apply, filtered by start time.
+            let (hours, generations): (Vec<i64>, Vec<i64>) = plan.partial.iter().copied().unzip();
+            let mut conditions = vec![
+                format!("project_id = {project_id}"),
+                Plan::generations(params, &hours, &generations),
+            ];
+            if plan.from > i64::MIN {
+                conditions.push(format!("occurred_at_ms >= {}", params.int(plan.from)));
+            }
+            if plan.to < i64::MAX {
+                conditions.push(format!("occurred_at_ms < {}", params.int(plan.to)));
+            }
+            if let Some((column, value)) = &scope.dimension {
+                conditions.push(format!("{column} = {}", params.text(value)));
+            }
+            ctes.push(format!(
+                "view_parts AS (SELECT {raw_key}{} FROM rollup_views WHERE {}{}{group})",
+                query.partials.expressions(),
+                conditions.join(" AND "),
+                video.unwrap_or_default()
+            ));
+            sources.push("view_parts");
         }
-        let stored_key = query
-            .stored_key
-            .map_or(String::new(), |key| format!("{key} AS key, "));
-        let stored = format!(
-            "stored_parts AS (SELECT {stored_key}{names} FROM rollup WHERE {})",
-            stored.join(" AND ")
-        );
-        Ok(match raw {
-            Some(raw) => format!(
-                "{raw}, {stored}, parts AS (SELECT * FROM raw_parts UNION ALL SELECT * FROM stored_parts)"
-            ),
-            None => format!("WITH {stored}, parts AS (SELECT * FROM stored_parts)"),
-        })
+        if sources.is_empty() {
+            // Nothing had views in range: an empty source with the same columns.
+            ctes.push(format!(
+                "view_parts AS (SELECT {raw_key}{} FROM rollup_views WHERE 0{group})",
+                query.partials.expressions()
+            ));
+            sources.push("view_parts");
+        }
+        let parts = sources
+            .iter()
+            .map(|source| format!("SELECT * FROM {source}"))
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        // The events part already opens with its own WITH clause.
+        let opening = if ctes[0].starts_with("WITH ") {
+            ""
+        } else {
+            "WITH "
+        };
+        Ok(format!("{opening}{}, parts AS ({parts})", ctes.join(", ")))
     }
 
     /// Refresh rollups if no other server refreshed recently. Returns the

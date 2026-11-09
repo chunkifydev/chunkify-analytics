@@ -25,6 +25,7 @@ pub struct Store {
     budget: Arc<Semaphore>,
     batch: BatchConfig,
     pub(super) rollup_interval: std::time::Duration,
+    pub(super) rollup_max_lag: std::time::Duration,
     /// Whether reports read settled hours from rollups.
     pub(super) rollup_reads: std::sync::atomic::AtomicBool,
 }
@@ -153,6 +154,7 @@ impl Store {
             budget: Arc::new(Semaphore::new(config.batch.queue_bytes)),
             batch: config.batch.clone(),
             rollup_interval: settings.rollup_interval,
+            rollup_max_lag: settings.rollup_max_lag,
             rollup_reads: (!settings.rollup_interval.is_zero()).into(),
             client,
             projects,

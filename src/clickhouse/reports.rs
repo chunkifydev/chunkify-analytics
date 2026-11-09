@@ -565,7 +565,7 @@ fn event_columns() -> String {
 
 impl Store {
     /// The latest retained event order, which bounds every page of one listing.
-    async fn watermark(&self, project: &str, cutoff: i64) -> Result<i64, ApiError> {
+    pub(super) async fn watermark(&self, project: &str, cutoff: i64) -> Result<i64, ApiError> {
         let mut params = Params::default();
         let sql = format!(
             "SELECT ingest_id FROM events WHERE project_id = {} AND received_at_ms >= {}
@@ -661,6 +661,7 @@ impl Store {
                         after: last,
                         through,
                         filters: filters.clone(),
+                        rollup: None,
                     }
                     .encode()?,
                 );
@@ -701,15 +702,22 @@ impl Store {
             .transpose()?;
         let work = async {
             let cutoff = self.cutoff(&project)?;
-            let through = match &cursor {
-                Some(cursor) => cursor.through,
-                None => self.watermark(&project, cutoff).await?,
-            };
             let mut params = Params::default();
             let column = group_by.column();
-            let plan = self
-                .rollup_plan(&project, &filters, Some(column), cutoff, through)
+            let (through, plan) = self
+                .report_plan(
+                    &project,
+                    &filters,
+                    Some(column),
+                    cutoff,
+                    cursor
+                        .as_ref()
+                        .map(|cursor| (cursor.through, cursor.rollup)),
+                    true,
+                    true,
+                )
                 .await?;
+            let run = plan.as_ref().and_then(|plan| plan.run);
             let sql = if let Some(plan) = plan {
                 let parts = self.combined(
                     &mut params,
@@ -780,6 +788,7 @@ impl Store {
                             after: last.expect("nonempty page"),
                             through,
                             filters: filters.clone(),
+                            rollup: run,
                         }
                         .encode()?,
                     );
@@ -855,10 +864,6 @@ impl Store {
         }
         let work = async {
             let cutoff = self.cutoff(&project)?;
-            let through = match &cursor {
-                Some(c) => c.through,
-                None => self.watermark(&project, cutoff).await?,
-            };
             let mut params = Params::default();
             let cohort = if per_video {
                 Cohort::Quality
@@ -867,16 +872,25 @@ impl Store {
             };
             // Floating-point sort keys must be identical on every page, which
             // only one aggregation path guarantees; those orders read events.
-            let plan = if per_video
+            let rollups = !(per_video
                 && matches!(
                     sort,
                     VideoSort::TotalPlayingTimeMs | VideoSort::PlaybackScore
-                ) {
-                None
-            } else {
-                self.rollup_plan(&project, &filters, None, cutoff, through)
-                    .await?
-            };
+                ));
+            let (through, plan) = self
+                .report_plan(
+                    &project,
+                    &filters,
+                    None,
+                    cutoff,
+                    cursor
+                        .as_ref()
+                        .map(|cursor| (cursor.through, cursor.rollup)),
+                    per_video,
+                    rollups,
+                )
+                .await?;
+            let run = plan.as_ref().and_then(|plan| plan.run);
             let partials = if per_video {
                 Partials::Videos
             } else {
@@ -1019,6 +1033,7 @@ impl Store {
                             after: last.expect("nonempty video page"),
                             through,
                             filters: filters.clone(),
+                            rollup: run,
                         }
                         .encode()?,
                     );
@@ -1064,10 +1079,9 @@ impl Store {
         let work = async {
             let cutoff = self.cutoff(&project)?;
             // One query reads one consistent snapshot; no watermark round trip.
-            let through = i64::MAX;
             let mut params = Params::default();
-            let plan = self
-                .rollup_plan(&project, &filters, None, cutoff, through)
+            let (through, plan) = self
+                .report_plan(&project, &filters, None, cutoff, None, false, true)
                 .await?;
             let sql = if let Some(plan) = plan {
                 let parts = self.combined(
@@ -1146,12 +1160,11 @@ impl Store {
         let work = async {
             let cutoff = self.cutoff(&project)?;
             // One query reads one consistent snapshot; no watermark round trip.
-            let through = i64::MAX;
             let mut params = Params::default();
             let width = window.interval.milliseconds();
             // Buckets start on UTC hours, so each rollup hour falls in one bucket.
-            let plan = self
-                .rollup_plan(&project, &window.filters, None, cutoff, through)
+            let (through, plan) = self
+                .report_plan(&project, &window.filters, None, cutoff, None, false, true)
                 .await?;
             let sql = if let Some(plan) = plan {
                 let first = params.int(window.first_bucket_ms);
@@ -1552,6 +1565,7 @@ impl Store {
                         after: last.expect("nonempty page"),
                         through,
                         filters: filters.clone(),
+                        rollup: None,
                     }
                     .encode()?,
                 );
@@ -1671,6 +1685,7 @@ impl Store {
                         after: last,
                         through,
                         filters: filters.clone(),
+                        rollup: None,
                     }
                     .encode()?,
                 );
@@ -1743,6 +1758,7 @@ impl Store {
                             after: last.expect("nonempty page"),
                             through,
                             filters: filters.clone(),
+                            rollup: None,
                         }
                         .encode()?,
                     );
@@ -1848,6 +1864,7 @@ impl Store {
                             after: last.expect("nonempty page"),
                             through,
                             filters: filters.clone(),
+                            rollup: None,
                         }
                         .encode()?,
                     );

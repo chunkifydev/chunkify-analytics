@@ -21,6 +21,9 @@ pub struct ClickHouseConfig {
     pub deduplication_window: Duration,
     /// Time between hourly rollup refreshes. Zero disables rollups for reads too.
     pub rollup_interval: Duration,
+    /// How old the last refresh may be for reports to read every hour from it.
+    /// Zero keeps reports exact.
+    pub rollup_max_lag: Duration,
     /// Registry version loaded or written by this process; used for compare-and-set.
     pub registry_version: Arc<AtomicU64>,
 }
@@ -90,7 +93,15 @@ impl ClickHouseConfig {
             .ok()
             .filter(|seconds| *seconds <= 3600)
             .ok_or("clickhouse.rollup_interval_seconds must be between 0 and 3600")?;
+        let rollup_max_lag = settings
+            .var("clickhouse.rollup_max_lag_seconds")
+            .unwrap_or_else(|_| "0".into())
+            .parse::<u64>()
+            .ok()
+            .filter(|seconds| *seconds <= 3600)
+            .ok_or("clickhouse.rollup_max_lag_seconds must be between 0 and 3600")?;
         Ok(Self {
+            rollup_max_lag: Duration::from_secs(rollup_max_lag),
             rollup_interval: Duration::from_secs(rollup_interval),
             deduplication_window: Duration::from_secs(deduplication_window),
             url,

@@ -557,6 +557,9 @@ pub struct Cursor<T> {
     pub after: T,
     pub through: i64,
     pub filters: Filters,
+    /// The rollup refresh run a lagged first page read; later pages read it too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollup: Option<i64>,
 }
 impl<T: Serialize + DeserializeOwned> Cursor<T> {
     pub fn decode(

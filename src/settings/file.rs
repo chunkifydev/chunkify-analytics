@@ -71,6 +71,7 @@ struct ClickHouse {
     node_id: Option<u16>,
     deduplication_window_seconds: Option<u64>,
     rollup_interval_seconds: Option<u64>,
+    rollup_max_lag_seconds: Option<u64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -147,6 +148,12 @@ pub(super) fn load(config_file: Option<&Path>) -> Result<Settings> {
             "clickhouse.rollup_interval_seconds",
             clickhouse
                 .rollup_interval_seconds
+                .map(|value| value.to_string()),
+        ),
+        (
+            "clickhouse.rollup_max_lag_seconds",
+            clickhouse
+                .rollup_max_lag_seconds
                 .map(|value| value.to_string()),
         ),
     ] {

@@ -23,6 +23,8 @@ deduplication_window_seconds = 604800
 # node_id = 1
 # Seconds between refreshes of the hourly report rollups. 0 reads events only.
 rollup_interval_seconds = 15
+# Let reports read the last refresh while it is at most this old. 0 keeps them exact.
+rollup_max_lag_seconds = 0
 
 [server]
 # External base URL for CSV download links behind an ingress or URL prefix:

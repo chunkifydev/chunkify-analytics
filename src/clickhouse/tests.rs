@@ -4,7 +4,7 @@ use super::{Params, Store, testing};
 use crate::{
     api::ApiError,
     event::IncomingEvent,
-    query::{BreakdownBy, Dimension, MetricKind, Query},
+    query::{BreakdownBy, Dimension, Filters, MetricKind, Query},
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -1932,12 +1932,9 @@ fn rollup_rows(base: i64) -> Vec<Value> {
     rows
 }
 
-#[tokio::test]
-async fn rollups_match_event_reports_through_refreshes_late_events_and_pages() {
-    let fixture = Fixture::with_settings(&["default"], "cache.report_ttl_seconds = 0").await;
-    let store = &fixture.store;
-    let base = 1_000 * HOUR;
-    fixture.insert(rollup_rows(base)).await;
+/// Every report that can read rollups, with all pages of paginated ones.
+/// `events_only` adds video orders that always read events.
+async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
     let iso = |ms: i64| {
         chrono::DateTime::from_timestamp_millis(ms)
             .unwrap()
@@ -1951,48 +1948,97 @@ async fn rollups_match_event_reports_through_refreshes_late_events_and_pages() {
         json!({"from": iso(base + 1_200_000), "to": iso(base + 3 * HOUR + 600_000)}),
     ];
     // Every report that can read rollups, with all pages of paginated ones.
-    let ranges = &ranges;
-    let reports = move || async move {
-        let mut all = Vec::new();
-        for range in ranges {
-            let mut filtered = vec![range.clone()];
-            for extra in [
-                json!({"browser_name": "Chrome"}),
-                json!({"video_id": "video-a"}),
-                json!({"country": "FR", "video_id": "video-b"}),
-            ] {
-                let mut fields = range.clone();
-                fields
-                    .as_object_mut()
-                    .unwrap()
-                    .extend(extra.as_object().unwrap().clone());
-                filtered.push(fields);
-            }
-            for fields in &filtered {
-                all.push(ok(store
-                    .summary("default".into(), query(fields.clone()), false)
-                    .await));
-                all.push(ok(store
-                    .engagement("default".into(), query(fields.clone()))
-                    .await));
-                all.push(ok(store
-                    .quality("default".into(), query(fields.clone()))
-                    .await));
-                for sort in [
+    let mut all = Vec::new();
+    for range in ranges {
+        let mut filtered = vec![range.clone()];
+        for extra in [
+            json!({"browser_name": "Chrome"}),
+            json!({"video_id": "video-a"}),
+            json!({"country": "FR", "video_id": "video-b"}),
+        ] {
+            let mut fields = range.clone();
+            fields
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            filtered.push(fields);
+        }
+        for fields in &filtered {
+            all.push(ok(store
+                .summary("default".into(), query(fields.clone()), false)
+                .await));
+            all.push(ok(store
+                .engagement("default".into(), query(fields.clone()))
+                .await));
+            all.push(ok(store
+                .quality("default".into(), query(fields.clone()))
+                .await));
+            let sorts: &[&str] = if events_only {
+                &[
                     "views",
                     "video_id",
                     "unique_viewers",
                     "total_playing_time_ms",
-                ] {
+                ]
+            } else {
+                &["views", "video_id", "unique_viewers"]
+            };
+            for sort in sorts {
+                let mut cursor = Value::Null;
+                loop {
+                    let mut page = fields.clone();
+                    page["sort_by"] = json!(sort);
+                    page["limit"] = json!(1);
+                    if let Some(cursor) = cursor.as_str() {
+                        page["cursor"] = json!(cursor);
+                    }
+                    let result = ok(store.summary("default".into(), query(page), true).await);
+                    cursor = result["next_cursor"].clone();
+                    all.push(result);
+                    if cursor.is_null() {
+                        break;
+                    }
+                }
+            }
+        }
+        for group in ["browser_name", "country"] {
+            for kind in [
+                MetricKind::Summary,
+                MetricKind::Engagement,
+                MetricKind::Quality,
+            ] {
+                let values = if group == "country" {
+                    [None, Some("FR"), Some("US")]
+                } else {
+                    [None, Some("Chrome"), Some("Edge")]
+                };
+                for value in values {
+                    let mut filter = json!({});
+                    if let Some(value) = value {
+                        filter[group] = json!(value);
+                    }
                     let mut cursor = Value::Null;
                     loop {
-                        let mut page = fields.clone();
-                        page["sort_by"] = json!(sort);
+                        let mut page = range.clone();
+                        page.as_object_mut()
+                            .unwrap()
+                            .extend(filter.as_object().unwrap().clone());
+                        page["group_by"] = json!(group);
                         page["limit"] = json!(1);
                         if let Some(cursor) = cursor.as_str() {
                             page["cursor"] = json!(cursor);
                         }
-                        let result = ok(store.summary("default".into(), query(page), true).await);
+                        let result = ok(match kind {
+                            MetricKind::Summary => {
+                                store.summary("default".into(), query(page), false).await
+                            }
+                            MetricKind::Engagement => {
+                                store.engagement("default".into(), query(page)).await
+                            }
+                            MetricKind::Quality => {
+                                store.quality("default".into(), query(page)).await
+                            }
+                        });
                         cursor = result["next_cursor"].clone();
                         all.push(result);
                         if cursor.is_null() {
@@ -2001,67 +2047,35 @@ async fn rollups_match_event_reports_through_refreshes_late_events_and_pages() {
                     }
                 }
             }
-            for group in ["browser_name", "country"] {
-                for kind in [
-                    MetricKind::Summary,
-                    MetricKind::Engagement,
-                    MetricKind::Quality,
-                ] {
-                    let values = if group == "country" {
-                        [None, Some("FR"), Some("US")]
-                    } else {
-                        [None, Some("Chrome"), Some("Edge")]
-                    };
-                    for value in values {
-                        let mut filter = json!({});
-                        if let Some(value) = value {
-                            filter[group] = json!(value);
-                        }
-                        let mut cursor = Value::Null;
-                        loop {
-                            let mut page = range.clone();
-                            page.as_object_mut()
-                                .unwrap()
-                                .extend(filter.as_object().unwrap().clone());
-                            page["group_by"] = json!(group);
-                            page["limit"] = json!(1);
-                            if let Some(cursor) = cursor.as_str() {
-                                page["cursor"] = json!(cursor);
-                            }
-                            let result = ok(match kind {
-                                MetricKind::Summary => {
-                                    store.summary("default".into(), query(page), false).await
-                                }
-                                MetricKind::Engagement => {
-                                    store.engagement("default".into(), query(page)).await
-                                }
-                                MetricKind::Quality => {
-                                    store.quality("default".into(), query(page)).await
-                                }
-                            });
-                            cursor = result["next_cursor"].clone();
-                            all.push(result);
-                            if cursor.is_null() {
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
         }
-        for (interval, kind) in [
-            ("hour", "summary"),
-            ("hour", "quality"),
-            ("day", "engagement"),
-        ] {
-            let series: crate::query::TimeseriesQuery = serde_json::from_value(json!({
+    }
+    for (interval, kind) in [
+        ("hour", "summary"),
+        ("hour", "quality"),
+        ("day", "engagement"),
+    ] {
+        let series: crate::query::TimeseriesQuery = serde_json::from_value(json!({
                 "from": iso(base + 1_200_000), "to": iso(base + 5 * HOUR),
                 "interval": interval, "kind": kind}))
-            .unwrap();
-            all.push(ok(store.timeseries("default".into(), series).await));
-        }
-        Value::Array(all)
+        .unwrap();
+        all.push(ok(store.timeseries("default".into(), series).await));
+    }
+    Value::Array(all)
+}
+
+#[tokio::test]
+async fn rollups_match_event_reports_through_refreshes_late_events_and_pages() {
+    let fixture = Fixture::with_settings(&["default"], "cache.report_ttl_seconds = 0").await;
+    let store = &fixture.store;
+    let base = 1_000 * HOUR;
+    fixture.insert(rollup_rows(base)).await;
+    let iso = |ms: i64| {
+        chrono::DateTime::from_timestamp_millis(ms)
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
     };
+    let query = |fields: Value| -> Query { serde_json::from_value(fields).unwrap() };
+    let reports = move || all_reports(store, base, true);
     let compare = move |label: &'static str| async move {
         store.rollup_reads.store(false, Ordering::Relaxed);
         let raw = reports().await;
@@ -2233,4 +2247,161 @@ async fn rollup_runs_claim_once_and_skip_until_the_interval() {
             vec![json!(2), json!(1)]
         ]
     );
+}
+
+#[tokio::test]
+async fn lagged_reports_read_the_last_refresh_and_keep_pages_on_their_run() {
+    let fixture = Fixture::with_settings(
+        &["default"],
+        "cache.report_ttl_seconds = 0\nclickhouse.rollup_max_lag_seconds = 3600",
+    )
+    .await;
+    let store = &fixture.store;
+    let base = 1_000 * HOUR;
+    fixture.insert(rollup_rows(base)).await;
+    let exact = || async {
+        store.rollup_reads.store(false, Ordering::Relaxed);
+        let reports = all_reports(store, base, false).await;
+        store.rollup_reads.store(true, Ordering::Relaxed);
+        reports
+    };
+    // Before any refresh, reports read events.
+    let before = exact().await;
+    assert_same(
+        &all_reports(store, base, false).await,
+        &before,
+        "before refresh",
+    );
+
+    // After a refresh, every hour, partial ones included, comes from rollups
+    // and matches events read at the same time.
+    store.refresh_rollups_with(0, 0).await.unwrap();
+    let plan = store
+        .lagged_plan("default", &Filters::default(), None, i64::MIN, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.hours.len(), 4);
+    assert!(!plan.reads_events());
+    let refreshed = exact().await;
+    assert_same(
+        &all_reports(store, base, false).await,
+        &refreshed,
+        "after refresh",
+    );
+
+    // Keep every page of one breakdown, then change the data and refresh.
+    let page = |cursor: Option<&str>| {
+        let mut fields = json!({"group_by": "browser_name", "limit": 1});
+        if let Some(cursor) = cursor {
+            fields["cursor"] = json!(cursor);
+        }
+        serde_json::from_value::<Query>(fields).unwrap()
+    };
+    let mut pages = vec![ok(store.summary("default".into(), page(None), false).await)];
+    while let Some(cursor) = pages.last().unwrap()["next_cursor"].as_str() {
+        let next = ok(store
+            .summary("default".into(), page(Some(cursor)), false)
+            .await);
+        pages.push(next);
+    }
+    assert!(pages.len() > 2);
+
+    // New events stay out of lagged reports until the next refresh.
+    fixture
+        .insert(vec![
+            with(
+                event(
+                    "v5-late",
+                    "default",
+                    "v5",
+                    "video-a",
+                    Some("viewer-0"),
+                    "view_snapshot",
+                    5,
+                    base + HOUR + 900_000,
+                ),
+                json!({"playing_time_ms": 99000.0}),
+            ),
+            with(
+                event(
+                    "v200-start",
+                    "default",
+                    "v200",
+                    "video-a",
+                    Some("new"),
+                    "view_started",
+                    1,
+                    base + 2 * HOUR + 5_000,
+                ),
+                json!({"context_browser_name": "Chrome"}),
+            ),
+        ])
+        .await;
+    assert_same(
+        &all_reports(store, base, false).await,
+        &refreshed,
+        "lagging",
+    );
+    assert_ne!(exact().await, refreshed, "events changed");
+
+    // Later pages keep reading the run of their first page.
+    store.refresh_rollups_with(0, 0).await.unwrap();
+    let mut cursor = pages[0]["next_cursor"].as_str().unwrap().to_owned();
+    for (index, expected) in pages.iter().enumerate().skip(1) {
+        let next = ok(store
+            .summary("default".into(), page(Some(&cursor)), false)
+            .await);
+        assert_same(&next, expected, &format!("page {index}"));
+        match next["next_cursor"].as_str() {
+            Some(next) => cursor = next.to_owned(),
+            None => assert_eq!(index, pages.len() - 1),
+        }
+    }
+    // New first pages read the new run, which matches events again.
+    assert_same(
+        &all_reports(store, base, false).await,
+        &exact().await,
+        "after second refresh",
+    );
+
+    // Hours with an expired event read events, where the event is hidden.
+    let cutoff = base + HOUR + 30 * 60_000;
+    let plan = store
+        .lagged_plan("default", &Filters::default(), None, cutoff, None)
+        .await
+        .unwrap()
+        .unwrap();
+    // Hours 0 and 1 hold events received before the cutoff.
+    assert_eq!(plan.hours, vec![base + 2 * HOUR, base + 3 * HOUR]);
+    assert!(plan.reads_events());
+}
+
+#[tokio::test]
+async fn lagged_reads_stop_when_refreshes_fall_behind() {
+    let fixture =
+        Fixture::with_settings(&["default"], "clickhouse.rollup_max_lag_seconds = 1").await;
+    let store = &fixture.store;
+    fixture
+        .insert(vec![event(
+            "a",
+            "default",
+            "a",
+            "video",
+            None,
+            "view_started",
+            1,
+            5000,
+        )])
+        .await;
+    store.refresh_rollups_with(0, 0).await.unwrap();
+    let plan = || async {
+        store
+            .lagged_plan("default", &Filters::default(), None, i64::MIN, None)
+            .await
+            .unwrap()
+    };
+    assert!(plan().await.is_some());
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    assert!(plan().await.is_none(), "an old refresh is not read");
 }

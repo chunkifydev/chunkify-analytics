@@ -263,7 +263,7 @@ For error trends, call `get_timeseries` with `kind=quality`, date bounds and an
 interval. `kind=engagement` returns watch-time and reached-end metrics per bucket.
 For actual filter values, use `list_dimension_values` with
 `{"dimension":"browser_name"}`. Supported dimensions are `browser_name`,
-`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `video_id` and `viewer_id`.
+`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `video_id`, `viewer_id` and `user_id`.
 Values come from first retained starts, with null context separate from literal `unknown`.
 
 ## Export CSV

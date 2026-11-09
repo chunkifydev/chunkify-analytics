@@ -396,7 +396,7 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
     let first = ok(store.summary("default".into(), page(None), true).await);
     assert_eq!(
         first["videos"],
-        json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-a","views":1,"unique_viewers":0,"total_playing_time_ms":0.0}])
+        json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-a","video_title":null,"views":1,"unique_viewers":0,"total_playing_time_ms":0.0}])
     );
     // An earlier start arriving after page one must not alter its frozen cohort.
     fixture
@@ -419,14 +419,14 @@ async fn summaries_preserve_start_identity_ties_null_measurements_and_page_water
         .await);
     assert_eq!(
         second["videos"],
-        json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-b","views":1,"unique_viewers":1,"total_playing_time_ms":2500.0}])
+        json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-b","video_title":null,"views":1,"unique_viewers":1,"total_playing_time_ms":2500.0}])
     );
     let third = ok(store
         .summary("default".into(), page(Some(&second["next_cursor"])), true)
         .await);
     assert_eq!(
         third["videos"],
-        json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-c","views":1,"unique_viewers":1,"total_playing_time_ms":0.0}])
+        json!([{"playback_score":{"value":null,"sample_views":0},"video_id":"video-c","video_title":null,"views":1,"unique_viewers":1,"total_playing_time_ms":0.0}])
     );
     assert!(third["next_cursor"].is_null());
     assert_eq!(
@@ -1863,7 +1863,10 @@ fn rollup_rows(base: i64) -> Vec<Value> {
         let start = hour + 60_000 * (index + 1);
         let video = if index % 3 == 0 { "video-b" } else { "video-a" };
         let viewer = format!("viewer-{}", index % 5);
+        // Some starts lack a title, so videos keep the latest one they have.
+        let title = (index % 4 != 1).then(|| format!("title-{index}"));
         let context = json!({
+            "e_video_title": title, "e_user_id": format!("user-{}", index % 3),
             "context_browser_name": browsers[(index % 3) as usize],
             "context_os_name": "Linux", "context_device_type": "desktop",
             "context_remainder": json!({"continent": "EU", "country": countries[(index % 2) as usize],

@@ -21,7 +21,7 @@
 //! hides data and later pages read the same run as their first page.
 use super::{
     Params, Store,
-    reports::{Cohort, Narrow, START_CONTEXT, view_cohort},
+    reports::{Cohort, Narrow, START_COLUMNS, START_CONTEXT, view_cohort},
 };
 use crate::{api::ApiError, query::Filters};
 use serde_json::{Value, json};
@@ -126,6 +126,12 @@ const PARTIALS: &[(&str, &str, &str)] = &[
     ),
     ("score_sum", "Float64", "ifNull(sum(playback_score), 0)"),
     ("score_n", "UInt64", "count(playback_score)"),
+    // The title of the most recently received first start that has one.
+    (
+        "title",
+        "AggregateFunction(argMaxIf, Nullable(String), Int64, UInt8)",
+        "argMaxIfState(e_video_title, start_ingest_id, e_video_title IS NOT NULL)",
+    ),
 ];
 
 /// Which partial aggregates a report needs.
@@ -173,7 +179,14 @@ impl Partials {
                 "score_sum",
                 "score_n",
             ],
-            Self::Videos => &["views", "viewers", "playing_sum", "score_sum", "score_n"],
+            Self::Videos => &[
+                "views",
+                "viewers",
+                "playing_sum",
+                "score_sum",
+                "score_n",
+                "title",
+            ],
         }
     }
 
@@ -216,7 +229,8 @@ impl Partials {
                 "sum(views) AS views, uniqExactMerge(viewers) AS unique_viewers,
                 sum(playing_sum) AS total_playing_time_ms,
                 if(sum(score_n) = 0, NULL, sum(score_sum) / sum(score_n)) AS score,
-                sum(score_n) AS score_samples"
+                sum(score_n) AS score_samples,
+                argMaxIfMerge(title) AS video_title"
             }
         }
     }
@@ -231,6 +245,7 @@ const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("viewer_id", "Nullable(String)"),
     ("hour_ms", "Int64"),
     ("occurred_at_ms", "Int64"),
+    ("start_ingest_id", "Int64"),
     ("hours", "Array(Int64)"),
     ("min_received_ms", "Int64"),
     ("max_received_ms", "Int64"),
@@ -242,6 +257,7 @@ const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("ctx_city", "Nullable(String)"),
     ("ctx_page_origin", "Nullable(String)"),
     ("ctx_page_path", "Nullable(String)"),
+    ("e_video_title", "Nullable(String)"),
     ("playing_time_ms", "Float64"),
     ("m_playing_time_ms", "Nullable(Float64)"),
     ("m_startup_time_ms", "Nullable(Float64)"),
@@ -270,7 +286,7 @@ pub(super) fn tables() -> Vec<String> {
         .collect::<Vec<_>>()
         .join(", ");
     // Each identity's aggregation states, kept as events are inserted.
-    let aggregates = super::reports::identity_aggregates(Cohort::Rollup, START_CONTEXT);
+    let aggregates = super::reports::identity_aggregates(Cohort::Rollup, START_COLUMNS);
     let states = format!(
         "SELECT project_id, view_id, video_id, viewer_id, {} FROM events
         WHERE event_name IN ({}) GROUP BY project_id, view_id, video_id, viewer_id",
@@ -861,7 +877,7 @@ impl Store {
             i64::MIN,
             &Filters::default(),
             Cohort::Rollup,
-            START_CONTEXT,
+            START_COLUMNS,
             &narrow,
         );
         let project_id = params.text(project);

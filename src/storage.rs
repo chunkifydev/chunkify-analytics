@@ -75,6 +75,9 @@ const EVENT_FIELDS: &[(&str, Kind)] = &[
     ("seek_resume_wait_ms", Number),
     ("seek_interaction_duration_ms", Number),
     ("seek_outcome", Text),
+    // Integrator-supplied identity and display labels.
+    ("user_id", Text),
+    ("video_title", Text),
 ];
 const BROWSER_FIELDS: &[(&str, Kind)] = &[
     ("schema_version", Integer),

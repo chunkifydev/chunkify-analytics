@@ -51,6 +51,7 @@ pub struct Query {
     pub to: Option<String>,
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
+    pub user_id: Option<String>,
     pub view_id: Option<String>,
     pub event_name: Option<String>,
     pub browser_name: Option<String>,
@@ -171,6 +172,7 @@ pub enum Dimension {
     PagePath,
     VideoId,
     ViewerId,
+    UserId,
 }
 
 impl MetricKind {
@@ -226,6 +228,7 @@ pub struct TimeseriesQuery {
     pub interval: TimeInterval,
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
+    pub user_id: Option<String>,
     pub view_id: Option<String>,
     pub browser_name: Option<String>,
     pub os_name: Option<String>,
@@ -259,6 +262,7 @@ impl TimeseriesQuery {
             to: Some(self.to),
             video_id: self.video_id,
             viewer_id: self.viewer_id,
+            user_id: self.user_id,
             view_id: self.view_id,
             browser_name: self.browser_name,
             os_name: self.os_name,
@@ -298,6 +302,8 @@ pub struct Filters {
     to_ms: Option<i64>,
     video_id: Option<String>,
     viewer_id: Option<String>,
+    #[serde(default)]
+    user_id: Option<String>,
     #[serde(default)]
     view_id: Option<String>,
     event_name: Option<String>,
@@ -382,6 +388,16 @@ impl Query {
             }
         }
         if self
+            .user_id
+            .as_ref()
+            .is_some_and(|value| !(1..=event::MAX_LABEL_CHARS).contains(&value.chars().count()))
+        {
+            return Err(ApiError::bad(format!(
+                "user_id must contain between 1 and {} characters",
+                event::MAX_LABEL_CHARS
+            )));
+        }
+        if self
             .view_id
             .as_ref()
             .is_some_and(|value| !(1..=4096).contains(&value.chars().count()))
@@ -395,6 +411,7 @@ impl Query {
             to_ms,
             video_id: self.video_id.clone(),
             viewer_id: self.viewer_id.clone(),
+            user_id: self.user_id.clone(),
             view_id: self.view_id.clone(),
             event_name: self.event_name.clone(),
             browser_name: self.browser_name.clone(),
@@ -434,6 +451,7 @@ impl Filters {
         for (value, column) in [
             (&self.video_id, "video_id"),
             (&self.viewer_id, "viewer_id"),
+            (&self.user_id, "e_user_id"),
             (&self.view_id, "view_id"),
             (&self.event_name, "event_name"),
             (&self.browser_name, "context_browser_name"),
@@ -457,10 +475,14 @@ impl Filters {
     }
 
     /// The filters hourly rollups can answer: a date range, a video, and at
-    /// most one first-start context value. Viewer, view and event filters
-    /// always read events.
+    /// most one first-start context value. Viewer, user, view and event
+    /// filters always read events.
     pub fn rollup_scope(&self) -> Option<RollupScope> {
-        if self.viewer_id.is_some() || self.view_id.is_some() || self.event_name.is_some() {
+        if self.viewer_id.is_some()
+            || self.user_id.is_some()
+            || self.view_id.is_some()
+            || self.event_name.is_some()
+        {
             return None;
         }
         let mut dimensions = [
@@ -511,6 +533,7 @@ impl Dimension {
             Self::PagePath => "ctx_page_path",
             Self::VideoId => "video_id",
             Self::ViewerId => "viewer_id",
+            Self::UserId => "e_user_id",
         }
     }
 }

@@ -22,6 +22,9 @@ const STATES: [&str; 9] = [
     "stopped",
 ];
 
+/// Maximum Unicode characters in `user_id` and `video_title`.
+pub const MAX_LABEL_CHARS: usize = 256;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct IncomingEvent {
     pub event: Value,
@@ -96,6 +99,16 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
         "viewer_id",
     ] {
         field(object, key, nullable_string)?;
+    }
+    // Optional integrator-supplied identity and display fields. Older SDKs omit them.
+    for key in ["user_id", "video_title"] {
+        if object.contains_key(key) {
+            field(object, key, |v| {
+                v.is_null()
+                    || v.as_str()
+                        .is_some_and(|s| (1..=MAX_LABEL_CHARS).contains(&s.chars().count()))
+            })?;
+        }
     }
     field(object, "reason", |v| {
         v.is_null() || one_of(v, &["ended", "destroyed", "source_changed", "page_exit"])

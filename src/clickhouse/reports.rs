@@ -228,8 +228,9 @@ pub(super) const QUALITY_SAMPLES: &str = ", quality_samples AS (
     FROM view_metrics
 )";
 
-/// Context recorded on a view's first start, available to filters and callers.
-pub(super) const START_CONTEXT: &[&str] = &[
+/// Values recorded on a view's first start, available to filters and callers:
+/// the context, then the integrator's user ID and video title.
+pub(super) const START_COLUMNS: &[&str] = &[
     "context_browser_name",
     "context_os_name",
     "context_device_type",
@@ -238,11 +239,17 @@ pub(super) const START_CONTEXT: &[&str] = &[
     "ctx_city",
     "ctx_page_origin",
     "ctx_page_path",
+    "e_user_id",
+    "e_video_title",
 ];
+/// First-start context, which rollups break down by.
+pub(super) const START_CONTEXT: &[&str] = START_COLUMNS.split_at(8).0;
 const VIEW_CONTEXT: &[&str] = &[
     "context_browser_name",
     "context_os_name",
     "context_device_type",
+    "e_user_id",
+    "e_video_title",
 ];
 
 /// Select each view's earliest retained start and its final or latest cumulative
@@ -273,9 +280,9 @@ pub(super) fn view_cohort(
         }
         Some(starts) => (format!("{filtered} AND {starts}"), filtered),
     };
-    // Carry only the first-start context that filters or the caller read: each
+    // Carry only the first-start values that filters or the caller read: each
     // extra column makes the per-view aggregation noticeably more expensive.
-    let starts: Vec<&str> = START_CONTEXT
+    let starts: Vec<&str> = START_COLUMNS
         .iter()
         .copied()
         .filter(|column| context.contains(column) || conditions.contains(column))
@@ -343,7 +350,7 @@ pub(super) fn view_cohort(
         {identities}
     ), started AS (
         SELECT view_id, video_id, viewer_id,
-            start_order.2 AS occurred_at_ms{start_columns},
+            start_order.2 AS occurred_at_ms, start_order.3 AS start_ingest_id{start_columns},
             ifNull(measurement.1, 0) AS playing_time_ms,
             measurement.1 AS m_playing_time_ms{projections}{error_projection}{meta_projection}
         FROM per_identity WHERE start_count > 0
@@ -616,12 +623,16 @@ const VIEW_COLUMNS: &str = "view_id, video_id, viewer_id, occurred_at_ms,
     context_browser_name, context_os_name, context_device_type, playing_time_ms,
     m_startup_time_ms, m_rebuffer_duration_ms,
     ifNull(m_reached_end, 0), ifNull(m_has_ended_event, 0),
-    has_fatal_error, playback_score";
+    has_fatal_error, playback_score, e_user_id, e_video_title";
+/// Columns after `VIEW_COLUMNS`, such as a sort key, start here.
+const VIEW_COLUMN_COUNT: usize = 16;
 
 fn view_row(row: &[Value]) -> Result<Value, ApiError> {
     let score = optional_float(row, 13)?;
     Ok(json!({"view_id":text(row, 0)?, "video_id":text(row, 1)?,
-        "viewer_id":optional_text(row, 2)?, "started_at":utc_timestamp(int(row, 3)?),
+        "video_title":optional_text(row, 15)?,
+        "viewer_id":optional_text(row, 2)?, "user_id":optional_text(row, 14)?,
+        "started_at":utc_timestamp(int(row, 3)?),
         "browser_name":optional_text(row, 4)?, "os_name":optional_text(row, 5)?,
         "device_type":optional_text(row, 6)?, "playing_time_ms":float(row, 7)?,
         "startup_time_ms":optional_float(row, 8)?, "rebuffer_duration_ms":optional_float(row, 9)?,
@@ -978,7 +989,7 @@ impl Store {
                     Combined {
                         partials,
                         cohort,
-                        context: &[],
+                        context: if per_video { &["e_video_title"] } else { &[] },
                         raw_key: per_video.then(|| "video_id".to_owned()),
                         stored_key: per_video.then_some("video_id"),
                         dimension: None,
@@ -995,7 +1006,7 @@ impl Store {
                     cutoff,
                     &filters,
                     cohort,
-                    &[],
+                    if per_video { &["e_video_title"] } else { &[] },
                     &Narrow::default(),
                 ),
             };
@@ -1069,14 +1080,16 @@ impl Store {
                             arraySum(arraySort(groupArray(playing_time_ms))) AS total_playing_time_ms,
                             if(count(playback_score) = 0, NULL,
                                 arraySum(arraySort(groupArray(playback_score))) / count(playback_score)) AS score,
-                            count(playback_score) AS score_samples
+                            count(playback_score) AS score_samples,
+                            argMaxIf(e_video_title, start_ingest_id, e_video_title IS NOT NULL) AS video_title
                         FROM view_metrics GROUP BY video_id
                     )"
                 ),
             };
             let sql = format!(
                 "{video_metrics}
-                SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples FROM video_metrics
+                SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples, video_title
+                FROM video_metrics
                 WHERE {continuation} ORDER BY {column} {direction} NULLS LAST{tie_breaker} LIMIT {}",
                 limit + 1
             );
@@ -1111,7 +1124,8 @@ impl Store {
                     break;
                 }
                 let video = json!({
-                    "video_id": position.video_id, "views": position.views,
+                    "video_id": position.video_id, "video_title": optional_text(&row, 6)?,
+                    "views": position.views,
                     "unique_viewers": position.unique_viewers,
                     "total_playing_time_ms": position.total_playing_time_ms,
                     "playback_score": score_json(position.score, int(&row, 5)?)
@@ -1643,9 +1657,9 @@ impl Store {
                 break;
             }
             let value = if sort.is_text() {
-                optional_text(&row, 14)?.map(ViewSortValue::Text)
+                optional_text(&row, VIEW_COLUMN_COUNT)?.map(ViewSortValue::Text)
             } else {
-                optional_float(&row, 14)?.map(ViewSortValue::Number)
+                optional_float(&row, VIEW_COLUMN_COUNT)?.map(ViewSortValue::Number)
             };
             let view = view_row(&row)?;
             last = Some(ViewPosition {
@@ -1668,6 +1682,7 @@ impl Store {
             || query.to.is_some()
             || query.video_id.is_some()
             || query.viewer_id.is_some()
+            || query.user_id.is_some()
             || query.view_id.is_some()
             || query.browser_name.is_some()
             || query.os_name.is_some()

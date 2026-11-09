@@ -233,7 +233,12 @@ impl Store {
             control,
             instance,
             node,
-            rollup_interval: settings.rollup_interval,
+            // Rollups are read only by lagged reports, so they refresh only then.
+            rollup_interval: if settings.rollup_max_lag.is_zero() {
+                std::time::Duration::ZERO
+            } else {
+                settings.rollup_interval
+            },
             rollup_max_lag: settings.rollup_max_lag,
             rollup_reads: (!settings.rollup_interval.is_zero()).into(),
             client,
@@ -391,10 +396,6 @@ impl Store {
         {
             return Ok(0);
         }
-        // Rollups hide hours with expired events from reads at once; drop the
-        // rows of hours whose events have all expired.
-        self.purge_rollups(|params, column| retained_by(&self.projects, params, column))
-            .await?;
         let mut params = Params::default();
         let condition = format!("NOT ({})", retained(&self.projects, &mut params)?);
         let expired = self
@@ -412,6 +413,11 @@ impl Store {
                 .execute(format!("DELETE FROM events WHERE {condition}"), &params)
                 .await?;
         }
+        // Delete expired events first: that is what retention promises. Rollup
+        // reads already skip hours with expired events; then drop the derived
+        // rows of views and hours whose events have all expired.
+        self.purge_rollups(|params, column| retained_by(&self.projects, params, column))
+            .await?;
         Ok(expired as usize)
     }
 }

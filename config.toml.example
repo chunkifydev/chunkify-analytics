@@ -21,10 +21,13 @@ registry_refresh_seconds = 5
 deduplication_window_seconds = 604800
 # Optional 0..63, distinct for each server sharing the database. Leased when unset.
 # node_id = 1
-# Seconds between refreshes of the hourly report rollups. 0 reads events only.
-rollup_interval_seconds = 15
-# Let reports read the last refresh while it is at most this old. 0 keeps them exact.
+# Let reports read hourly rollups, lagging stored events by about the refresh
+# interval plus ten seconds. Reports read events while the last refresh is older
+# than this limit: 0 keeps reports exact; otherwise at least twice the interval,
+# for example 120.
 rollup_max_lag_seconds = 0
+# Seconds between rollup refreshes when reports may lag.
+rollup_interval_seconds = 45
 
 [server]
 # External base URL for CSV download links behind an ingress or URL prefix:

@@ -2064,152 +2064,6 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
 }
 
 #[tokio::test]
-async fn rollups_match_event_reports_through_refreshes_late_events_and_pages() {
-    let fixture = Fixture::with_settings(&["default"], "cache.report_ttl_seconds = 0").await;
-    let store = &fixture.store;
-    let base = 1_000 * HOUR;
-    fixture.insert(rollup_rows(base)).await;
-    let iso = |ms: i64| {
-        chrono::DateTime::from_timestamp_millis(ms)
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-    };
-    let query = |fields: Value| -> Query { serde_json::from_value(fields).unwrap() };
-    let reports = move || all_reports(store, base, true);
-    let compare = move |label: &'static str| async move {
-        store.rollup_reads.store(false, Ordering::Relaxed);
-        let raw = reports().await;
-        store.rollup_reads.store(true, Ordering::Relaxed);
-        let combined = reports().await;
-        assert_same(&combined, &raw, label);
-    };
-    let whole = query(json!({"from": iso(base), "to": iso(base + 4 * HOUR)}))
-        .filters()
-        .unwrap();
-    let whole = &whole;
-    let planned = move || async move {
-        store
-            .rollup_plan("default", whole, None, i64::MIN, i64::MAX)
-            .await
-            .unwrap()
-            .map(|plan| plan.hours)
-    };
-    assert_eq!(planned().await, None, "no hour is settled before a refresh");
-    compare("before refresh").await;
-
-    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(4));
-    let all_hours: Vec<i64> = (0..4).map(|h| base + h * HOUR).collect();
-    assert_eq!(planned().await, Some(all_hours.clone()));
-    compare("after refresh").await;
-
-    // A late snapshot changes v5 (hour 1); an earlier start moves v6 from hour
-    // 2 to hour 0; a new view starts in hour 3. Those hours read events again.
-    fixture
-        .insert(vec![
-            with(
-                event(
-                    "v5-late",
-                    "default",
-                    "v5",
-                    "video-a",
-                    Some("viewer-0"),
-                    "view_snapshot",
-                    5,
-                    base + HOUR + 900_000,
-                ),
-                json!({"playing_time_ms": 99000.0}),
-            ),
-            with(
-                event(
-                    "v6-early",
-                    "default",
-                    "v6",
-                    "video-a",
-                    Some("viewer-1"),
-                    "view_started",
-                    0,
-                    base + 1_000,
-                ),
-                json!({"context_browser_name": "Edge"}),
-            ),
-            event(
-                "v99-start",
-                "default",
-                "v99",
-                "video-c",
-                Some("new"),
-                "view_started",
-                1,
-                base + 3 * HOUR + 5_000,
-            ),
-        ])
-        .await;
-    assert_eq!(planned().await, None);
-    let partial = query(json!({"from": iso(base), "to": iso(base + 2 * HOUR)}))
-        .filters()
-        .unwrap();
-    assert!(
-        store
-            .rollup_plan("default", &partial, None, i64::MIN, i64::MAX)
-            .await
-            .unwrap()
-            .is_none(),
-        "hours 0 and 1 changed"
-    );
-    compare("after late events").await;
-
-    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(4));
-    assert_eq!(planned().await, Some(all_hours.clone()));
-    compare("after second refresh").await;
-
-    // Hours with an expired event read events, where the event is hidden.
-    let cutoff = base + HOUR + 30 * 60_000;
-    let plan = store
-        .rollup_plan("default", whole, None, cutoff, i64::MAX)
-        .await
-        .unwrap()
-        .unwrap();
-    // Hour 2 holds a start of v6, whose earlier start in hour 0 has expired.
-    assert_eq!(plan.hours, vec![base + 3 * HOUR]);
-
-    // A page cursor freezes its snapshot: events stored after page one, even
-    // once refreshed into rollups, stay out of later pages.
-    let page = |cursor: Option<&str>| {
-        let mut fields = json!({"group_by": "browser_name", "limit": 1, "from": iso(base), "to": iso(base + 4 * HOUR)});
-        if let Some(cursor) = cursor {
-            fields["cursor"] = json!(cursor);
-        }
-        query(fields)
-    };
-    let first = ok(store.summary("default".into(), page(None), false).await);
-    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
-    fixture
-        .insert(vec![with(
-            event(
-                "v100-start",
-                "default",
-                "v100",
-                "video-a",
-                Some("late"),
-                "view_started",
-                1,
-                base + 2 * HOUR + 7_000,
-            ),
-            json!({"context_browser_name": "Chrome"}),
-        )])
-        .await;
-    store.refresh_rollups_with(0, 0).await.unwrap();
-    let combined = ok(store
-        .summary("default".into(), page(Some(&cursor)), false)
-        .await);
-    store.rollup_reads.store(false, Ordering::Relaxed);
-    let raw = ok(store
-        .summary("default".into(), page(Some(&cursor)), false)
-        .await);
-    assert_same(&combined, &raw, "second page");
-}
-
-#[tokio::test]
 async fn rollup_runs_claim_once_and_skip_until_the_interval() {
     let fixture = Fixture::new(&["default"]).await;
     let store = &fixture.store;
@@ -2336,6 +2190,20 @@ async fn lagged_reports_read_the_last_refresh_and_keep_pages_on_their_run() {
                 ),
                 json!({"context_browser_name": "Chrome"}),
             ),
+            // An earlier start moves v6 from hour 2 to hour 0.
+            with(
+                event(
+                    "v6-early",
+                    "default",
+                    "v6",
+                    "video-a",
+                    Some("viewer-1"),
+                    "view_started",
+                    0,
+                    base + 1_000,
+                ),
+                json!({"context_browser_name": "Edge"}),
+            ),
         ])
         .await;
     assert_same(
@@ -2372,15 +2240,19 @@ async fn lagged_reports_read_the_last_refresh_and_keep_pages_on_their_run() {
         .await
         .unwrap()
         .unwrap();
-    // Hours 0 and 1 hold events received before the cutoff.
-    assert_eq!(plan.hours, vec![base + 2 * HOUR, base + 3 * HOUR]);
+    // Hours 0 and 1 hold events received before the cutoff, and hour 2 holds
+    // a start of v6, whose earlier start in hour 0 is expired.
+    assert_eq!(plan.hours, vec![base + 3 * HOUR]);
     assert!(plan.reads_events());
 }
 
 #[tokio::test]
 async fn lagged_reads_stop_when_refreshes_fall_behind() {
-    let fixture =
-        Fixture::with_settings(&["default"], "clickhouse.rollup_max_lag_seconds = 1").await;
+    let fixture = Fixture::with_settings(
+        &["default"],
+        "clickhouse.rollup_interval_seconds = 1\nclickhouse.rollup_max_lag_seconds = 2",
+    )
+    .await;
     let store = &fixture.store;
     fixture
         .insert(vec![event(
@@ -2402,7 +2274,7 @@ async fn lagged_reads_stop_when_refreshes_fall_behind() {
             .unwrap()
     };
     assert!(plan().await.is_some());
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
     assert!(plan().await.is_none(), "an old refresh is not read");
 }
 
@@ -2438,4 +2310,32 @@ async fn servers_lease_distinct_node_ids_and_one_sweeps_each_interval() {
         }
     }
     assert_eq!(swept, 1, "one server sweeps per interval");
+}
+
+#[test]
+fn lag_limits_leave_room_for_slow_refreshes() {
+    let load = |extra: &str| {
+        let directory = std::env::temp_dir().join(format!("chunkify-lag-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let (file, env) = (directory.join("config.toml"), directory.join("empty.env"));
+        std::fs::write(&env, "").unwrap();
+        std::fs::write(&file, extra).unwrap();
+        let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();
+        let result = crate::backend::ClickHouseConfig::load(&settings)
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        std::fs::remove_dir_all(directory).unwrap();
+        result
+    };
+    assert!(load("clickhouse.rollup_max_lag_seconds = 0\n").is_ok());
+    assert!(load("clickhouse.rollup_max_lag_seconds = 120\n").is_ok());
+    assert!(
+        load("clickhouse.rollup_max_lag_seconds = 60\n")
+            .unwrap_err()
+            .contains("at least twice")
+    );
+    assert!(
+        load("clickhouse.rollup_interval_seconds = 20\nclickhouse.rollup_max_lag_seconds = 40\n")
+            .is_ok()
+    );
 }

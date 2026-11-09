@@ -1,22 +1,24 @@
-//! Hourly report rollups.
+//! Hourly report rollups, read when reports may lag stored events.
 //!
 //! Reports measure each view once, from its first start and its final or latest
-//! measurement. Computing that from raw events on every request costs CPU in
-//! proportion to the project's views. Rollups store the result per hour of
-//! first start, video and first-start context value, as mergeable partial
-//! aggregates, so a report over many hours merges a few rows per hour.
+//! measurement. Computing that from events on every request costs CPU in
+//! proportion to the views in range. Instead, a materialized view keeps each
+//! view's aggregation state as events are inserted (`view_states`), and a
+//! periodic refresh turns the states of views that changed into per-view
+//! results (`rollup_views`) and mergeable partial aggregates per hour of first
+//! start, video and first-start context value (`rollup`).
 //!
-//! Results stay exact. A report reads rollup rows only for whole hours inside
-//! its date range that are *settled*: no event of a view starting in that hour
-//! was stored after the last completed refresh, the cursor snapshot includes
-//! all of them, and none of them has expired. Every other hour is computed
-//! from events, as without rollups, and both parts merge in one query.
+//! With `clickhouse.rollup_max_lag_seconds` above zero, reports read every hour
+//! as of the last completed refresh: whole hours from `rollup`, partial hours
+//! from `rollup_views`, and hours with expired events from events, so expired
+//! events stay hidden. Without it, reports read events and no refresh runs.
 //!
 //! Any analytics server can refresh. A run claims the next version with the
 //! same deduplicated insert as the project registry, recomputes the hours whose
 //! views received events since the previous completed run, and then records its
 //! completion. Rows carry the run version as their generation; reads use the
-//! newest generation of each hour, so an interrupted run never hides data.
+//! newest generation of each hour up to their run, so an interrupted run never
+//! hides data and later pages read the same run as their first page.
 use super::{
     Params, Store,
     reports::{Cohort, Narrow, START_CONTEXT, view_cohort},
@@ -267,7 +269,28 @@ pub(super) fn tables() -> Vec<String> {
         .map(|(name, kind, _)| format!("{name} {kind}"))
         .collect::<Vec<_>>()
         .join(", ");
+    // Each identity's aggregation states, kept as events are inserted.
+    let aggregates = super::reports::identity_aggregates(Cohort::Rollup, START_CONTEXT);
+    let states = format!(
+        "SELECT project_id, view_id, video_id, viewer_id, {} FROM events
+        WHERE event_name IN ({}) GROUP BY project_id, view_id, video_id, viewer_id",
+        aggregates
+            .iter()
+            .map(|(function, arguments, name)| format!("{function}State({arguments}) AS {name}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        super::reports::cohort_events(Cohort::Rollup)
+    );
     vec![
+        format!(
+            "CREATE TABLE IF NOT EXISTS view_states
+            ENGINE = AggregatingMergeTree ORDER BY (project_id, view_id, video_id, viewer_id)
+            SETTINGS allow_nullable_key = 1
+            EMPTY AS {states}"
+        ),
+        format!(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS view_states_insert TO view_states AS {states}"
+        ),
         "CREATE TABLE IF NOT EXISTS rollup_runs (
             version Int64, write_id String, since_ms Int64, through_ms Int64, completed UInt8,
             written_at DateTime64(3) DEFAULT now64(3)
@@ -372,24 +395,8 @@ fn scope_range(filters: &Filters, group: Option<&str>) -> Option<(i64, i64)> {
     ))
 }
 
-/// Date ranges not covered by the planned hours, within the report's range.
-fn uncovered(from: i64, to: i64, hours: &[i64]) -> Vec<(i64, i64)> {
-    let mut ranges = Vec::new();
-    let mut start = from;
-    for hour in hours {
-        if *hour > start {
-            ranges.push((start, *hour));
-        }
-        start = hour + HOUR_MS;
-    }
-    if start < to {
-        ranges.push((start, to));
-    }
-    ranges
-}
-
-/// One report's combined query: per-view rows for unsettled hours and rollup
-/// rows for settled hours, merged as `parts`. `raw_key` and `stored_key` group
+/// One report's combined query: rollup rows for whole hours, per-view rows for
+/// partial hours and events for hours with expired events, merged as `parts`. `raw_key` and `stored_key` group
 /// both sides the same way; `None` for totals.
 pub(super) struct Combined<'a> {
     pub partials: Partials,
@@ -407,9 +414,9 @@ impl Store {
     }
 
     /// The snapshot a report reads (its event order watermark) and its rollup
-    /// plan. A lagged read is tried first, pinned to `cursor`'s run on later
-    /// pages; otherwise settled hours, as of `cursor`'s watermark. `paged`
-    /// reports need a watermark for their cursors when they read events.
+    /// plan: the last refresh, or the refresh `cursor`'s first page read.
+    /// Without a plan the report reads events. `paged` reports need a
+    /// watermark for their cursors when they read events.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn report_plan(
         &self,
@@ -440,18 +447,10 @@ impl Store {
                 None => Ok(i64::MAX),
             }
         };
-        if let Some(plan) = lagged {
-            let through = watermark(paged && plan.reads_events()).await?;
-            return Ok((through, Some(plan)));
+        match lagged {
+            Some(plan) => Ok((watermark(paged && plan.reads_events()).await?, Some(plan))),
+            None => Ok((watermark(paged).await?, None)),
         }
-        let through = watermark(paged).await?;
-        let plan = if rollups {
-            self.rollup_plan(project, filters, group, cutoff, through)
-                .await?
-        } else {
-            None
-        };
-        Ok((through, plan))
     }
 
     fn lag_enabled(&self) -> bool {
@@ -542,92 +541,6 @@ impl Store {
         Ok(Some(plan))
     }
 
-    /// Settled hours this report can read from rollups. `None` when rollups
-    /// are off, the filters need events, or no whole hour is settled. `group`
-    /// is the breakdown column, if any.
-    pub(super) async fn rollup_plan(
-        &self,
-        project: &str,
-        filters: &Filters,
-        group: Option<&str>,
-        cutoff: i64,
-        through: i64,
-    ) -> Result<Option<Plan>, ApiError> {
-        if !self.rollups_enabled() {
-            return Ok(None);
-        }
-        let Some((from, to)) = scope_range(filters, group) else {
-            return Ok(None);
-        };
-        // Whole hours inside [from, to).
-        let first = if from == i64::MIN {
-            i64::MIN
-        } else {
-            from.div_euclid(HOUR_MS)
-                .saturating_add(i64::from(from.rem_euclid(HOUR_MS) != 0))
-                .saturating_mul(HOUR_MS)
-        };
-        let end = if to == i64::MAX {
-            i64::MAX
-        } else {
-            to.div_euclid(HOUR_MS).saturating_mul(HOUR_MS)
-        };
-        if first >= end {
-            return Ok(None);
-        }
-        let mut params = Params::default();
-        let project_id = params.text(project);
-        let started_hour = hour_of("occurred_at_ms");
-        let sql = format!(
-            "WITH (SELECT max(through_ms) FROM rollup_runs WHERE completed = 1) AS settled
-            SELECT hour_ms, max(generation) FROM rollup_hours
-            WHERE project_id = {project_id} AND hour_ms >= {first} AND hour_ms < {end}
-            GROUP BY hour_ms
-            HAVING argMax(min_received_ms, generation) >= {cutoff}
-                AND hour_ms NOT IN (
-                    SELECT arrayJoin(hours) FROM rollup_views
-                    WHERE project_id = {project_id} AND view_id IN (
-                        SELECT view_id FROM events WHERE project_id = {project_id} AND stored_at_ms > settled
-                        UNION DISTINCT
-                        SELECT view_id FROM events WHERE project_id = {project_id} AND ingest_id > {through})
-                    UNION DISTINCT
-                    SELECT {started_hour} FROM events WHERE project_id = {project_id}
-                        AND event_name = 'chunkify.video.view_started' AND stored_at_ms > settled
-                    UNION DISTINCT
-                    SELECT {started_hour} FROM events WHERE project_id = {project_id}
-                        AND event_name = 'chunkify.video.view_started' AND ingest_id > {through})
-            ORDER BY hour_ms",
-            first = params.int(first),
-            end = params.int(end),
-            cutoff = params.int(cutoff),
-            through = params.int(through),
-        );
-        let rows = self.client.all(&sql, &params).await?;
-        if rows.is_empty() {
-            return Ok(None);
-        }
-        let mut hours = Vec::with_capacity(rows.len());
-        let mut generations = Vec::with_capacity(rows.len());
-        for row in rows {
-            let read = |index: usize| {
-                row.get(index)
-                    .and_then(Value::as_i64)
-                    .ok_or_else(ApiError::internal)
-            };
-            hours.push(read(0)?);
-            generations.push(read(1)?);
-        }
-        Ok(Some(Plan {
-            raw: uncovered(from, to, &hours),
-            hours,
-            generations,
-            partial: Vec::new(),
-            from,
-            to,
-            run: None,
-        }))
-    }
-
     /// The `WITH ... parts AS (...)` part of a combined report query.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn combined(
@@ -663,9 +576,9 @@ impl Store {
                     query.cohort,
                     query.context,
                     &Narrow {
-                        events: None,
                         starts: Some(starts),
                         first_start: true,
+                        states: None,
                     },
                 );
                 let (samples, source) = match query.partials {
@@ -923,19 +836,23 @@ impl Store {
     /// Recompute the views with a start in `hours`, then those hours' rollup
     /// rows and receipt ranges, as of the run's window.
     async fn recompute(&self, run: &Run, project: &str, hours: &[i64]) -> Result<(), ApiError> {
-        let first = *hours.first().ok_or_else(ApiError::internal)?;
-        let last = *hours.last().ok_or_else(ApiError::internal)?;
         let mut params = Params::default();
         let list = params.ints(hours);
+        let owner = params.text(project);
+        // Every view with a start in these hours: views known from earlier runs
+        // and views with events stored in this run's window. Their states are
+        // read by primary key, so the cost follows views, not events.
+        let views = format!(
+            "SELECT view_id FROM rollup_views WHERE project_id = {owner} AND hasAny(hours, {list})
+            UNION DISTINCT
+            SELECT view_id FROM events WHERE project_id = {owner}
+                AND stored_at_ms > {} AND stored_at_ms <= {}",
+            params.int(run.since),
+            params.int(run.through)
+        );
         let narrow = Narrow {
-            events: Some(format!("stored_at_ms <= {}", params.int(run.through))),
-            starts: Some(format!(
-                "occurred_at_ms >= {} AND occurred_at_ms < {} AND has({list}, {})",
-                params.int(first),
-                params.int(last + HOUR_MS),
-                hour_of("occurred_at_ms")
-            )),
-            first_start: false,
+            states: Some(views),
+            ..Narrow::default()
         };
         let cohort = view_cohort(
             &mut params,
@@ -1079,6 +996,7 @@ impl Store {
         let mut params = Params::default();
         let hours = retained(&mut params, "max(max_received_ms)")?;
         let views = retained(&mut params, "max(max_received_ms)")?;
+        let states = retained(&mut params, "maxMerge(max_received)")?;
         let expired_hours = format!(
             "SELECT project_id, hour_ms FROM rollup_hours GROUP BY project_id, hour_ms HAVING NOT ({hours})"
         );
@@ -1089,6 +1007,11 @@ impl Store {
                 "DELETE FROM rollup_views WHERE (project_id, view_id) IN (
                     SELECT project_id, view_id FROM rollup_views
                     GROUP BY project_id, view_id HAVING NOT ({views}))"
+            ),
+            format!(
+                "DELETE FROM view_states WHERE (project_id, view_id) IN (
+                    SELECT project_id, view_id FROM view_states
+                    GROUP BY project_id, view_id HAVING NOT ({states}))"
             ),
         ] {
             // Replicated tables reject deletes whose condition reads other
@@ -1115,20 +1038,6 @@ struct Run {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uncovered_ranges_skip_planned_hours() {
-        let h = HOUR_MS;
-        assert_eq!(
-            uncovered(10, 5 * h + 7, &[h, 2 * h, 4 * h]),
-            vec![(10, h), (3 * h, 4 * h), (5 * h, 5 * h + 7)]
-        );
-        assert_eq!(uncovered(h, 2 * h, &[h]), Vec::<(i64, i64)>::new());
-        assert_eq!(
-            uncovered(i64::MIN, i64::MAX, &[0]),
-            vec![(i64::MIN, 0), (h, i64::MAX)]
-        );
-    }
 
     #[test]
     fn hours_floor_before_and_after_1970() {

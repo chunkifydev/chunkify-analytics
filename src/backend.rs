@@ -88,7 +88,7 @@ impl ClickHouseConfig {
             .ok_or("clickhouse.deduplication_window_seconds must be between 0 and 31536000")?;
         let rollup_interval = settings
             .var("clickhouse.rollup_interval_seconds")
-            .unwrap_or_else(|_| "15".into())
+            .unwrap_or_else(|_| "45".into())
             .parse::<u64>()
             .ok()
             .filter(|seconds| *seconds <= 3600)
@@ -100,6 +100,14 @@ impl ClickHouseConfig {
             .ok()
             .filter(|seconds| *seconds <= 3600)
             .ok_or("clickhouse.rollup_max_lag_seconds must be between 0 and 3600")?;
+        // Refreshes slow down under load. A limit close to the interval makes
+        // reports fall back to events, whose extra load slows refreshes further.
+        if rollup_max_lag > 0 && rollup_max_lag < 2 * rollup_interval.max(1) {
+            return Err(
+                "clickhouse.rollup_max_lag_seconds must be 0 or at least twice clickhouse.rollup_interval_seconds"
+                    .into(),
+            );
+        }
         Ok(Self {
             rollup_max_lag: Duration::from_secs(rollup_max_lag),
             rollup_interval: Duration::from_secs(rollup_interval),

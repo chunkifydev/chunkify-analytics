@@ -342,7 +342,12 @@ impl Client {
             == Some("Replicated");
         let engine = |statement: String| {
             if replicated {
-                statement.replace("ENGINE = MergeTree", "ENGINE = ReplicatedMergeTree")
+                statement
+                    .replace("ENGINE = MergeTree", "ENGINE = ReplicatedMergeTree")
+                    .replace(
+                        "ENGINE = AggregatingMergeTree",
+                        "ENGINE = ReplicatedAggregatingMergeTree",
+                    )
             } else {
                 statement
             }

@@ -36,12 +36,149 @@ pub(super) enum Cohort {
 /// Further limits on a cohort, used by rollup refreshes and combined reads.
 #[derive(Default)]
 pub(super) struct Narrow {
-    /// A condition on every event read.
-    pub events: Option<String>,
     /// A condition on view starts. Candidates need a matching start.
     pub starts: Option<String>,
     /// Also require the condition of each view's first start.
     pub first_start: bool,
+    /// Read the identities of these views (a `view_id` subquery) from their
+    /// states in `view_states` instead of aggregating events.
+    pub states: Option<String>,
+}
+
+/// The measurement each cohort reads from a view's final or latest snapshot or
+/// end event, after playing time: names and expressions over events.
+fn measurement(cohort: Cohort) -> Vec<(&'static str, String)> {
+    let reached_end = format!("event_name = {ENDED} AND e_reason = 'ended'");
+    let progress_ratio = || {
+        let duration = stored_number("media_duration_seconds");
+        let progress = stored_number("furthest_progress_ratio");
+        format!("if({duration} > 0 AND {progress} BETWEEN 0 AND 1, {progress}, NULL)")
+    };
+    match cohort {
+        Cohort::Basic => Vec::new(),
+        Cohort::Retention => vec![
+            (
+                "media_duration_seconds",
+                stored_number("media_duration_seconds"),
+            ),
+            ("played_ranges", json_array("played_ranges")),
+        ],
+        Cohort::Renditions => vec![(
+            "rendition_playing_time",
+            json_array("rendition_playing_time"),
+        )],
+        Cohort::Quality | Cohort::Complete => vec![
+            ("startup_time_ms", stored_number("startup_time_ms")),
+            (
+                "rebuffer_duration_ms",
+                stored_number("rebuffer_duration_ms"),
+            ),
+            (
+                "startup_outcome",
+                format!("if(event_name = {ENDED}, e_startup_outcome, NULL)"),
+            ),
+            ("reached_end", reached_end),
+            ("has_ended_event", format!("event_name = {ENDED}")),
+        ],
+        Cohort::Engagement => vec![
+            ("reached_end", reached_end),
+            ("progress_ratio", progress_ratio()),
+        ],
+        Cohort::Rollup => vec![
+            ("startup_time_ms", stored_number("startup_time_ms")),
+            (
+                "rebuffer_duration_ms",
+                stored_number("rebuffer_duration_ms"),
+            ),
+            (
+                "startup_outcome",
+                format!("if(event_name = {ENDED}, e_startup_outcome, NULL)"),
+            ),
+            ("reached_end", reached_end),
+            ("progress_ratio", progress_ratio()),
+        ],
+    }
+}
+
+fn reads_errors(cohort: Cohort) -> bool {
+    matches!(cohort, Cohort::Quality | Cohort::Complete | Cohort::Rollup)
+}
+
+/// Event names a cohort reads.
+pub(super) fn cohort_events(cohort: Cohort) -> String {
+    let errors = if reads_errors(cohort) {
+        format!(", {ERROR}")
+    } else {
+        String::new()
+    };
+    format!("{STARTED}, {SNAPSHOT}, {ENDED}{errors}")
+}
+
+/// Aggregates over one identity's events (view, video and viewer): function,
+/// arguments and name. Reports apply them to events; the `view_states`
+/// materialized view keeps their states as events arrive, and rollup refreshes
+/// merge those states with the same functions.
+pub(super) fn identity_aggregates(
+    cohort: Cohort,
+    starts: &[&str],
+) -> Vec<(&'static str, String, &'static str)> {
+    let order = "tuple(sequence, occurred_at_ms, ingest_id)";
+    let mut aggregates = Vec::new();
+    if !starts.is_empty() {
+        aggregates.push((
+            "argMinIf",
+            format!(
+                "tuple({}), {order}, event_name = {STARTED}",
+                starts.join(", ")
+            ),
+            "first_start",
+        ));
+    }
+    aggregates.push((
+        "minIf",
+        format!("{order}, event_name = {STARTED}"),
+        "start_order",
+    ));
+    aggregates.push(("countIf", format!("event_name = {STARTED}"), "start_count"));
+    let values = std::iter::once("playing_time_ms".to_owned())
+        .chain(
+            measurement(cohort)
+                .into_iter()
+                .map(|(_, expression)| expression),
+        )
+        .map(|expression| format!("toNullable({expression})"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    aggregates.push((
+        "argMaxIf",
+        format!(
+            "tuple({values}), tuple(event_name = {ENDED}, sequence, occurred_at_ms, ingest_id),
+            event_name IN ({SNAPSHOT}, {ENDED})"
+        ),
+        "measurement",
+    ));
+    if reads_errors(cohort) {
+        aggregates.push((
+            "countIf",
+            format!("event_name = {ERROR} AND e_error_fatal = true"),
+            "fatal_events",
+        ));
+    }
+    // Rollups record every hour in which a view started and the receipt range
+    // of its events, across identities, to know which hours a view affects.
+    if matches!(cohort, Cohort::Rollup) {
+        aggregates.push((
+            "groupUniqArrayIf",
+            format!(
+                "{}, event_name = {STARTED}",
+                super::rollup::hour_of("occurred_at_ms")
+            ),
+            "start_hours",
+        ));
+        aggregates.push(("min", "received_at_ms".into(), "min_received"));
+        aggregates.push(("max", "received_at_ms".into(), "max_received"));
+    }
+    aggregates
 }
 
 // Numeric report fields materialized at insert time; see `REPORT_NUMBERS`.
@@ -121,15 +258,12 @@ pub(super) fn view_cohort(
     context: &[&str],
     narrow: &Narrow,
 ) -> String {
-    let mut scope = format!(
-        "project_id = {} AND ingest_id <= {} AND received_at_ms >= {}",
-        params.text(project),
+    let project_id = params.text(project);
+    let scope = format!(
+        "project_id = {project_id} AND ingest_id <= {} AND received_at_ms >= {}",
         params.int(through),
         params.int(cutoff)
     );
-    if let Some(events) = &narrow.events {
-        scope = format!("{scope} AND {events}");
-    }
     let filtered = filters.clickhouse(params);
     let (candidate_conditions, conditions) = match &narrow.starts {
         None => (filtered.clone(), filtered),
@@ -146,130 +280,67 @@ pub(super) fn view_cohort(
         .copied()
         .filter(|column| context.contains(column) || conditions.contains(column))
         .collect();
-    let first_start = if starts.is_empty() {
-        String::new()
-    } else {
-        format!(
-            "argMinIf(tuple({}), tuple(sequence, occurred_at_ms, ingest_id), event_name = {STARTED}) AS first_start,",
-            starts.join(", ")
-        )
-    };
     let start_columns: String = starts
         .iter()
         .enumerate()
         .map(|(index, column)| format!(", first_start.{} AS {column}", index + 1))
         .collect();
-    let reached_end = format!("event_name = {ENDED} AND e_reason = 'ended'");
-    let progress_ratio = || {
-        let duration = stored_number("media_duration_seconds");
-        let progress = stored_number("furthest_progress_ratio");
-        format!("if({duration} > 0 AND {progress} BETWEEN 0 AND 1, {progress}, NULL)")
-    };
-    let measurement: Vec<(&str, String)> = match cohort {
-        Cohort::Basic => Vec::new(),
-        Cohort::Retention => vec![
-            (
-                "media_duration_seconds",
-                stored_number("media_duration_seconds"),
-            ),
-            ("played_ranges", json_array("played_ranges")),
-        ],
-        Cohort::Renditions => vec![(
-            "rendition_playing_time",
-            json_array("rendition_playing_time"),
-        )],
-        Cohort::Quality | Cohort::Complete => vec![
-            ("startup_time_ms", stored_number("startup_time_ms")),
-            (
-                "rebuffer_duration_ms",
-                stored_number("rebuffer_duration_ms"),
-            ),
-            (
-                "startup_outcome",
-                format!("if(event_name = {ENDED}, e_startup_outcome, NULL)"),
-            ),
-            ("reached_end", reached_end),
-            ("has_ended_event", format!("event_name = {ENDED}")),
-        ],
-        Cohort::Engagement => vec![
-            ("reached_end", reached_end),
-            ("progress_ratio", progress_ratio()),
-        ],
-        Cohort::Rollup => vec![
-            ("startup_time_ms", stored_number("startup_time_ms")),
-            (
-                "rebuffer_duration_ms",
-                stored_number("rebuffer_duration_ms"),
-            ),
-            (
-                "startup_outcome",
-                format!("if(event_name = {ENDED}, e_startup_outcome, NULL)"),
-            ),
-            ("reached_end", reached_end),
-            ("progress_ratio", progress_ratio()),
-        ],
-    };
-    let errors = matches!(cohort, Cohort::Quality | Cohort::Complete | Cohort::Rollup);
-    // Rollups record every hour in which a view started and the receipt range
-    // of its events, across identities, to know which hours a view affects.
-    let (meta_aggregate, meta_projection) = if matches!(cohort, Cohort::Rollup) {
-        (
-            format!(
-                ", groupUniqArrayIf({}, event_name = {STARTED}) AS start_hours,
-                min(received_at_ms) AS min_received, max(received_at_ms) AS max_received",
-                super::rollup::hour_of("occurred_at_ms")
-            ),
-            ", arrayDistinct(arrayFlatten(groupArray(start_hours) OVER (PARTITION BY view_id))) AS hours,
-            min(min_received) OVER (PARTITION BY view_id) AS min_received_ms,
-            max(max_received) OVER (PARTITION BY view_id) AS max_received_ms",
-        )
-    } else {
-        (String::new(), "")
-    };
-    let values = std::iter::once("playing_time_ms".to_owned())
-        .chain(measurement.iter().map(|(_, expression)| expression.clone()))
-        .map(|expression| format!("toNullable({expression})"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let projections: String = measurement
+    let projections: String = measurement(cohort)
         .iter()
         .enumerate()
         .map(|(index, (name, _))| format!(", measurement.{} AS m_{name}", index + 2))
         .collect();
-    let (error_aggregate, error_projection, error_events, score) = if errors {
-        (
-            format!(
-                ", countIf(event_name = {ERROR} AND e_error_fatal = true) > 0 AS has_fatal_error"
-            ),
-            ", has_fatal_error",
-            format!(", {ERROR}"),
-            PLAYBACK_SCORE,
-        )
+    let (error_projection, score) = if reads_errors(cohort) {
+        (", fatal_events > 0 AS has_fatal_error", PLAYBACK_SCORE)
     } else {
-        (String::new(), "", String::new(), "")
+        ("", "")
     };
-    // A view qualifies only through a start with matching values, so first
-    // narrowing to views with such a start keeps every result unchanged.
-    let candidates = if filters.is_empty() && narrow.starts.is_none() {
-        String::new()
+    let meta_projection = if matches!(cohort, Cohort::Rollup) {
+        ", arrayDistinct(arrayFlatten(groupArray(start_hours) OVER (PARTITION BY view_id))) AS hours,
+            min(min_received) OVER (PARTITION BY view_id) AS min_received_ms,
+            max(max_received) OVER (PARTITION BY view_id) AS max_received_ms"
     } else {
-        format!(
-            " AND view_id IN (SELECT view_id FROM events WHERE {scope} AND event_name = {STARTED} AND {candidate_conditions})"
-        )
+        ""
+    };
+    let aggregates = identity_aggregates(cohort, &starts);
+    let identities = match &narrow.states {
+        // Merged states of the given views, with the same results per identity.
+        Some(views) => format!(
+            "SELECT view_id, video_id, viewer_id, {} FROM view_states
+            WHERE project_id = {project_id} AND view_id IN ({views})
+            GROUP BY view_id, video_id, viewer_id",
+            aggregates
+                .iter()
+                .map(|(function, _, name)| format!("{function}Merge({name}) AS {name}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => {
+            // A view qualifies only through a start with matching values, so
+            // first narrowing to views with such a start keeps every result.
+            let candidates = if filters.is_empty() && narrow.starts.is_none() {
+                String::new()
+            } else {
+                format!(
+                    " AND view_id IN (SELECT view_id FROM events WHERE {scope} AND event_name = {STARTED} AND {candidate_conditions})"
+                )
+            };
+            format!(
+                "SELECT view_id, video_id, viewer_id, {} FROM events
+                WHERE {scope} AND event_name IN ({}){candidates}
+                GROUP BY view_id, video_id, viewer_id",
+                aggregates
+                    .iter()
+                    .map(|(function, arguments, name)| format!("{function}({arguments}) AS {name}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                cohort_events(cohort)
+            )
+        }
     };
     format!(
         "WITH per_identity AS (
-        SELECT view_id, video_id, viewer_id, {first_start}
-            minIf(tuple(sequence, occurred_at_ms, ingest_id), event_name = {STARTED}) AS start_order,
-            countIf(event_name = {STARTED}) AS start_count,
-            argMaxIf(tuple({values}),
-                tuple(event_name = {ENDED}, sequence, occurred_at_ms, ingest_id),
-                event_name IN ({SNAPSHOT}, {ENDED})) AS measurement
-            {error_aggregate}{meta_aggregate}
-        FROM events
-        WHERE {scope}
-            AND event_name IN ({STARTED}, {SNAPSHOT}, {ENDED}{error_events}){candidates}
-        GROUP BY view_id, video_id, viewer_id
+        {identities}
     ), started AS (
         SELECT view_id, video_id, viewer_id,
             start_order.2 AS occurred_at_ms{start_columns},

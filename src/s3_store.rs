@@ -380,9 +380,7 @@ impl RemoteStore {
 
 /// Builds the local query index from retained event files. Files written before
 /// a storage column existed lack it: matching by name fills such columns with
-/// NULL, so the index keeps the current layout that publishing appends to, and
-/// values that older collectors kept in the event remainder are copied into
-/// their columns as a local database migration would.
+/// NULL, so the index keeps the current layout that publishing appends to.
 fn index_sql(paths: &[String]) -> String {
     let load = if paths.is_empty() {
         String::new()
@@ -393,9 +391,7 @@ fn index_sql(paths: &[String]) -> String {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "INSERT INTO collector_query_index BY NAME SELECT * EXCLUDE(filename), filename AS source_object FROM read_parquet([{paths}], filename = true, hive_partitioning = false, union_by_name = true);
-            {}",
-            crate::storage::backfill_v6_columns_sql("collector_query_index")
+            "INSERT INTO collector_query_index BY NAME SELECT * EXCLUDE(filename), filename AS source_object FROM read_parquet([{paths}], filename = true, hive_partitioning = false, union_by_name = true);"
         )
     };
     format!(
@@ -445,8 +441,7 @@ mod index_tests {
         let new = directory.join("new.parquet").display().to_string();
         let connection = Connection::open_in_memory().unwrap();
         crate::storage::create_parquet_stage(&connection).unwrap();
-        // A version 5 file: no columns, values kept in the remainder. The empty
-        // ID fails today's validation and must not become a column value.
+        // A version 5 file: no columns, values kept only in the remainder.
         stage(&connection, 1, json!({}));
         stage(&connection, 2, json!({}));
         connection
@@ -479,7 +474,7 @@ mod index_tests {
         assert_eq!(
             rows,
             [
-                (1, Some("old-user".into()), Some("Old".into())),
+                (1, None, None),
                 (2, None, None),
                 (3, Some("new-user".into()), None),
             ]

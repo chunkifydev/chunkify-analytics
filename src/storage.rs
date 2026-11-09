@@ -491,38 +491,16 @@ fn migrate_v5(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// SQL that copies `user_id` and `video_title` from `event_remainder` into
-/// their storage version 6 columns. Collectors before version 6 kept these
-/// optional properties in the remainder. Only values today's validator accepts
-/// are copied, so every column value can also be used as a filter. The
-/// remainder stays byte-for-byte as stored; decoding the same value from both
-/// places is idempotent. The substring test skips JSON parsing for rows that
-/// never mention the field.
-pub fn backfill_v6_columns_sql(table: &str) -> String {
-    ["user_id", "video_title"]
-        .iter()
-        .map(|field| {
-            format!(
-                "UPDATE {table} SET e_{field} = json_extract_string(event_remainder, '$.{field}')
-                WHERE e_{field} IS NULL AND contains(event_remainder, '\"{field}\"')
-                    AND json_type(event_remainder, '$.{field}') = 'VARCHAR'
-                    AND length(json_extract_string(event_remainder, '$.{field}')) BETWEEN 1 AND {};",
-                event::MAX_LABEL_CHARS
-            )
-        })
-        .collect()
-}
-
-/// Adds `e_user_id` and `e_video_title`, filled from stored remainders.
+/// Adds `e_user_id` and `e_video_title`. Existing rows keep any such values
+/// only in `event_remainder`, which decoding still returns; their columns stay
+/// NULL.
 fn migrate_v6(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
     create_events(connection, "events_v6")?;
-    connection.execute_batch(&format!(
+    connection.execute_batch(
         "INSERT INTO events_v6 BY NAME SELECT * FROM events;
         DROP TABLE events; ALTER TABLE events_v6 RENAME TO events;
-        {}
         UPDATE collector_schema SET version = 6;",
-        backfill_v6_columns_sql("events")
-    ))?;
+    )?;
     Ok(())
 }
 
@@ -783,7 +761,7 @@ mod tests {
         }
     }
     #[test]
-    fn version_6_copies_stored_user_and_title_into_columns() {
+    fn version_6_adds_user_and_title_columns() {
         let mut connection = Connection::open_in_memory().unwrap();
         let new_columns = ["e_user_id", "e_video_title"];
         let old: Vec<_> = COLUMNS
@@ -849,7 +827,8 @@ mod tests {
                 Ok((r.get(0)?, r.get(1)?))
             })
             .unwrap();
-        assert_eq!(columns, (Some("user-1".into()), Some("Pilot".into())));
+        // Stored values are not copied; decoding still returns them.
+        assert_eq!(columns, (None, None));
         let records = read(&connection);
         assert_eq!(records[0].0, 10);
         assert_eq!(records[0].1["event"], stored);

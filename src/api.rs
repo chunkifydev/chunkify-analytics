@@ -168,12 +168,8 @@ pub fn router(
 async fn authorize(app: &App, secret: &str, permission: Permission) -> Result<Resolved, ApiError> {
     match app.projects.authorize(secret, permission) {
         Err(error) if error.status == StatusCode::UNAUTHORIZED => {
-            let admin = app.admin.clone();
             let arrived = std::time::Instant::now();
-            if tokio::task::spawn_blocking(move || admin.sync_after_miss(arrived))
-                .await
-                .unwrap_or(false)
-            {
+            if app.admin.sync_after_miss(arrived).await {
                 app.projects.authorize(secret, permission)
             } else {
                 Err(error)

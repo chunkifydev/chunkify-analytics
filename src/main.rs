@@ -72,16 +72,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 keys,
             ));
             let store = clickhouse::Store::open(&config, projects.clone()).await?;
+            println!(
+                "Node ID: {} ({})",
+                store.node_id(),
+                if config.clickhouse.node_id.is_some() {
+                    "configured"
+                } else {
+                    "leased"
+                }
+            );
             let refresh = admin::refresh_registry(config.clone(), controller.clone());
+            let interval = std::time::Duration::from_secs(config.retention_interval_seconds);
+            // One server sweeps per interval; the others skip it.
             let removed = store
-                .purge_expired()
+                .purge_expired_once(interval)
                 .await
                 .map_err(|_| "Startup retention sweep failed")?;
-            if removed > 0 {
+            if let Some(removed) = removed.filter(|removed| *removed > 0) {
                 println!("Retention removed {removed} events");
             }
             let listener = tokio::net::TcpListener::bind(config.bind).await?;
-            let interval = std::time::Duration::from_secs(config.retention_interval_seconds);
             if projects
                 .retention
                 .read()
@@ -102,8 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let maintenance = tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(interval).await;
-                    match maintenance_store.purge_expired().await {
-                        Ok(removed) if removed > 0 => {
+                    match maintenance_store.purge_expired_once(interval).await {
+                        Ok(Some(removed)) if removed > 0 => {
                             println!("Retention removed {removed} events")
                         }
                         Err(_) => {

@@ -19,7 +19,7 @@ async_insert = true
 registry_refresh_seconds = 5
 # Repeated event IDs within this window return duplicate: true. 0 stores every delivery.
 deduplication_window_seconds = 604800
-# Optional 0..63, distinct for each server sharing the database.
+# Optional 0..63, distinct for each server sharing the database. Leased when unset.
 # node_id = 1
 # Seconds between refreshes of the hourly report rollups. 0 reads events only.
 rollup_interval_seconds = 15

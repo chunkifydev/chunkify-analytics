@@ -76,21 +76,15 @@ fn execute_once(
         ));
     }
     if request.command != "project-list" {
-        let mut retention = if changes_retention {
-            registry
-                .map(|registry| {
-                    registry
-                        .retention
-                        .write()
-                        .map_err(|_| "Retention policy lock failed")
-                })
-                .transpose()?
-        } else {
-            None
-        };
+        // Save before touching the in-memory policy: the save is a network
+        // round trip, and readers take the policy lock on every request.
         config.save_keys(&next)?;
-        if let Some(policy) = retention.as_mut() {
-            **policy = crate::retention::Policy::new(config.retention_seconds, &next.projects);
+        if changes_retention && let Some(registry) = registry {
+            let policy = crate::retention::Policy::new(config.retention_seconds, &next.projects);
+            *registry
+                .retention
+                .write()
+                .map_err(|_| "Retention policy lock failed")? = policy;
         }
         if let Some(registry) = registry {
             if request.command == "project-update" {
@@ -152,11 +146,17 @@ fn adopt(config: &Config, registry: &Registry, next: &Keys) -> Result<()> {
     Ok(())
 }
 
+/// Minimum time between registry refreshes triggered by unknown credentials.
+const MISS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long a request with an unknown credential waits for such a refresh.
+const MISS_REFRESH_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct Controller {
     config: Arc<Config>,
     registry: Arc<Registry>,
     keys: Mutex<Keys>,
-    missed: Mutex<Option<std::time::Instant>>,
+    /// When the latest refresh after an unknown credential started.
+    missed: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 
 pub enum ProjectAction {
@@ -192,7 +192,8 @@ impl Controller {
     /// Adopt a newer project registry saved by the CLI or another server.
     pub fn sync(&self) -> Result<()> {
         let settings = &self.config.clickhouse;
-        let Some((version, bytes)) = crate::clickhouse::load_registry(settings)? else {
+        // `serve` created the schema at startup; refreshes only read the registry.
+        let Some((version, bytes)) = crate::clickhouse::read_registry(settings)? else {
             return Ok(());
         };
         let mut keys = self.keys.lock().map_err(|_| "Administration lock failed")?;
@@ -208,18 +209,29 @@ impl Controller {
     }
 
     /// Refresh after an unknown credential, so a key created through the CLI or
-    /// another server works here without waiting for the next poll. Refreshes
-    /// run one at a time; a request reuses any refresh that began after it
-    /// arrived, so a flood of unknown keys costs one registry read at a time.
-    pub fn sync_after_miss(&self, arrived: std::time::Instant) -> bool {
-        let Ok(mut started) = self.missed.lock() else {
-            return false;
+    /// another server works here at once. Anyone can send unknown keys, so
+    /// refreshes run one at a time and at most once per `MISS_REFRESH_INTERVAL`.
+    /// Waiting requests queue as tasks, not threads, and are answered by any
+    /// refresh that started after they arrived. A request gives up after
+    /// `MISS_REFRESH_WAIT`.
+    pub async fn sync_after_miss(self: &Arc<Self>, arrived: std::time::Instant) -> bool {
+        let refresh = async {
+            let mut started = self.missed.lock().await;
+            if started.is_some_and(|at| at >= arrived) {
+                return true;
+            }
+            if let Some(at) = *started {
+                tokio::time::sleep(MISS_REFRESH_INTERVAL.saturating_sub(at.elapsed())).await;
+            }
+            *started = Some(std::time::Instant::now());
+            let controller = self.clone();
+            tokio::task::spawn_blocking(move || controller.sync().is_ok())
+                .await
+                .unwrap_or(false)
         };
-        if started.is_some_and(|at| at >= arrived) {
-            return true;
-        }
-        *started = Some(std::time::Instant::now());
-        self.sync().is_ok()
+        tokio::time::timeout(MISS_REFRESH_WAIT, refresh)
+            .await
+            .unwrap_or(false)
     }
 
     // Mutations start from the newest shared registry to avoid stale writes.
@@ -268,7 +280,7 @@ impl Controller {
             config,
             registry,
             keys: Mutex::new(keys),
-            missed: Mutex::new(None),
+            missed: tokio::sync::Mutex::new(None),
         }
     }
 

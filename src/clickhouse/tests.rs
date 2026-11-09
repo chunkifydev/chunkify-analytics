@@ -2405,3 +2405,37 @@ async fn lagged_reads_stop_when_refreshes_fall_behind() {
     tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     assert!(plan().await.is_none(), "an old refresh is not read");
 }
+
+#[tokio::test]
+async fn servers_lease_distinct_node_ids_and_one_sweeps_each_interval() {
+    let fixture = Fixture::new(&["default"]).await;
+    // More servers on the same database, none with a configured node ID.
+    let mut stores = vec![fixture.store.clone()];
+    for _ in 0..3 {
+        stores.push(
+            Store::open(&fixture.config, fixture.registry.clone())
+                .await
+                .unwrap(),
+        );
+    }
+    let mut nodes: Vec<i64> = stores
+        .iter()
+        .map(|store| store.node.load(Ordering::Acquire))
+        .collect();
+    nodes.sort();
+    nodes.dedup();
+    assert_eq!(
+        nodes.len(),
+        stores.len(),
+        "every server leases its own node ID"
+    );
+
+    let interval = std::time::Duration::from_secs(3600);
+    let mut swept = 0;
+    for store in &stores {
+        if store.purge_expired_once(interval).await.unwrap().is_some() {
+            swept += 1;
+        }
+    }
+    assert_eq!(swept, 1, "one server sweeps per interval");
+}

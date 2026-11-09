@@ -26,7 +26,7 @@ for deployment overrides, or set these variables directly in your container:
 | `CHUNKIFY_BIND` | `server.bind` | HTTP listening address and port, for example `0.0.0.0:4174`. |
 | `CHUNKIFY_CLICKHOUSE_URL`, `CHUNKIFY_CLICKHOUSE_DATABASE` | `clickhouse.url`, `clickhouse.database` | ClickHouse connection. |
 | `CHUNKIFY_CLICKHOUSE_USER`, `CHUNKIFY_CLICKHOUSE_PASSWORD` | `clickhouse.user`, `clickhouse.password` | ClickHouse credentials, without putting the password in TOML. |
-| `CHUNKIFY_CLICKHOUSE_NODE_ID` | `clickhouse.node_id` | Optional distinct number for each server sharing a database. |
+| `CHUNKIFY_CLICKHOUSE_NODE_ID` | `clickhouse.node_id` | Optional distinct number for each server sharing a database; leased automatically when unset. |
 | `CHUNKIFY_MCP_URL`, `CHUNKIFY_MCP_SECRET_KEY` | `mcp.url`, `mcp.secret_key` | Optional stdio adapter connection and secret. |
 
 The analytics server also loads `.env` from the working directory. Use `--env-file` to

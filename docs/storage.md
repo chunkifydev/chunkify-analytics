@@ -30,7 +30,7 @@ user = "chunkify"
 | `clickhouse.async_insert` | — | `true` | Let ClickHouse combine inserts from all servers into fewer parts, buffering each batch for 10 to 50 ms. Each request still waits until its events are stored. `false` writes each batch directly, which suits a single server. |
 | `clickhouse.registry_refresh_seconds` | — | `5` | How often each server checks the shared registry for project and key changes. 1 to 3600. |
 | `clickhouse.deduplication_window_seconds` | — | `604800` (7 days) | Repeated event IDs received within this window are reported as duplicates and not stored again. `0` stores every delivery. |
-| `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Random | 0 to 63. Part of each event's internal order. Give each server a different value for strict uniqueness. |
+| `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Leased | 0 to 63. Part of each event's internal order, unique per running server. When unset, each server leases a free value from ClickHouse for as long as it runs; startup fails if all 64 are in use. Set it to assign values yourself. |
 | `clickhouse.rollup_interval_seconds` | — | `15` | How often servers refresh [report rollups](#report-rollups). 0 to 3600. `0` turns rollups off: reports then read events only. |
 | `clickhouse.rollup_max_lag_seconds` | — | `0` | Let reports read every hour from the last refresh while it is at most this old. 0 to 3600. `0` keeps reports exact. See [lagged reports](#lagged-reports). |
 
@@ -65,13 +65,15 @@ your own host.
   applied again to the newest registry, so neither change is lost. Servers adopt
   changes within `registry_refresh_seconds`. A key created through one server
   or the CLI works on every server at once, because an unknown key makes a
-  server check the registry first. Rotated or revoked keys stop working on other
-  servers at their next refresh.
+  server check the registry first. Those checks run one at a time, at most once
+  per second per server, so anyone sending unknown keys cannot load ClickHouse;
+  a request with a new key waits up to about a second for the next one.
+  Rotated or revoked keys stop working on other servers at their next refresh.
 - **Report rollups.** One server at a time refreshes the hourly rollups, every
   `rollup_interval_seconds`; the others skip that interval. See
   [report rollups](#report-rollups).
-- **Retention.** Reports hide expired events immediately and every server runs
-  the expiration sweep, which deletes them. When a project's retention changes,
+- **Retention.** Reports hide expired events immediately. For each sweep
+  interval, one server claims and runs the expiration sweep, which deletes them. When a project's retention changes,
   events that had already expired stay expired, even if retention grows.
 
 `project` and `key` commands work while servers run. Run them anywhere with the
@@ -158,8 +160,10 @@ There is no manual event deletion command.
 One ClickHouse server is enough for most installations. To replicate it, create
 the database with the
 [Replicated database engine](https://clickhouse.com/docs/engines/database-engines/replicated)
-before running `init`. Tables created by `init` are then replicated
-automatically:
+before running `init`. `init` and `serve` detect the Replicated engine and
+create every table as `ReplicatedMergeTree`, so all replicas share events, the
+registry, rollups and claims. Plain `MergeTree` tables in a Replicated database
+would keep their data on one node. The database must exist before `init`:
 
 ```sql
 CREATE DATABASE chunkify_analytics ON CLUSTER my_cluster
@@ -168,7 +172,9 @@ ENGINE = Replicated('/clickhouse/databases/chunkify_analytics', '{shard}', '{rep
 
 Replicas apply writes asynchronously. For read-your-writes behavior across
 replicas, route each analytics server to one replica, or set `insert_quorum`
-in the ClickHouse user's profile.
+in the ClickHouse user's profile. Registry changes, rollup runs and claims
+stay single-winner across replicas, because ClickHouse Keeper deduplicates
+their inserts. This setup was tested with two replicas and ClickHouse Keeper.
 
 ## Schema
 
@@ -178,6 +184,7 @@ in the ClickHouse user's profile.
 | `registry` | Versioned project registry documents. The highest version is active. |
 | `rollup`, `rollup_hours`, `rollup_views` | [Report rollups](#report-rollups): partial aggregates per hour, each hour's receipt range, and per-view results. Derived from `events`; superseded rows are deleted after 20 refreshes and expired hours by the expiration sweep. |
 | `rollup_runs` | Rollup refresh claims and completions. |
+| `claims` | Short leases between servers: node IDs and expiration sweeps. Rows expire after a day. |
 
 `init` and `serve` create missing tables. Do not change these tables by hand.
 See [backup and restore](administration.md#backup-and-restore).

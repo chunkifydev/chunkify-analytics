@@ -5,6 +5,7 @@ use crate::{api::ApiError, backend::ClickHouseConfig};
 use serde_json::Value;
 use std::{fmt::Write as _, sync::atomic::Ordering, time::Duration};
 
+mod claims;
 pub mod reports;
 pub mod rollup;
 pub mod store;
@@ -104,7 +105,13 @@ impl Params {
 pub struct Client {
     http: reqwest::Client,
     config: ClickHouseConfig,
+    /// Limit on a whole request, for calls that must not hang when ClickHouse
+    /// stalls. Report and export reads stream without one.
+    timeout: Option<Duration>,
 }
+
+/// Limit for registry, schema, health and coordination requests.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Errors that never include SQL text or values, which may contain event data.
 fn failure(status: Option<reqwest::StatusCode>, body: &str) -> ApiError {
@@ -132,7 +139,19 @@ impl Client {
             .pool_idle_timeout(Duration::from_secs(30))
             .build()
             .map_err(|_| "Cannot configure the ClickHouse HTTP client")?;
-        Ok(Self { http, config })
+        Ok(Self {
+            http,
+            config,
+            timeout: None,
+        })
+    }
+
+    /// The same client, with a limit on each whole request.
+    pub fn with_timeout(&self, timeout: Duration) -> Self {
+        Self {
+            timeout: Some(timeout),
+            ..self.clone()
+        }
     }
 
     fn request(
@@ -156,6 +175,9 @@ impl Client {
             }
         }
         let mut request = self.http.post(url).body(sql);
+        if let Some(timeout) = self.timeout {
+            request = request.timeout(timeout);
+        }
         if let Some(user) = &self.config.user {
             request = request.header("X-ClickHouse-User", user);
         }
@@ -273,6 +295,9 @@ impl Client {
             }
         }
         let mut request = self.http.post(url).body(body);
+        if let Some(timeout) = self.timeout {
+            request = request.timeout(timeout);
+        }
         if let Some(user) = &self.config.user {
             request = request.header("X-ClickHouse-User", user);
         }
@@ -302,20 +327,41 @@ impl Client {
         .text()
         .await
         .map_err(|_| failure(None, ""))?;
-        self.execute(events_table(), &none).await?;
-        self.execute(
+        // In a Replicated database, plain MergeTree tables keep their data on
+        // one node; replicate every table so all servers share the same data.
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT engine FROM system.databases WHERE name = {}",
+            params.text(database)
+        );
+        let replicated = self
+            .one(&sql, &params)
+            .await?
+            .first()
+            .and_then(Value::as_str)
+            == Some("Replicated");
+        let engine = |statement: String| {
+            if replicated {
+                statement.replace("ENGINE = MergeTree", "ENGINE = ReplicatedMergeTree")
+            } else {
+                statement
+            }
+        };
+        let mut tables = vec![
+            events_table(),
             "CREATE TABLE IF NOT EXISTS registry (
                 version UInt64,
                 write_id String,
                 document String CODEC(ZSTD(3)),
                 written_at DateTime64(3) DEFAULT now64(3)
             ) ENGINE = MergeTree ORDER BY version
-            SETTINGS non_replicated_deduplication_window = 100000",
-            &none,
-        )
-        .await?;
-        for table in rollup::tables() {
-            self.execute(table, &none).await?;
+            SETTINGS non_replicated_deduplication_window = 100000"
+                .to_owned(),
+            claims::TABLE.to_owned(),
+        ];
+        tables.extend(rollup::tables());
+        for table in tables {
+            self.execute(engine(table), &none).await?;
         }
         Ok(())
     }
@@ -485,10 +531,20 @@ fn registry_error(_: ApiError) -> Box<dyn std::error::Error> {
 pub fn prepare(config: &ClickHouseConfig) -> Result<()> {
     let config = config.clone();
     block_on(move || async move {
-        Client::new(config)?
+        Client::new(config)?.with_timeout(CONTROL_TIMEOUT)
             .ensure_schema()
             .await
             .map_err(|_| "Cannot create the ClickHouse schema; check clickhouse.url, credentials and permissions".into())
+    })
+}
+
+/// The latest registry document and its version, without creating the schema.
+/// For servers, which created it at startup.
+pub fn read_registry(config: &ClickHouseConfig) -> Result<Option<(u64, Vec<u8>)>> {
+    let config = config.clone();
+    block_on(move || async move {
+        let client = Client::new(config)?.with_timeout(CONTROL_TIMEOUT);
+        latest(&client).await.map_err(registry_error)
     })
 }
 
@@ -496,7 +552,7 @@ pub fn prepare(config: &ClickHouseConfig) -> Result<()> {
 pub fn load_registry(config: &ClickHouseConfig) -> Result<Option<(u64, Vec<u8>)>> {
     let config = config.clone();
     let loaded = block_on(move || async move {
-        let client = Client::new(config)?;
+        let client = Client::new(config)?.with_timeout(CONTROL_TIMEOUT);
         client.ensure_schema().await.map_err(registry_error)?;
         latest(&client).await.map_err(registry_error)
     })?;
@@ -542,7 +598,7 @@ pub fn save_registry(config: &ClickHouseConfig, expected: u64, document: &[u8]) 
     let document = String::from_utf8(document.to_vec())?;
     let write_id = uuid::Uuid::new_v4().to_string();
     let saved = block_on(move || async move {
-        let client = Client::new(config.clone())?;
+        let client = Client::new(config.clone())?.with_timeout(CONTROL_TIMEOUT);
         let current = latest(&client)
             .await
             .map_err(registry_error)?
@@ -631,7 +687,7 @@ pub mod testing {
     pub fn drop_database(config: &crate::backend::ClickHouseConfig) {
         let config = config.clone();
         let _ = super::block_on(move || async move {
-            let client = super::Client::new(config.clone())?;
+            let client = super::Client::new(config.clone())?.with_timeout(super::CONTROL_TIMEOUT);
             client
                 .send(
                     format!("DROP DATABASE IF EXISTS {}", config.database),

@@ -18,6 +18,12 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 pub struct Store {
     pub(super) client: Client,
+    /// `client` with `CONTROL_TIMEOUT`, for health checks and coordination.
+    pub(super) control: Client,
+    /// Identifies this server in shared claims.
+    instance: String,
+    /// This server's node ID, configured or leased.
+    pub(super) node: Arc<AtomicI64>,
     pub(super) projects: Arc<crate::projects::Registry>,
     limits: crate::limits::Reads,
     cache: crate::cache::ReportCache,
@@ -61,16 +67,74 @@ pub(super) fn first_id_at(milliseconds: i64) -> i64 {
 }
 
 struct Ids {
-    node: i64,
+    /// This server's identifier: configured, or leased while it runs.
+    node: Arc<AtomicI64>,
     last_unit: AtomicI64,
 }
 
+/// Length of a node ID lease. A server holds the current and the next term,
+/// and renews well before the current one ends.
+const NODE_TERM_MS: i64 = 60_000;
+
+/// Lease a node ID that no other running server holds for this term or the
+/// next, preferring `prefer`. IDs then stay unique across servers.
+async fn lease_node(client: &Client, owner: &str, prefer: Option<i64>) -> Result<i64, ApiError> {
+    let term = client.now_ms().await? / NODE_TERM_MS;
+    let taken = client
+        .claimed_by_others("node", term..=term + 1, owner)
+        .await?;
+    let start = (uuid::Uuid::new_v4().as_u128() % (1 << NODE_BITS)) as i64;
+    let candidates = prefer
+        .into_iter()
+        .chain((0..1 << NODE_BITS).map(|offset| (start + offset) % (1 << NODE_BITS)));
+    for node in candidates {
+        if taken.contains(&node) {
+            continue;
+        }
+        if client.claim("node", node, term, owner).await?
+            && client.claim("node", node, term + 1, owner).await?
+        {
+            return Ok(node);
+        }
+    }
+    Err(ApiError::unavailable())
+}
+
+/// Keep this server's node lease one term ahead, moving to another free node
+/// if another server took it while this one could not renew.
+async fn renew_node(client: Client, owner: String, node: Arc<AtomicI64>) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(NODE_TERM_MS as u64 / 3)).await;
+        let current = node.load(Ordering::Acquire);
+        let renewed = async {
+            let term = client.now_ms().await? / NODE_TERM_MS;
+            Ok::<_, ApiError>(
+                client.claim("node", current, term, &owner).await?
+                    && client.claim("node", current, term + 1, &owner).await?,
+            )
+        }
+        .await;
+        match renewed {
+            Ok(true) => {}
+            Ok(false) => match lease_node(&client, &owner, None).await {
+                Ok(next) => {
+                    tracing::warn!(
+                        backend = "clickhouse",
+                        from = current,
+                        to = next,
+                        "node_id_moved"
+                    );
+                    node.store(next, Ordering::Release);
+                }
+                Err(_) => tracing::error!(backend = "clickhouse", "node_id_lease_failed"),
+            },
+            Err(_) => tracing::warn!(backend = "clickhouse", "node_id_renewal_failed"),
+        }
+    }
+}
+
 impl Ids {
-    fn new(node: Option<u16>) -> Self {
-        let node = node.map_or_else(
-            || (uuid::Uuid::new_v4().as_u128() & ((1 << NODE_BITS) - 1)) as i64,
-            i64::from,
-        );
+    fn new(node: Arc<AtomicI64>) -> Self {
         Self {
             node,
             last_unit: AtomicI64::new(0),
@@ -91,7 +155,7 @@ impl Ids {
                 (first + offset)
                     .checked_shl(NODE_BITS)
                     .filter(|id| *id < 1 << 53)
-                    .map(|id| id | self.node)
+                    .map(|id| id | self.node.load(Ordering::Acquire))
                     .ok_or_else(ApiError::internal)
             })
             .collect()
@@ -135,11 +199,24 @@ impl Store {
         let settings = &config.clickhouse;
         let client = Client::new(settings.clone())?;
         client
+            .with_timeout(super::CONTROL_TIMEOUT)
             .ensure_schema()
             .await
             .map_err(|_| "Cannot create the ClickHouse schema; check clickhouse.url, credentials and permissions")?;
         let (sender, receiver) = mpsc::channel(config.batch.queue_requests);
-        let ids = Ids::new(settings.node_id);
+        // Servers without a configured node ID lease one while they run.
+        let control = client.with_timeout(super::CONTROL_TIMEOUT);
+        let instance = uuid::Uuid::new_v4().to_string();
+        let node = Arc::new(AtomicI64::new(match settings.node_id {
+            Some(node) => i64::from(node),
+            None => lease_node(&control, &instance, None).await.map_err(|_| {
+                "Cannot lease a node ID: all 64 are in use or ClickHouse is unavailable; set clickhouse.node_id"
+            })?,
+        }));
+        if settings.node_id.is_none() {
+            tokio::spawn(renew_node(control.clone(), instance.clone(), node.clone()));
+        }
+        let ids = Ids::new(node.clone());
         tokio::spawn(write_batches(
             client.clone(),
             receiver,
@@ -153,6 +230,9 @@ impl Store {
             cache: crate::cache::ReportCache::new(config.report_cache_seconds),
             budget: Arc::new(Semaphore::new(config.batch.queue_bytes)),
             batch: config.batch.clone(),
+            control,
+            instance,
+            node,
             rollup_interval: settings.rollup_interval,
             rollup_max_lag: settings.rollup_max_lag,
             rollup_reads: (!settings.rollup_interval.is_zero()).into(),
@@ -162,13 +242,19 @@ impl Store {
         }))
     }
 
+    /// This server's node ID: configured, or leased while it runs. A leased ID
+    /// can move to another free value if the lease could not be renewed.
+    pub fn node_id(&self) -> i64 {
+        self.node.load(Ordering::Acquire)
+    }
+
     /// Time between rollup refreshes; zero when rollups are disabled.
     pub fn rollup_interval(&self) -> std::time::Duration {
         self.rollup_interval
     }
 
     pub async fn health(&self) -> Result<(), ApiError> {
-        self.client
+        self.control
             .one("SELECT 1", &Params::default())
             .await
             .map(|_| ())
@@ -278,6 +364,20 @@ impl Store {
         self.cache
             .read(project, (name, retention, query), work)
             .await
+    }
+
+    /// Run the expiration sweep if this server claims it for the current
+    /// `interval`, so servers sharing a database do not repeat it. Returns
+    /// `None` when another server has the claim.
+    pub async fn purge_expired_once(
+        &self,
+        interval: std::time::Duration,
+    ) -> Result<Option<usize>, ApiError> {
+        let term = self.control.now_ms().await? / (interval.as_millis() as i64).max(1000);
+        if !self.control.claim("sweep", 0, term, &self.instance).await? {
+            return Ok(None);
+        }
+        self.purge_expired().await.map(Some)
     }
 
     /// Hide expired rows in reads immediately; delete them in the background.
@@ -544,7 +644,7 @@ mod tests {
 
     #[test]
     fn ids_increase_stay_json_safe_and_keep_the_server_identifier() {
-        let ids = Ids::new(Some(7));
+        let ids = Ids::new(Arc::new(AtomicI64::new(7)));
         let first = ids.next(3).unwrap();
         let second = ids.next(1).unwrap();
         assert!(first.windows(2).all(|pair| pair[0] < pair[1]));

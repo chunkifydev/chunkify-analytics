@@ -804,7 +804,7 @@ impl Store {
     async fn claim_run(&self, settle_ms: i64, min_gap_ms: i64) -> Result<Option<Run>, ApiError> {
         let none = Params::default();
         let clock = self
-            .client
+            .control
             .one(
                 "SELECT toUnixTimestamp64Milli(now64(3)),
                     (SELECT max(through_ms) FROM rollup_runs WHERE completed = 1)",
@@ -819,7 +819,7 @@ impl Store {
         let now = read(&clock, 0)?;
         let since = read(&clock, 1)?;
         let latest = self
-            .client
+            .control
             .all(
                 "SELECT version, completed, toUnixTimestamp64Milli(written_at) FROM rollup_runs
                 ORDER BY version DESC, completed DESC LIMIT 1",
@@ -852,7 +852,7 @@ impl Store {
             "SELECT write_id FROM rollup_runs WHERE version = {} AND completed = 0",
             params.int(version)
         );
-        let winner = self.client.all(&sql, &params).await?;
+        let winner = self.control.all(&sql, &params).await?;
         Ok((winner.len() == 1
             && winner[0].first().and_then(Value::as_str) == Some(run.write_id.as_str()))
         .then_some(run))
@@ -867,7 +867,7 @@ impl Store {
             run.version,
             if completed { "done" } else { "claim" }
         );
-        self.client
+        self.control
             .insert(
                 "rollup_runs",
                 serde_json::to_vec(&row).map_err(|_| ApiError::internal())?,
@@ -1057,7 +1057,15 @@ impl Store {
                     WHERE generation <= {before} GROUP BY project_id, view_id)"
             ),
         ] {
-            self.client.execute(statement, &params).await?;
+            // Replicated tables reject deletes whose condition reads other
+            // rows unless allowed; each replica applies the same generations.
+            self.client
+                .execute_with(
+                    statement,
+                    &params,
+                    &[("allow_nondeterministic_mutations", "1")],
+                )
+                .await?;
         }
         Ok(())
     }
@@ -1083,7 +1091,15 @@ impl Store {
                     GROUP BY project_id, view_id HAVING NOT ({views}))"
             ),
         ] {
-            self.client.execute(statement, &params).await?;
+            // Replicated tables reject deletes whose condition reads other
+            // rows unless allowed; each replica applies the same generations.
+            self.client
+                .execute_with(
+                    statement,
+                    &params,
+                    &[("allow_nondeterministic_mutations", "1")],
+                )
+                .await?;
         }
         Ok(())
     }

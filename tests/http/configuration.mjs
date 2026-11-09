@@ -40,11 +40,21 @@ export function databaseFor(directory, settings = {}) {
   return `chunkify_test_${id}`;
 }
 
+// Databases created through writeConfig in this process; see dropTestDatabases.
+const created = new Set();
+
 export async function writeConfig(directory, settings) {
   const path = join(directory, "config.toml");
+  created.add(databaseFor(directory, settings));
   await writeFile(path, configSource({ "server.geoip_database": resolve("tests/fixtures/GeoIP2-City-Test.mmdb"),
     "clickhouse.url": clickhouseUrl, ...settings, "clickhouse.database": databaseFor(directory, settings) }), { mode: 0o600 });
   return path;
+}
+
+// Drop the databases this process created. Test files call it once after all tests.
+export async function dropTestDatabases() {
+  for (const database of created) await clickhouseQuery(`DROP DATABASE IF EXISTS ${database}`).catch(() => {});
+  created.clear();
 }
 
 // Run SQL on the test ClickHouse server, for setup and inspection only.

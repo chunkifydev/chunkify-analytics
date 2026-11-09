@@ -8,12 +8,14 @@ import { tmpdir } from "node:os";
 import { createServer, request as httpRequest } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import { chromium } from "@playwright/test";
 import { attachAnalytics } from "@chunkify/player-analytics";
 import { createHttpAdapter } from "@chunkify/player-analytics/http";
 import { component, assertRequest, assertResponse } from "./openapi-support.mjs";
-import { clickhouseQuery, collectorEnvironment, databaseFor, storedRegistry, writeConfig } from "./configuration.mjs";
+import { clickhouseQuery, collectorEnvironment, databaseFor, storedRegistry, writeConfig, dropTestDatabases } from "./configuration.mjs";
+
+after(dropTestDatabases);
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 

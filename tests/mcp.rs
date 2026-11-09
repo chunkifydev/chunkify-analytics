@@ -161,6 +161,8 @@ where
 struct Collector {
     child: Child,
     directory: PathBuf,
+    /// ClickHouse URL and database, dropped with the collector.
+    storage: Vec<(String, String)>,
     url: String,
     keys: Value,
     live: Value,
@@ -249,6 +251,7 @@ impl Collector {
         Self {
             child,
             directory,
+            storage,
             url,
             keys,
             live,
@@ -345,6 +348,28 @@ impl Drop for Collector {
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_dir_all(&self.directory);
+        let setting = |name: &str| {
+            self.storage
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+                .unwrap()
+        };
+        let (url, database) = (
+            setting("CHUNKIFY_CLICKHOUSE_URL"),
+            setting("CHUNKIFY_CLICKHOUSE_DATABASE"),
+        );
+        // Tests run inside a runtime, so drop the database from another thread.
+        let _ = std::thread::spawn(move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let _ = reqwest::Client::new()
+                    .post(url)
+                    .body(format!("DROP DATABASE IF EXISTS {database}"))
+                    .send()
+                    .await;
+            })
+        })
+        .join();
     }
 }
 

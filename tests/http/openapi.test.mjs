@@ -7,10 +7,12 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
-import test from "node:test";
+import test, { after } from "node:test";
 import { attachAnalytics } from "@chunkify/player-analytics";
 import { contract, component, assertRequest, assertResponse } from "./openapi-support.mjs";
-import { collectorEnvironment, writeConfig } from "./configuration.mjs";
+import { collectorEnvironment, writeConfig, dropTestDatabases } from "./configuration.mjs";
+
+after(dropTestDatabases);
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 

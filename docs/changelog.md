@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.15.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.14.0...v0.15.0) (2026-11-09)
+
+
+### ⚠ BREAKING CHANGES
+
+* **storage:** ClickHouse is now required. DuckDB and S3 storage were removed, and their settings (data_dir, [storage], [duckdb], [experimental]) are rejected. Existing local or S3 data is not migrated. Reports may lag new events by up to about a minute by default; set clickhouse.rollup_max_lag_seconds = 0 for exact reports.
+
+### Features
+
+* **storage:** replace DuckDB with ClickHouse for horizontally scaled servers ([#64](https://github.com/chunkifydev/chunkify-analytics/issues/64)) ([8abeb95](https://github.com/chunkifydev/chunkify-analytics/commit/8abeb954ec0c83cbfca09f895fc1ddead326449a))
+
 ## [0.14.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.13.0...v0.14.0) (2026-11-09)
 
 

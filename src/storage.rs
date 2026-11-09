@@ -76,6 +76,9 @@ const EVENT_FIELDS: &[(&str, Kind)] = &[
     ("seek_resume_wait_ms", Number),
     ("seek_interaction_duration_ms", Number),
     ("seek_outcome", Text),
+    // Storage version 6.
+    ("user_id", Text),
+    ("video_title", Text),
 ];
 const BROWSER_FIELDS: &[(&str, Kind)] = &[
     ("schema_version", Integer),
@@ -473,17 +476,13 @@ fn migrate_v5(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
         [],
         |r| r.get(0),
     )?;
+    // Copy by name: version 4 tables predate later storage columns, which stay NULL.
     let selection = if has_project {
-        COLUMN_NAMES.to_string()
+        "*"
     } else {
-        format!(
-            "{}, 'default', NULL",
-            COLUMN_NAMES
-                .strip_suffix(", project_id, ingest_key_id")
-                .expect("project is final storage column")
-        )
+        "*, 'default' AS project_id, CAST(NULL AS VARCHAR) AS ingest_key_id"
     };
-    connection.execute_batch(&format!("INSERT INTO events_v5 SELECT ingest_id, {selection} FROM events;
+    connection.execute_batch(&format!("INSERT INTO events_v5 BY NAME SELECT {selection} FROM events;
         DROP TABLE events; ALTER TABLE events_v5 RENAME TO events;
         CREATE TABLE event_otlp_v5(project_id VARCHAR NOT NULL, event_id VARCHAR NOT NULL, payload VARCHAR NOT NULL, PRIMARY KEY(project_id, event_id));
         INSERT INTO event_otlp_v5 SELECT 'default', event_id, payload FROM event_otlp;
@@ -492,12 +491,47 @@ fn migrate_v5(connection: &Connection) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// SQL that copies `user_id` and `video_title` from `event_remainder` into
+/// their storage version 6 columns. Collectors before version 6 kept these
+/// optional properties in the remainder. Only values today's validator accepts
+/// are copied, so every column value can also be used as a filter. The
+/// remainder stays byte-for-byte as stored; decoding the same value from both
+/// places is idempotent. The substring test skips JSON parsing for rows that
+/// never mention the field.
+pub fn backfill_v6_columns_sql(table: &str) -> String {
+    ["user_id", "video_title"]
+        .iter()
+        .map(|field| {
+            format!(
+                "UPDATE {table} SET e_{field} = json_extract_string(event_remainder, '$.{field}')
+                WHERE e_{field} IS NULL AND contains(event_remainder, '\"{field}\"')
+                    AND json_type(event_remainder, '$.{field}') = 'VARCHAR'
+                    AND length(json_extract_string(event_remainder, '$.{field}')) BETWEEN 1 AND {};",
+                event::MAX_LABEL_CHARS
+            )
+        })
+        .collect()
+}
+
+/// Adds `e_user_id` and `e_video_title`, filled from stored remainders.
+fn migrate_v6(connection: &Connection) -> Result<(), Box<dyn std::error::Error>> {
+    create_events(connection, "events_v6")?;
+    connection.execute_batch(&format!(
+        "INSERT INTO events_v6 BY NAME SELECT * FROM events;
+        DROP TABLE events; ALTER TABLE events_v6 RENAME TO events;
+        {}
+        UPDATE collector_schema SET version = 6;",
+        backfill_v6_columns_sql("events")
+    ))?;
+    Ok(())
+}
+
 pub fn initialize(connection: &mut Connection) -> Result<(), Box<dyn std::error::Error>> {
     let tx = connection.transaction()?;
     tx.execute_batch("CREATE TABLE IF NOT EXISTS collector_schema (version INTEGER NOT NULL);
             INSERT INTO collector_schema SELECT 1 WHERE NOT EXISTS (SELECT 1 FROM collector_schema);")?;
     let version: i32 = tx.query_row("SELECT version FROM collector_schema", [], |r| r.get(0))?;
-    if !(1..=5).contains(&version) {
+    if !(1..=6).contains(&version) {
         return Err("Unsupported database schema version".into());
     }
     tx.execute_batch(
@@ -575,6 +609,9 @@ pub fn initialize(connection: &mut Connection) -> Result<(), Box<dyn std::error:
     }
     if version < 5 {
         migrate_v5(&tx)?;
+    }
+    if version < 6 {
+        migrate_v6(&tx)?;
     }
     tx.commit()?;
     Ok(())
@@ -744,6 +781,100 @@ mod tests {
             initialize(&mut connection).unwrap();
             assert_eq!(read(&connection)[0], records[0]);
         }
+    }
+    #[test]
+    fn version_6_copies_stored_user_and_title_into_columns() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        let new_columns = ["e_user_id", "e_video_title"];
+        let old: Vec<_> = COLUMNS
+            .iter()
+            .filter(|(name, _)| !new_columns.contains(&name.as_str()))
+            .collect();
+        let definitions = old
+            .iter()
+            .map(|(name, kind)| format!("{name} {kind}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        connection.execute_batch(&format!("CREATE TABLE collector_schema(version INTEGER); INSERT INTO collector_schema VALUES (5);
+            CREATE SEQUENCE event_order START 10;
+            CREATE TABLE events(ingest_id BIGINT PRIMARY KEY DEFAULT nextval('event_order'), {definitions}, UNIQUE(project_id, event_id));
+            CREATE TABLE event_otlp(project_id VARCHAR NOT NULL, event_id VARCHAR NOT NULL, payload VARCHAR NOT NULL, PRIMARY KEY(project_id, event_id));")).unwrap();
+        // A version 5 collector kept these optional properties in the remainder.
+        let mut stored = event(1);
+        let values = encode(&stored, None, 123, "default", None)
+            .map_err(|e| e.message)
+            .unwrap();
+        let values: Vec<_> = COLUMNS
+            .iter()
+            .zip(values)
+            .filter(|((name, _), _)| !new_columns.contains(&name.as_str()))
+            .map(|(_, value)| value)
+            .collect();
+        let names = old
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        connection
+            .execute(
+                &format!(
+                    "INSERT INTO events ({}) VALUES ({})",
+                    names.join(", "),
+                    vec!["?"; names.len()].join(", ")
+                ),
+                params_from_iter(values),
+            )
+            .unwrap();
+        stored["user_id"] = json!("user-1");
+        stored["video_title"] = json!("Pilot");
+        let remainder: String = connection
+            .query_row("SELECT event_remainder FROM events", [], |r| r.get(0))
+            .unwrap();
+        let mut remainder: Value = serde_json::from_str(&remainder).unwrap();
+        remainder["user_id"] = json!("user-1");
+        remainder["video_title"] = json!("Pilot");
+        connection
+            .execute(
+                "UPDATE events SET event_remainder = ?",
+                [remainder.to_string()],
+            )
+            .unwrap();
+
+        initialize(&mut connection).unwrap();
+        let version: i32 = connection
+            .query_row("SELECT version FROM collector_schema", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+        let columns: (Option<String>, Option<String>) = connection
+            .query_row("SELECT e_user_id, e_video_title FROM events", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(columns, (Some("user-1".into()), Some("Pilot".into())));
+        let records = read(&connection);
+        assert_eq!(records[0].0, 10);
+        assert_eq!(records[0].1["event"], stored);
+        // New writes use the version 6 layout and keep the sequence.
+        let mut next = event(2);
+        next["user_id"] = json!("user-2");
+        connection
+            .execute(
+                &INSERT_SQL,
+                params_from_iter(
+                    encode(&next, None, 124, "default", None)
+                        .map_err(|e| e.message)
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
+        let user: String = connection
+            .query_row(
+                "SELECT e_user_id FROM events WHERE ingest_id = 11",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(user, "user-2");
+        assert_eq!(read(&connection)[1].1["event"], next);
     }
     #[test]
     fn migration_crosses_page_boundaries_and_preserves_context_absence() {

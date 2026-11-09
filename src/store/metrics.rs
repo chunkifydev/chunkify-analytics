@@ -161,7 +161,7 @@ impl Store {
         }
         self.read_report(if per_video { "videos" } else { "summary" }, project.clone(), (&query, per_video), export.is_some(), move |connection| {
             let through = match &cursor { Some(c) => c.through, None => watermark(connection, &project)? };
-            let (sql, mut values) = view_cohort(project.clone(), through, &filters, if per_video { CohortMetrics::Quality } else { CohortMetrics::Basic });
+            let (sql, mut values) = view_cohort_with_labels(project.clone(), through, &filters, if per_video { CohortMetrics::Quality } else { CohortMetrics::Basic }, per_video);
             if !per_video {
                 let result = connection.query_row(&format!("{sql}
                     SELECT COUNT(*), COUNT(DISTINCT viewer_id), COALESCE(SUM(playing_time_ms), 0) FROM view_metrics"),
@@ -211,14 +211,17 @@ impl Store {
                 , video_metrics AS (
                     SELECT video_id, COUNT(*) AS views, COUNT(DISTINCT viewer_id) AS unique_viewers,
                         SUM(playing_time_ms ORDER BY view_id) AS total_playing_time_ms,
-                        AVG(playback_score ORDER BY view_id) AS score, COUNT(playback_score) AS score_samples FROM view_metrics GROUP BY video_id
+                        AVG(playback_score ORDER BY view_id) AS score, COUNT(playback_score) AS score_samples,
+                        arg_max(e_video_title, (occurred_at_ms, view_id)) FILTER (WHERE e_video_title IS NOT NULL) AS video_title
+                    FROM view_metrics GROUP BY video_id
                 )
-                SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples FROM video_metrics
+                SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples, video_title FROM video_metrics
                 WHERE {continuation} ORDER BY {column} {direction} NULLS LAST{tie_breaker} LIMIT ?"))?;
             let rows = query_rows(&mut statement,&values,export.is_some())?.mapped(|row| Ok((VideoPosition {
                 video_id: row.get(0)?, views: row.get(1)?, total_playing_time_ms: row.get(3)?, unique_viewers: row.get(2)?, score: row.get(4)?,
             }, json!({
-                "video_id": row.get::<_, String>(0)?, "views": row.get::<_, i64>(1)?,
+                "video_id": row.get::<_, String>(0)?, "video_title": row.get::<_, Option<String>>(6)?,
+                "views": row.get::<_, i64>(1)?,
                 "unique_viewers": row.get::<_, i64>(2)?, "total_playing_time_ms": row.get::<_, f64>(3)?,
                 "playback_score":score_json(row.get(4)?, row.get(5)?)
             }))));
@@ -745,6 +748,33 @@ pub(super) fn view_cohort(
     filters: &crate::query::Filters,
     metrics: CohortMetrics,
 ) -> (String, Vec<SqlValue>) {
+    let labels = matches!(metrics, CohortMetrics::Complete);
+    view_cohort_with_labels(project, through, filters, metrics, labels)
+}
+
+/// Like `view_cohort`. `labels` carries each start's `user_id` and
+/// `video_title` into `view_metrics` for reports that return them. They are
+/// also carried whenever a `user_id` filter needs them; otherwise they are NULL
+/// so other reports do not hold two extra strings per view.
+pub(super) fn view_cohort_with_labels(
+    project: String,
+    through: i64,
+    filters: &crate::query::Filters,
+    metrics: CohortMetrics,
+    labels: bool,
+) -> (String, Vec<SqlValue>) {
+    let labels = labels || filters.selects_user_id();
+    let (label_fields, label_projection) = if labels {
+        (
+            ", e_user_id := e_user_id, e_video_title := e_video_title",
+            "first_start.e_user_id AS e_user_id, first_start.e_video_title AS e_video_title,",
+        )
+    } else {
+        (
+            "",
+            "CAST(NULL AS VARCHAR) AS e_user_id, CAST(NULL AS VARCHAR) AS e_video_title,",
+        )
+    };
     let (conditions, filter_values) = filters.sql();
     let mut values = vec![SqlValue::BigInt(through), SqlValue::Text(project.clone())];
     values.extend(filter_values);
@@ -796,7 +826,7 @@ pub(super) fn view_cohort(
                 context_browser_name := context_browser_name,
                 context_os_name := context_os_name,
                 context_device_type := context_device_type,
-                context_remainder := context_remainder
+                context_remainder := context_remainder{label_fields}
             ), (sequence, occurred_at_ms, ingest_id))
                 FILTER (WHERE event_name = 'chunkify.video.view_started') AS first_start,
             min((sequence, occurred_at_ms, ingest_id))
@@ -816,11 +846,12 @@ pub(super) fn view_cohort(
             first_start.context_os_name AS context_os_name,
             first_start.context_device_type AS context_device_type,
             first_start.context_remainder AS context_remainder,
+            {label_projection}
             COALESCE(measurement.playing_time_ms, 0) AS playing_time_ms{measurement_projection}
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT view_id, occurred_at_ms, video_id, viewer_id, context_browser_name, context_os_name, context_device_type, context_remainder, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, e_user_id, e_video_title, context_browser_name, context_os_name, context_device_type, context_remainder, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

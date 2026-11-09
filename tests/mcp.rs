@@ -196,7 +196,8 @@ impl Collector {
             serde_json::from_slice(&command(&["project", "create", "Live website"])).unwrap();
         // Servers adopt CLI registry changes at their next refresh.
         let mut config =
-            "retention.seconds = 0\nclickhouse.registry_refresh_seconds = 1\n".to_owned();
+            "retention.seconds = 0\nclickhouse.registry_refresh_seconds = 1\nclickhouse.rollup_max_lag_seconds = 0\n"
+                .to_owned();
         let defaults = [
             ("rate_limits.read_per_minute", "1000000"),
             ("rate_limits.read_burst", "1000000"),

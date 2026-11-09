@@ -13,7 +13,8 @@ const field = name => /^(server|retention|batch|clickhouse|mcp|rate_limits|loggi
 // Fixtures use the same dotted field names as config.toml. Preserve invalid
 // values so the executable, rather than this helper, validates configuration.
 export function configSource(settings) {
-  return Object.entries(settings).filter(([name]) => field(name)).map(([name, original]) => {
+  // A null value leaves the field to the server's default.
+  return Object.entries(settings).filter(([name, value]) => field(name) && value !== null).map(([name, original]) => {
     let value = original;
     if (typeof value === "string") {
       if (arrays.has(name)) value = value ? value.split(",") : [];
@@ -47,7 +48,9 @@ export async function writeConfig(directory, settings) {
   const path = join(directory, "config.toml");
   created.add(databaseFor(directory, settings));
   await writeFile(path, configSource({ "server.geoip_database": resolve("tests/fixtures/GeoIP2-City-Test.mmdb"),
-    "clickhouse.url": clickhouseUrl, ...settings, "clickhouse.database": databaseFor(directory, settings) }), { mode: 0o600 });
+    // Tests read right after ingesting, so reports stay exact unless a test asks for lag.
+    "clickhouse.url": clickhouseUrl, "clickhouse.rollup_max_lag_seconds": "0", ...settings,
+    "clickhouse.database": databaseFor(directory, settings) }), { mode: 0o600 });
   return path;
 }
 

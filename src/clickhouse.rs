@@ -669,9 +669,16 @@ pub mod testing {
         let file = directory.join("config.toml");
         let env = directory.join("empty.env");
         std::fs::write(&env, "").unwrap();
+        // Tests read right after inserting, so reports stay exact unless a
+        // test asks for lagged rollup reads.
+        let lag = if extra.contains("rollup_max_lag_seconds") {
+            ""
+        } else {
+            "clickhouse.rollup_max_lag_seconds = 0\n"
+        };
         std::fs::write(
             &file,
-            format!("clickhouse.url = {url:?}\nclickhouse.database = {database:?}\n{extra}\n"),
+            format!("clickhouse.url = {url:?}\nclickhouse.database = {database:?}\n{lag}{extra}\n"),
         )
         .unwrap();
         let settings = crate::settings::Settings::load(Some(&env), Some(&file)).unwrap();

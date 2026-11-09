@@ -32,7 +32,7 @@ user = "chunkify"
 | `clickhouse.deduplication_window_seconds` | — | `604800` (7 days) | Repeated event IDs received within this window are reported as duplicates and not stored again. `0` stores every delivery. |
 | `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Leased | 0 to 63. Part of each event's internal order, unique per running server. When unset, each server leases a free value from ClickHouse for as long as it runs; startup fails if all 64 are in use. Set it to assign values yourself. |
 | `clickhouse.rollup_interval_seconds` | — | `45` | How often servers refresh [report rollups](#report-rollups) when `rollup_max_lag_seconds` is above zero. 0 to 3600. `0` turns rollups off. |
-| `clickhouse.rollup_max_lag_seconds` | — | `0` | Let reports read [report rollups](#report-rollups) while the last refresh is at most this old. 0 to 3600. `0` keeps reports exact and turns refreshes off. Otherwise at least twice `rollup_interval_seconds`; 120 suits the default interval. |
+| `clickhouse.rollup_max_lag_seconds` | — | `120` | Let reports read [report rollups](#report-rollups) while the last refresh is at most this old. 0 to 3600, and at least twice `rollup_interval_seconds` unless 0. `0` makes reports exact and turns refreshes off. |
 
 The user needs permission to create the database and tables, and to read,
 insert and delete rows in them. Run `init` once per database, not once per
@@ -89,12 +89,13 @@ ingestion limits apply when a server starts.
 ## Report rollups
 
 Reports count each view once, from its first start and its final or latest
-measurement. By default every report works that out from events, so its
-results include every event stored before it ran, and its ClickHouse CPU grows
-with the views in its date range.
+measurement. Working that out from events on every request costs ClickHouse
+CPU in proportion to the views in the date range. So by default, reports read
+hourly rollups and lag stored events by up to about a minute. Set
+`rollup_max_lag_seconds = 0` for exact reports, which include every event
+stored before they run but cost more under load.
 
-Set `rollup_max_lag_seconds` above zero to let reports lag stored events
-instead. Reports then read every hour as of the last completed rollup refresh:
+Reports read every hour as of the last completed rollup refresh:
 whole hours from per-hour aggregates, partial hours at the ends of a range from
 per-view results. They do no per-view work at all, and lag stored events by the
 refresh interval plus about ten seconds. Hours with expired events are still

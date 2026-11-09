@@ -129,7 +129,8 @@ export async function containerCollector({ settings = {}, resources = [], enviro
   try {
     if (seed) await copyDatabase(seed, database);
     // Servers poll the shared registry; keep CLI changes quick to apply in tests.
-    const config = configSource({ "clickhouse.registry_refresh_seconds": "1", ...settings });
+    // Tests read right after ingesting, so reports stay exact unless a test asks for lag.
+    const config = configSource({ "clickhouse.registry_refresh_seconds": "1", "clickhouse.rollup_max_lag_seconds": "0", ...settings });
     await docker(["run", "--rm", "--user=0:0", "--network=none", "--mount", `type=volume,src=${volume},dst=/data`,
       "--entrypoint", "sh", image, "-c", 'umask 077; printf %s "$1" > /data/config.toml; chown 10001:10001 /data/config.toml',
       "sh", config]);

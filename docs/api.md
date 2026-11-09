@@ -731,9 +731,12 @@ cells. Strings that could be interpreted as spreadsheet formulas receive an
 apostrophe prefix. Empty exports contain headers.
 
 Normal analytics endpoints continue returning JSON. Interrupted or failed downloads
-terminate the stream; discard the partial file and retry the download. Reads
-see the events stored when their query begins, and paged reports keep the
-cohort of their first page. Large queries still consume ClickHouse CPU, memory
+terminate the stream; discard the partial file and retry the download. Raw
+event listings see the events stored when their query begins. Summary,
+engagement, quality, time series, breakdown and video reports, and their CSV
+exports, may lag them by up to about a minute; see
+[report rollups](storage.md#report-rollups). Paged
+reports keep the cohort of their first page. Large queries still consume ClickHouse CPU, memory
 and storage I/O.
 
 Behind an HTTPS ingress or a URL prefix, set `server.public_url` to the externally

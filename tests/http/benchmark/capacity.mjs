@@ -40,6 +40,8 @@ const baseSettings = {
   "server.ingest_per_second": "1000000",
   "rate_limits.read_per_minute": "1000000", "rate_limits.read_burst": "1000000",
   "rate_limits.read_concurrent": "32", "rate_limits.read_concurrent_per_project": "32",
+  // Measure the server's default rollup lag, not the exact reads tests use.
+  "clickhouse.rollup_max_lag_seconds": null,
   // Extra config.toml fields as JSON, for example {"clickhouse.async_insert": "false"}.
   ...JSON.parse(process.env.CHUNKIFY_CAPACITY_SETTINGS ?? "{}"),
   "clickhouse.database": database,

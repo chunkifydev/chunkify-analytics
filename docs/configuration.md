@@ -157,9 +157,11 @@ its permits are released and ClickHouse cancels the query. Accepted exports
 still include all matching rows, without an export row cap.
 
 Each report is an independent ClickHouse query, so a slow report does not delay
-ingestion or another project's reads beyond the shared server slots. Reports
-see events stored when their query begins. Await an ingestion response before
-reading if the result must include it.
+ingestion or another project's reads beyond the shared server slots. By
+default, reports covered by [report rollups](storage.md#report-rollups) lag
+stored events by up to about a minute. With `clickhouse.rollup_max_lag_seconds = 0`,
+every report sees the events stored when its query begins; await an ingestion
+response before reading if the result must include it.
 
 ### Report cache
 

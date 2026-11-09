@@ -95,7 +95,7 @@ impl ClickHouseConfig {
             .ok_or("clickhouse.rollup_interval_seconds must be between 0 and 3600")?;
         let rollup_max_lag = settings
             .var("clickhouse.rollup_max_lag_seconds")
-            .unwrap_or_else(|_| "0".into())
+            .unwrap_or_else(|_| "120".into())
             .parse::<u64>()
             .ok()
             .filter(|seconds| *seconds <= 3600)

@@ -36,6 +36,8 @@ retention.seconds = 0
 clickhouse.url = ${JSON.stringify(clickhouse)}
 clickhouse.database = ${JSON.stringify(database)}
 clickhouse.registry_refresh_seconds = 1
+# Show events in reports as soon as they are stored.
+clickhouse.rollup_max_lag_seconds = 0
 `, { mode: 0o600 });
 }
 // One running demo per directory: a second launch would rotate the first one's keys.

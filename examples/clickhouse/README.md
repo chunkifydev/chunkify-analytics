@@ -39,6 +39,17 @@ five seconds.
 Put your HTTPS reverse proxy in front of the gateway when accepting events from
 a public website.
 
+## Resources
+
+`clickhouse.xml` keeps ClickHouse small: server logging at warnings, no
+trace, text or profiling system logs, and caches of a few hundred MiB. With
+it, the capacity benchmark (900k events, 64 concurrent readers and continuous
+ingestion) ran within a 6 GiB ClickHouse memory limit on 4 CPUs. Without it, the
+default trace logging and cache sizes exhausted that limit after about an hour.
+
+Give ClickHouse at least 4 GiB of memory and 2 CPUs. On a larger dedicated
+server, raise the cache sizes or remove the file to use ClickHouse's defaults.
+
 ## Manage projects
 
 Run commands in any analytics container:

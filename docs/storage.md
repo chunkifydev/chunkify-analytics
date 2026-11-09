@@ -32,7 +32,7 @@ user = "chunkify"
 | `clickhouse.deduplication_window_seconds` | — | `604800` (7 days) | Repeated event IDs received within this window are reported as duplicates and not stored again. `0` stores every delivery. |
 | `clickhouse.node_id` | `CHUNKIFY_CLICKHOUSE_NODE_ID` | Leased | 0 to 63. Part of each event's internal order, unique per running server. When unset, each server leases a free value from ClickHouse for as long as it runs; startup fails if all 64 are in use. Set it to assign values yourself. |
 | `clickhouse.rollup_interval_seconds` | — | `45` | How often servers refresh [report rollups](#report-rollups) when `rollup_max_lag_seconds` is above zero. 0 to 3600. `0` turns rollups off. |
-| `clickhouse.rollup_max_lag_seconds` | — | `120` | Let reports read [report rollups](#report-rollups) while the last refresh is at most this old. 0 to 3600, and at least twice `rollup_interval_seconds` unless 0. `0` makes reports exact and turns refreshes off. |
+| `clickhouse.rollup_max_lag_seconds` | — | `120` | Let reports read [report rollups](#report-rollups) while the last refresh is at most this old. A refresh covers events stored until about 10 s before it starts, so its age when reports read it also includes the interval and its own duration. 0 to 3600, and at least twice `rollup_interval_seconds` unless 0. `0` makes reports exact and turns refreshes off. |
 
 The user needs permission to create the database and tables, and to read,
 insert and delete rows in them. Run `init` once per database, not once per

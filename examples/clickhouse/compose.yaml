@@ -13,6 +13,8 @@ services:
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?Set CLICKHOUSE_PASSWORD in .env}
     volumes:
       - clickhouse-data:/var/lib/clickhouse
+      # Small-host settings; remove or enlarge on a large dedicated server.
+      - ./clickhouse.xml:/etc/clickhouse-server/config.d/chunkify.xml:ro
     ulimits:
       nofile:
         soft: 262144

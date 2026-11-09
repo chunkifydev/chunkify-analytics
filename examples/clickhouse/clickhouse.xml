@@ -1,0 +1,14 @@
+<!-- Settings for a small ClickHouse host. The image logs at trace level and
+     sizes caches for large servers; under load that can exhaust a few GiB of
+     memory. See README.md in this directory. -->
+<clickhouse>
+    <logger><level>warning</level></logger>
+    <!-- System logs for profiling and server messages; query_log is kept. -->
+    <text_log remove="1"/>
+    <trace_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <!-- Caches sized for a host with a few GiB of memory. -->
+    <mark_cache_size>536870912</mark_cache_size>
+    <index_mark_cache_size>268435456</index_mark_cache_size>
+    <primary_index_cache_size>268435456</primary_index_cache_size>
+</clickhouse>

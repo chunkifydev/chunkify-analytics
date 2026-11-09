@@ -76,8 +76,8 @@ their fields; the SDK name does not select a different event format.
 - `video_title` is optional and is shown next to `video_id` in reports.
 
 `user_id` and `video_title` may be omitted or `null`. When present, each must be a
-string of 1 to 256 Unicode characters; longer values reject the event. Reports use
-the values from each view's first retained start event.
+string of 1 to 256 Unicode characters; empty or longer values reject the event.
+Reports use the values from each view's first retained start event.
 
 Local storage deduplicates event IDs within each project. The first accepted
 payload and context win; later duplicates do not enrich or replace them.

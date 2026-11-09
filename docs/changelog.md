@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.13.0...v0.14.0) (2026-11-09)
+
+
+### Features
+
+* **collector:** add user_id and video_title fields ([#65](https://github.com/chunkifydev/chunkify-analytics/issues/65)) ([aea4b24](https://github.com/chunkifydev/chunkify-analytics/commit/aea4b248c27afc805c9984a8df15e3a06b928fcb))
+
 ## [0.13.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.12.1...v0.13.0) (2026-11-03)
 
 

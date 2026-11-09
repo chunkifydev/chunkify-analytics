@@ -212,7 +212,7 @@ impl Store {
                     SELECT video_id, COUNT(*) AS views, COUNT(DISTINCT viewer_id) AS unique_viewers,
                         SUM(playing_time_ms ORDER BY view_id) AS total_playing_time_ms,
                         AVG(playback_score ORDER BY view_id) AS score, COUNT(playback_score) AS score_samples,
-                        arg_max(e_video_title, (occurred_at_ms, view_id)) FILTER (WHERE e_video_title IS NOT NULL) AS video_title
+                        arg_max(e_video_title, start_ingest_id) FILTER (WHERE e_video_title IS NOT NULL) AS video_title
                     FROM view_metrics GROUP BY video_id
                 )
                 SELECT video_id, views, unique_viewers, total_playing_time_ms, score, score_samples, video_title FROM video_metrics
@@ -752,10 +752,10 @@ pub(super) fn view_cohort(
     view_cohort_with_labels(project, through, filters, metrics, labels)
 }
 
-/// Like `view_cohort`. `labels` carries each start's `user_id` and
-/// `video_title` into `view_metrics` for reports that return them. They are
-/// also carried whenever a `user_id` filter needs them; otherwise they are NULL
-/// so other reports do not hold two extra strings per view.
+/// Like `view_cohort`. `labels` carries each start's `user_id`, `video_title`
+/// and ingestion order (`start_ingest_id`) into `view_metrics` for reports that
+/// return them. They are also carried whenever a `user_id` filter needs them;
+/// otherwise they are NULL so other reports do not hold them for every view.
 pub(super) fn view_cohort_with_labels(
     project: String,
     through: i64,
@@ -766,13 +766,13 @@ pub(super) fn view_cohort_with_labels(
     let labels = labels || filters.selects_user_id();
     let (label_fields, label_projection) = if labels {
         (
-            ", e_user_id := e_user_id, e_video_title := e_video_title",
-            "first_start.e_user_id AS e_user_id, first_start.e_video_title AS e_video_title,",
+            ", e_user_id := e_user_id, e_video_title := e_video_title, start_ingest_id := ingest_id",
+            "first_start.e_user_id AS e_user_id, first_start.e_video_title AS e_video_title, first_start.start_ingest_id AS start_ingest_id,",
         )
     } else {
         (
             "",
-            "CAST(NULL AS VARCHAR) AS e_user_id, CAST(NULL AS VARCHAR) AS e_video_title,",
+            "CAST(NULL AS VARCHAR) AS e_user_id, CAST(NULL AS VARCHAR) AS e_video_title, CAST(NULL AS BIGINT) AS start_ingest_id,",
         )
     };
     let (conditions, filter_values) = filters.sql();
@@ -859,7 +859,7 @@ pub(super) fn view_cohort_with_labels(
         FROM per_identity WHERE start_order IS NOT NULL
         QUALIFY ROW_NUMBER() OVER (PARTITION BY view_id ORDER BY start_order) = 1
     ), view_metrics AS (
-        SELECT view_id, occurred_at_ms, video_id, viewer_id, e_user_id, e_video_title, context_browser_name, context_os_name, context_device_type, context_continent, context_country, context_city, context_page_origin, context_page_path, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
+        SELECT view_id, occurred_at_ms, video_id, viewer_id, e_user_id, e_video_title, start_ingest_id, context_browser_name, context_os_name, context_device_type, context_continent, context_country, context_city, context_page_origin, context_page_path, playing_time_ms{measurement_projection}{score_projection} FROM started WHERE {conditions}
     )");
     (sql, values)
 }

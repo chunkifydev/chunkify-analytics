@@ -6138,7 +6138,7 @@
               "string",
               "null"
             ],
-            "description": "Title from the latest selected start that supplied one."
+            "description": "Title from the most recently received selected start that supplied one."
           },
           "views": {
             "type": "integer",

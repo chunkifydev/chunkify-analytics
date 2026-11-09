@@ -854,8 +854,9 @@ test("optional user IDs and video titles are validated, filtered and reported", 
     { user_id: "user-1", video_title: "Old title", occurred_at: "2026-10-15T12:00:00Z" });
   // Limits count Unicode characters, not bytes.
   const latestTitle = "🎬".repeat(256);
+  // Received last but with an earlier device clock: arrival order picks the title.
   const second = tag(sdkEvents("video-a", "viewer-b"),
-    { user_id: "user-2", video_title: latestTitle, occurred_at: "2026-10-15T13:00:00Z" });
+    { user_id: "user-2", video_title: latestTitle, occurred_at: "2026-10-15T11:00:00Z" });
   const third = tag(sdkEvents("video-b", "viewer-c"), { occurred_at: "2026-10-15T14:00:00Z" });
   for (const event of [...first, ...second, ...third]) assert.equal((await post(event)).status, 201);
 

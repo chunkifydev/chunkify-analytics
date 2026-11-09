@@ -183,8 +183,9 @@ Ranking applies to all matching videos before pagination. Metric ties use
 GET /v1/videos?sort_by=total_playing_time_ms&order=desc&limit=10
 ```
 
-Each video includes `video_title` from its latest selected start that supplied
-one, or `null`.
+Each video includes `video_title` from the most recently received selected start
+that supplied one, or `null`. Arrival order is used rather than the client's
+occurrence time, so a viewer's wrong device clock cannot keep an old title.
 
 Keep the same filters, `sort_by` and `order` with every cursor; changing them
 returns 400. Video cursors from earlier versions are invalid; start a new

@@ -781,6 +781,33 @@ mod tests {
         }
     }
     #[test]
+    fn query_context_values_land_in_their_named_columns() {
+        // `encode` fills these columns by position; each value must reach the
+        // column with its own name whatever order the column lists use.
+        let context = Value::Object(
+            QUERY_CONTEXT_FIELDS
+                .iter()
+                .map(|field| (field.to_string(), json!(format!("value-{field}"))))
+                .collect(),
+        );
+        let values = encode(&event(1), Some(&context), 123, "default", None)
+            .map_err(|e| e.message)
+            .unwrap();
+        assert_eq!(values.len(), COLUMNS.len());
+        for field in QUERY_CONTEXT_FIELDS {
+            let column = format!("context_{field}");
+            let index = COLUMNS
+                .iter()
+                .position(|(name, _)| *name == column)
+                .unwrap_or_else(|| panic!("missing column {column}"));
+            assert_eq!(
+                values[index],
+                SqlValue::Text(format!("value-{field}")),
+                "{column}"
+            );
+        }
+    }
+    #[test]
     fn version_6_adds_new_columns() {
         let mut connection = Connection::open_in_memory().unwrap();
         let new_columns = [

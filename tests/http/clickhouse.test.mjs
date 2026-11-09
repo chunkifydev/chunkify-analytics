@@ -6,9 +6,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import test from "node:test";
+import test, { after } from "node:test";
 import { buildDemoEvents } from "../../examples/dashboard/seed-events.mjs";
-import { clickhouseQuery, clickhouseUrl, collectorEnvironment, writeConfig } from "./configuration.mjs";
+import { clickhouseQuery, clickhouseUrl, collectorEnvironment, dropTestDatabases, writeConfig } from "./configuration.mjs";
+
+// Servers recreate a dropped database at their next registry refresh, so drop
+// every test database once all servers have stopped.
+after(dropTestDatabases);
 
 const binary = process.env.CHUNKIFY_BINARY ?? resolve("target/debug/chunkify-analytics");
 

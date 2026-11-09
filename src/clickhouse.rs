@@ -619,6 +619,15 @@ pub mod testing {
         config
     }
 
+    /// Drops the test database when it goes out of scope, even after a panic.
+    pub struct Disposable(pub crate::backend::ClickHouseConfig);
+
+    impl Drop for Disposable {
+        fn drop(&mut self) {
+            drop_database(&self.0);
+        }
+    }
+
     pub fn drop_database(config: &crate::backend::ClickHouseConfig) {
         let config = config.clone();
         let _ = super::block_on(move || async move {

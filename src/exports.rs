@@ -698,6 +698,7 @@ mod tests {
     #[tokio::test]
     async fn download_grants_expire_and_follow_issuer_revocation() {
         let config = crate::clickhouse::testing::config("retention.seconds = 0");
+        let _database = crate::clickhouse::testing::Disposable(config.clickhouse.clone());
         let keys = crate::config::Keys {
             projects: vec![crate::projects::primary_project(
                 "test-public",

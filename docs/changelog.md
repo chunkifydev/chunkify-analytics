@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.16.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.15.0...v0.16.0) (2026-11-10)
+
+
+### ⚠ BREAKING CHANGES
+
+* **analytics:** the ClickHouse tables changed and are not upgraded in place. Databases created by 0.15.0 are refused at startup; use a new clickhouse.database or drop the old one before starting this version.
+
+### Features
+
+* **analytics:** track subtitles, playback rate and custom dimensions ([#68](https://github.com/chunkifydev/chunkify-analytics/issues/68)) ([5237e13](https://github.com/chunkifydev/chunkify-analytics/commit/5237e13484ca0fe234daba0c982c3507c5c27cda))
+
 ## [0.15.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.14.0...v0.15.0) (2026-11-09)
 
 

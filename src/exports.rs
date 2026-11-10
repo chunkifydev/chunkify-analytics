@@ -40,6 +40,8 @@ impl ExportRequest {
             "summary" => Ok("/v1/summary"),
             "quality" => Ok("/v1/quality"),
             "renditions" => Ok("/v1/renditions"),
+            "subtitles" => Ok("/v1/subtitles"),
+            "playback_rates" => Ok("/v1/playback-rates"),
             "retention" => Ok("/v1/retention"),
             "engagement" => Ok("/v1/engagement"),
             "errors" => Ok("/v1/errors"),
@@ -66,7 +68,16 @@ impl ExportRequest {
             .iter()
             .map(|p| spec.pointer(&p["$ref"].as_str().unwrap()[1..]).unwrap())
             .collect();
+        // Routes marked in the contract also take custom filters
+        // (`custom.<key>`), checked when the query is parsed below.
+        let custom = operation["x-custom-filters"] == true;
         for (name, value) in &self.query {
+            if custom && name.starts_with("custom.") {
+                if !value.is_string() {
+                    return Err(ApiError::bad("Expected string filters"));
+                }
+                continue;
+            }
             let p = parameters
                 .iter()
                 .find(|p| p["name"] == *name)
@@ -157,7 +168,7 @@ impl ColumnsQuery {
             }
             args.insert("kind".into(), json!(kind));
         }
-        if let Some(group) = self.group_by {
+        if let Some(group) = &self.group_by {
             if !matches!(self.resource.as_str(), "summary" | "quality" | "engagement") {
                 return Err(ApiError::bad("Unsupported group_by"));
             }
@@ -422,6 +433,8 @@ async fn run(
         "summary" => store.summary(project, q, false).await,
         "quality" => store.quality(project, q).await,
         "renditions" => store.renditions(project, q).await,
+        "subtitles" => store.subtitles(project, q).await,
+        "playback_rates" => store.playback_rates(project, q).await,
         "retention" => store.retention(project, q).await,
         "engagement" => store.engagement(project, q).await,
         "errors" => store.errors(project, q).await,
@@ -443,6 +456,8 @@ fn table_rows(data: &Value) -> Result<Vec<Value>, ApiError> {
         "errors",
         "values",
         "renditions",
+        "languages",
+        "rates",
     ] {
         if let Some(rows) = data.get(name).and_then(Value::as_array) {
             return Ok(rows.clone());
@@ -567,6 +582,8 @@ fn columns(resource: &str, args: &Map<String, Value>) -> Vec<Column> {
             "playing_time_ms",
             "playing_time_ratio",
         ],
+        "subtitles" => &["language", "views", "playing_time_ms", "playing_time_ratio"],
+        "playback_rates" => &["rate", "views", "playing_time_ms", "playing_time_ratio"],
         "views" => &[
             "view_id",
             "video_id",

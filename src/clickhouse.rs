@@ -314,6 +314,8 @@ impl Client {
     }
 
     /// Create the database and tables. Safe to run concurrently from many servers.
+    /// Fails with [`OUTDATED_SCHEMA`] when the database was created by a
+    /// version with another table layout: tables are never upgraded in place.
     pub async fn ensure_schema(&self) -> std::result::Result<(), ApiError> {
         let database = &self.config.database;
         let none = Params::default();
@@ -352,6 +354,77 @@ impl Client {
                 statement
             }
         };
+        // A database with events but another (or no) schema version was
+        // created by another release. Check before creating anything.
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT (SELECT count() FROM system.tables WHERE database = {db} AND name = 'events'),
+                (SELECT count() FROM system.tables WHERE database = {db} AND name = 'schema_version')",
+            db = params.text(database)
+        );
+        let tables = self.one(&sql, &params).await?;
+        let exists = |index: usize| {
+            tables
+                .get(index)
+                .and_then(Value::as_u64)
+                .is_some_and(|n| n > 0)
+        };
+        let outdated = || ApiError::new(OUTDATED_STATUS, OUTDATED_SCHEMA.into());
+        let stored = || async {
+            Ok::<_, ApiError>(
+                self.one("SELECT max(version) FROM schema_version", &none)
+                    .await?
+                    .first()
+                    .and_then(Value::as_u64)
+                    .filter(|version| *version > 0),
+            )
+        };
+        if exists(1) {
+            // Another release's version, even before it created its tables.
+            if stored()
+                .await?
+                .is_some_and(|version| version != SCHEMA_VERSION)
+            {
+                return Err(outdated());
+            }
+        } else if exists(0) {
+            // Events without a version: a release from before schema versions.
+            return Err(outdated());
+        }
+        // Record the layout before creating any other table, so a database
+        // with events always has its version, even after an interrupted start.
+        self.execute(
+            engine(
+                "CREATE TABLE IF NOT EXISTS schema_version (version UInt64) ENGINE = MergeTree ORDER BY version"
+                    .into(),
+            ),
+            &none,
+        )
+        .await?;
+        // Concurrent servers may each record the version; duplicates are
+        // harmless. Read it back: a server of another release starting on the
+        // same empty database at the same time may have recorded its own.
+        let mut params = Params::default();
+        let version = params.int(SCHEMA_VERSION as i64);
+        self.execute(
+            format!(
+                "INSERT INTO schema_version SELECT {version} WHERE (SELECT count() FROM schema_version) = 0"
+            ),
+            &params,
+        )
+        .await?;
+        let versions = self
+            .one(
+                "SELECT min(version), max(version) FROM schema_version",
+                &none,
+            )
+            .await?;
+        if versions
+            .iter()
+            .any(|version| version.as_u64() != Some(SCHEMA_VERSION))
+        {
+            return Err(outdated());
+        }
         let mut tables = vec![
             events_table(),
             "CREATE TABLE IF NOT EXISTS registry (
@@ -461,6 +534,16 @@ pub const CONTEXT_DIMENSIONS: &[(&str, &str)] = &[
     ("ctx_page_path", "page_path"),
 ];
 
+/// The playback rate as dimension text, such as `1` or `1.5`, rounded to two
+/// decimals so rollups, filters and breakdowns share one value per rate.
+/// Storage keeps integral floats such as `2.0` in the event JSON, so the rate
+/// falls back to that JSON when its typed column is empty.
+const PLAYBACK_RATE_TEXT: &str = "d_playback_rate Nullable(String) MATERIALIZED toString(round(if(isNotNull(e_playback_rate), e_playback_rate, if(JSONType(event_remainder, 'playback_rate') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, 'playback_rate'), NULL)), 2))";
+
+/// Custom dimensions of a view start as text: strings unchanged, numbers and
+/// booleans as sent (`5`, `true`). Other events keep an empty map.
+const CUSTOM_MAP: &str = "c_custom Map(String, String) MATERIALIZED if(event_name = 'chunkify.video.view_started', CAST(arrayMap(entry -> (entry.1, if(JSONType(entry.2) = 'String', JSONExtractString(entry.2), entry.2)), JSONExtractKeysAndValuesRaw(event_remainder, 'custom')), 'Map(String, String)'), map())";
+
 /// Numeric report fields of snapshot and end events, the only events reports
 /// measure, extracted once at insert time. Storage keeps integral floats in the
 /// event JSON to preserve their representation, so a field falls back to that
@@ -483,6 +566,8 @@ fn events_table() -> String {
             "{column} Nullable(String) MATERIALIZED if(JSONType(ifNull(context_remainder, '{{}}'), '{key}') = 'String', JSONExtractString(ifNull(context_remainder, '{{}}'), '{key}'), NULL)"
         ));
     }
+    columns.push(PLAYBACK_RATE_TEXT.into());
+    columns.push(CUSTOM_MAP.into());
     for field in REPORT_NUMBERS {
         columns.push(format!(
             "n_{field} Nullable(Float64) MATERIALIZED if(event_name NOT IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended'), NULL, if(isNotNull(e_{field}), e_{field}, if(JSONType(event_remainder, '{field}') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, '{field}'), NULL)))"
@@ -528,18 +613,41 @@ fn block_on<T: Send, F: std::future::Future<Output = Result<T>>>(
     result.map_err(Into::into)
 }
 
-fn registry_error(_: ApiError) -> Box<dyn std::error::Error> {
+fn registry_error(error: ApiError) -> Box<dyn std::error::Error> {
+    if error.status == OUTDATED_STATUS {
+        return OUTDATED_SCHEMA.into();
+    }
     "Cannot reach the ClickHouse project registry".into()
+}
+
+/// The table layout this release creates. Increase it with every change to a
+/// table definition: databases created with another layout must be recreated.
+pub const SCHEMA_VERSION: u64 = 2;
+/// The status that marks [`OUTDATED_SCHEMA`]; no other schema error uses it.
+const OUTDATED_STATUS: reqwest::StatusCode = reqwest::StatusCode::CONFLICT;
+/// Startup error for a database created by a release with another layout.
+pub const OUTDATED_SCHEMA: &str = "The ClickHouse database was created by an analytics release with a different table layout and cannot be upgraded in place. Use a new clickhouse.database, or drop this one, then start again";
+
+/// Startup message for a schema error: the outdated-layout error as is, any
+/// other failure as a connection hint.
+pub fn schema_error(error: ApiError) -> Box<dyn std::error::Error> {
+    if error.status == OUTDATED_STATUS {
+        OUTDATED_SCHEMA.into()
+    } else {
+        "Cannot create the ClickHouse schema; check clickhouse.url, credentials and permissions"
+            .into()
+    }
 }
 
 /// Create the schema used by every analytics server for this database.
 pub fn prepare(config: &ClickHouseConfig) -> Result<()> {
     let config = config.clone();
     block_on(move || async move {
-        Client::new(config)?.with_timeout(CONTROL_TIMEOUT)
+        Client::new(config)?
+            .with_timeout(CONTROL_TIMEOUT)
             .ensure_schema()
             .await
-            .map_err(|_| "Cannot create the ClickHouse schema; check clickhouse.url, credentials and permissions".into())
+            .map_err(schema_error)
     })
 }
 

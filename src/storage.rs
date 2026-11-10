@@ -78,6 +78,11 @@ const EVENT_FIELDS: &[(&str, Kind)] = &[
     // Integrator-supplied identity and display labels.
     ("user_id", Text),
     ("video_title", Text),
+    // Subtitle and playback rate state, and their previous values on changes.
+    ("subtitle_language", Text),
+    ("previous_subtitle_language", Text),
+    ("playback_rate", Number),
+    ("previous_playback_rate", Number),
 ];
 const BROWSER_FIELDS: &[(&str, Kind)] = &[
     ("schema_version", Integer),

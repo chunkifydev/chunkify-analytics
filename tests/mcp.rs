@@ -456,6 +456,8 @@ async fn exercise_project_queries(http: bool) {
             "engagement",
             "errors",
             "renditions",
+            "subtitles",
+            "playback_rates",
             "retention"
         ])
     );
@@ -500,6 +502,53 @@ async fn exercise_project_queries(http: bool) {
         .await["error"]["code"],
         "invalid_arguments"
     );
+    for (kind, list) in [("subtitles", "languages"), ("playback_rates", "rates")] {
+        let report = call(&client, "get_metrics", json!({"kind":kind}), false).await;
+        assert_eq!(report["coverage"]["kind"], format!("ranked_{list}"));
+        assert_eq!(report["coverage"]["has_more"], false);
+        assert_eq!(report["data"]["sample_views"], 0);
+        assert_eq!(report["data"][list], json!([]));
+        assert_eq!(
+            call(
+                &client,
+                "get_metrics",
+                json!({"kind":kind, "group_by":"country"}),
+                true
+            )
+            .await["error"]["code"],
+            "invalid_arguments"
+        );
+    }
+    let grouped = call(
+        &client,
+        "get_metrics",
+        json!({"kind":"summary", "group_by":"playback_rate", "subtitle_language":"fr"}),
+        false,
+    )
+    .await;
+    assert_eq!(grouped["data"]["groups"], json!([]));
+    // Custom filters are one object argument; custom keys group like context.
+    let custom = call(
+        &client,
+        "get_metrics",
+        json!({"kind":"summary", "group_by":"custom.plan", "custom":{"plan":"premium"}}),
+        false,
+    )
+    .await;
+    assert_eq!(custom["data"]["group_by"], "custom.plan");
+    assert_eq!(custom["data"]["groups"], json!([]));
+    for invalid in [
+        json!({"kind":"summary", "custom":{"Plan":"x"}}),
+        json!({"kind":"summary", "custom":{"plan":""}}),
+        json!({"kind":"summary", "custom":"plan"}),
+        json!({"kind":"summary", "custom.plan":"x"}),
+        json!({"kind":"summary", "group_by":"custom.Plan"}),
+    ] {
+        assert_eq!(
+            call(&client, "get_metrics", invalid, true).await["error"]["code"],
+            "invalid_arguments"
+        );
+    }
     for old in ["get_summary", "get_quality", "get_engagement"] {
         assert!(client.call_tool(params(old, json!({}))).await.is_err());
     }
@@ -1537,7 +1586,7 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                 .unwrap()
                 .input_schema;
             assert_eq!(
-                schema["properties"]["group_by"]["enum"],
+                schema["properties"]["group_by"]["anyOf"][0]["enum"],
                 json!([
                     "browser_name",
                     "os_name",
@@ -1546,7 +1595,9 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                     "country",
                     "city",
                     "page_origin",
-                    "page_path"
+                    "page_path",
+                    "subtitle_language",
+                    "playback_rate"
                 ])
             );
             assert_eq!(schema["properties"]["limit"]["maximum"], 100);

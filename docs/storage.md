@@ -112,8 +112,14 @@ video and one context value (for a breakdown, the context value must be of its
 - time series;
 - videos sorted by `video_id`, `views` or `unique_viewers`.
 
-Other filters (viewer, view, event name, or two context values), other video
-sort orders, and every other report read events.
+User ID and custom dimension filters, and breakdowns by a custom key, read
+every hour from the per-view results instead of hourly aggregates: these values
+have too many distinct values for hourly rows, but still cost one row per view
+rather than every event. They combine with any context filters.
+
+Other filters (viewer, view, event name, or two context values without a user
+ID or custom filter), other video sort orders, and every other report read
+events.
 
 Reports lag stored events by the refresh interval plus about ten seconds, and
 by the refresh's own duration. If no refresh completed within
@@ -182,6 +188,12 @@ their inserts. This setup was tested with two replicas and ClickHouse Keeper.
 | `rollup`, `rollup_hours`, `rollup_views` | [Report rollups](#report-rollups): partial aggregates per hour, each hour's receipt range, and per-view results. Derived from `events`; superseded rows are deleted after 20 refreshes and expired hours by the expiration sweep. |
 | `rollup_runs` | Rollup refresh claims and completions. |
 | `claims` | Short leases between servers: node IDs and expiration sweeps. Rows expire after a day. |
+| `schema_version` | The table layout the database was created with. |
 
 `init` and `serve` create missing tables. Do not change these tables by hand.
+
+Tables are not upgraded in place. When a release changes the table layout, the
+server refuses to start on a database created by an earlier layout, with a
+message saying so. Use a new `clickhouse.database`, or drop the old database,
+then start again. Events in the old database are not migrated.
 See [backup and restore](administration.md#backup-and-restore).

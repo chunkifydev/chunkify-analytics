@@ -1,6 +1,7 @@
 use crate::{api::ApiError, event};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -42,8 +43,10 @@ impl VideoSort {
     }
 }
 
+/// Query parameters. Custom dimension filters (`custom.<key>`) have dynamic
+/// names, so they are collected in one map whose deserializer rejects every
+/// other unknown or repeated parameter.
 #[derive(Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct Query {
     #[serde(skip)]
     pub export: Option<std::sync::Arc<crate::exports::Sink>>,
@@ -62,12 +65,18 @@ pub struct Query {
     pub city: Option<String>,
     pub page_origin: Option<String>,
     pub page_path: Option<String>,
+    pub subtitle_language: Option<String>,
+    #[serde(default, deserialize_with = "optional_rate")]
+    pub playback_rate: Option<String>,
     #[serde(default, deserialize_with = "optional_limit")]
     pub limit: Option<usize>,
     pub cursor: Option<String>,
     pub order: Option<SortOrder>,
     pub sort_by: Option<VideoSort>,
     pub group_by: Option<BreakdownBy>,
+    /// `custom.<key>` filters. Any other unknown parameter is rejected here.
+    #[serde(flatten, deserialize_with = "custom_filters")]
+    pub custom: BTreeMap<String, String>,
 }
 
 fn optional_limit<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
@@ -159,20 +168,121 @@ impl<'de> Deserialize<'de> for ViewsQuery {
     }
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
+/// A first-start value reports count views by: a stored column, one custom
+/// key's value, or the custom keys in use. Written as its API name, such as
+/// `country` or `custom.plan`.
+#[derive(Clone, PartialEq)]
 pub enum Dimension {
-    BrowserName,
-    OsName,
-    DeviceType,
-    Continent,
-    Country,
-    City,
-    PageOrigin,
-    PagePath,
-    VideoId,
-    ViewerId,
-    UserId,
+    /// API name and cohort column.
+    Column(&'static str, &'static str),
+    /// One custom key, validated like event keys.
+    Custom(CustomKey),
+    /// The custom keys set on views (`custom_keys`).
+    CustomKeys,
+}
+
+/// A custom dimension key, only built from a validated name, so it is safe as
+/// an SQL literal.
+#[derive(Clone, PartialEq)]
+pub struct CustomKey(String);
+
+/// Stored dimensions: API name, cohort column, and whether reports can group by it.
+const DIMENSIONS: &[(&str, &str, bool)] = &[
+    ("browser_name", "context_browser_name", true),
+    ("os_name", "context_os_name", true),
+    ("device_type", "context_device_type", true),
+    ("continent", "ctx_continent", true),
+    ("country", "ctx_country", true),
+    ("city", "ctx_city", true),
+    ("page_origin", "ctx_page_origin", true),
+    ("page_path", "ctx_page_path", true),
+    ("subtitle_language", "e_subtitle_language", true),
+    ("playback_rate", "d_playback_rate", true),
+    ("video_id", "video_id", false),
+    ("viewer_id", "viewer_id", false),
+    ("user_id", "e_user_id", false),
+];
+
+impl Dimension {
+    /// A dimension by API name; `breakdown` accepts only the ones reports
+    /// can group by (stored context and custom keys).
+    fn parse(name: &str, breakdown: bool) -> Option<Self> {
+        if let Some(key) = name.strip_prefix("custom.") {
+            return event::custom_key(key).then(|| Self::Custom(CustomKey(key.to_owned())));
+        }
+        if name == "custom_keys" {
+            return (!breakdown).then_some(Self::CustomKeys);
+        }
+        DIMENSIONS
+            .iter()
+            .find(|(api, _, groupable)| *api == name && (*groupable || !breakdown))
+            .map(|(api, column, _)| Self::Column(api, column))
+    }
+
+    pub fn name(&self) -> String {
+        match self {
+            Self::Column(name, _) => (*name).to_owned(),
+            Self::Custom(CustomKey(key)) => format!("custom.{key}"),
+            Self::CustomKeys => "custom_keys".into(),
+        }
+    }
+
+    /// The SQL value of this dimension on cohort and per-view rows. Custom
+    /// keys match `[a-z0-9_]`, so they are safe as literals; views without
+    /// the key form a null group.
+    pub fn expression(&self) -> String {
+        match self {
+            Self::Column(_, column) => (*column).to_owned(),
+            Self::Custom(CustomKey(key)) => {
+                format!("if(mapContains(c_custom, '{key}'), c_custom['{key}'], NULL)")
+            }
+            Self::CustomKeys => "arrayJoin(mapKeys(c_custom))".into(),
+        }
+    }
+
+    /// The first-start column the cohort must carry for this dimension.
+    pub fn start_column(&self) -> &'static str {
+        match self {
+            Self::Column(_, column) => column,
+            Self::Custom(_) | Self::CustomKeys => "c_custom",
+        }
+    }
+
+    /// Whether hourly rollups hold this dimension.
+    pub fn in_rollups(&self) -> bool {
+        matches!(self, Self::Column(..))
+    }
+}
+
+impl Serialize for Dimension {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.name())
+    }
+}
+impl<'de> Deserialize<'de> for Dimension {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        Self::parse(&name, false)
+            .ok_or_else(|| serde::de::Error::custom(format!("Unsupported dimension: {name}")))
+    }
+}
+
+/// A dimension reports can group by: stored context or a custom key.
+#[derive(Clone, PartialEq)]
+pub struct BreakdownBy(pub Dimension);
+
+impl Serialize for BreakdownBy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(s)
+    }
+}
+impl<'de> Deserialize<'de> for BreakdownBy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        Dimension::parse(&name, true)
+            .map(Self)
+            .ok_or_else(|| serde::de::Error::custom(format!("Unsupported group_by: {name}")))
+    }
 }
 
 impl MetricKind {
@@ -186,19 +296,6 @@ impl MetricKind {
 }
 
 pub const MAX_TIME_BUCKETS: usize = 1000;
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BreakdownBy {
-    BrowserName,
-    OsName,
-    DeviceType,
-    Continent,
-    Country,
-    City,
-    PageOrigin,
-    PagePath,
-}
 
 #[derive(Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -217,7 +314,6 @@ impl TimeInterval {
 }
 
 #[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
 pub struct TimeseriesQuery {
     #[serde(skip)]
     pub export: Option<std::sync::Arc<crate::exports::Sink>>,
@@ -238,6 +334,12 @@ pub struct TimeseriesQuery {
     pub city: Option<String>,
     pub page_origin: Option<String>,
     pub page_path: Option<String>,
+    pub subtitle_language: Option<String>,
+    #[serde(default, deserialize_with = "optional_rate")]
+    pub playback_rate: Option<String>,
+    /// `custom.<key>` filters, validated like [`Query::custom`].
+    #[serde(flatten, deserialize_with = "custom_filters")]
+    pub custom: BTreeMap<String, String>,
 }
 
 pub struct TimeseriesWindow {
@@ -272,6 +374,9 @@ impl TimeseriesQuery {
             city: self.city,
             page_origin: self.page_origin,
             page_path: self.page_path,
+            subtitle_language: self.subtitle_language,
+            playback_rate: self.playback_rate,
+            custom: self.custom,
             ..Query::default()
         }
         .filters()?;
@@ -315,6 +420,11 @@ pub struct Filters {
     city: Option<String>,
     page_origin: Option<String>,
     page_path: Option<String>,
+    subtitle_language: Option<String>,
+    playback_rate: Option<String>,
+    /// Custom dimension filters by key, without the `custom.` prefix.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    custom: BTreeMap<String, String>,
 }
 
 impl Query {
@@ -388,6 +498,16 @@ impl Query {
             }
         }
         if self
+            .subtitle_language
+            .as_deref()
+            .is_some_and(|value| !event::language_tag(value))
+        {
+            return Err(ApiError::bad(format!(
+                "subtitle_language must contain between 1 and {} characters and not be blank",
+                event::MAX_LANGUAGE_CHARS
+            )));
+        }
+        if self
             .user_id
             .as_ref()
             .is_some_and(|value| !(1..=event::MAX_LABEL_CHARS).contains(&value.chars().count()))
@@ -406,6 +526,28 @@ impl Query {
                 "view_id must contain between 1 and 4096 characters",
             ));
         }
+        // Keys were checked when the query was read; queries built in code
+        // are checked here too.
+        let mut custom = BTreeMap::new();
+        for (name, value) in &self.custom {
+            let key = name
+                .strip_prefix("custom.")
+                .filter(|key| event::custom_key(key))
+                .ok_or_else(|| ApiError::bad(format!("Unsupported query parameter: {name}")))?;
+            if !event::custom_text(value) {
+                return Err(ApiError::bad(format!(
+                    "{name} must contain between 1 and {} characters",
+                    event::MAX_LABEL_CHARS
+                )));
+            }
+            custom.insert(key.to_owned(), value.clone());
+        }
+        if custom.len() > event::MAX_CUSTOM_KEYS {
+            return Err(ApiError::bad(format!(
+                "At most {} custom filters are allowed",
+                event::MAX_CUSTOM_KEYS
+            )));
+        }
         Ok(Filters {
             from_ms,
             to_ms,
@@ -422,6 +564,9 @@ impl Query {
             city: self.city.clone(),
             page_origin: self.page_origin.clone(),
             page_path: self.page_path.clone(),
+            subtitle_language: self.subtitle_language.clone(),
+            playback_rate: self.playback_rate.clone(),
+            custom,
         })
     }
 
@@ -435,6 +580,80 @@ impl Query {
         }
         Ok(limit)
     }
+}
+
+/// The parameters a query does not name: only `custom.<key>` filters, so a
+/// misspelled parameter fails when the query is read, whatever the report.
+fn custom_filters<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, String>, D::Error> {
+    struct Filters;
+    impl<'de> serde::de::Visitor<'de> for Filters {
+        type Value = BTreeMap<String, String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("custom.<key> filters")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut filters = BTreeMap::new();
+            while let Some((name, value)) = map.next_entry::<String, String>()? {
+                if !name.strip_prefix("custom.").is_some_and(event::custom_key) {
+                    return Err(serde::de::Error::custom(format!(
+                        "Unsupported query parameter: {name}"
+                    )));
+                }
+                if filters.insert(name.clone(), value).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "Repeated query parameter: {name}"
+                    )));
+                }
+            }
+            Ok(filters)
+        }
+    }
+    d.deserialize_map(Filters)
+}
+
+/// The `playback_rate` query parameter as its dimension text, normalized when
+/// the query is read so filters and caches share one value per rate: digits
+/// with at most two decimals, from 0.01 to 16, written like ClickHouse writes
+/// it (`2`, `1.5`). `2.0` and `2` select the same views.
+fn optional_rate<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Input {
+        Number(f64),
+        Text(String),
+    }
+    let invalid = || {
+        serde::de::Error::custom(format!(
+            "playback_rate must be a number from {} to {} with at most two decimals",
+            event::MIN_PLAYBACK_RATE,
+            event::MAX_PLAYBACK_RATE
+        ))
+    };
+    let Some(input) = Option::<Input>::deserialize(d)? else {
+        return Ok(None);
+    };
+    let rate = match input {
+        Input::Number(rate) => rate,
+        Input::Text(text) => {
+            let (whole, decimals) = text.split_once('.').unwrap_or((&text, "0"));
+            let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            if !digits(whole) || !digits(decimals) || decimals.len() > 2 {
+                return Err(invalid());
+            }
+            text.parse().map_err(|_| invalid())?
+        }
+    };
+    if !(event::MIN_PLAYBACK_RATE..=event::MAX_PLAYBACK_RATE).contains(&rate)
+        || (rate * 100.0).round() / 100.0 != rate
+    {
+        return Err(invalid());
+    }
+    Ok(Some(rate.to_string()))
 }
 
 impl Filters {
@@ -462,10 +681,20 @@ impl Filters {
             (&self.city, "ctx_city"),
             (&self.page_origin, "ctx_page_origin"),
             (&self.page_path, "ctx_page_path"),
+            (&self.subtitle_language, "e_subtitle_language"),
+            (&self.playback_rate, "d_playback_rate"),
         ] {
             if let Some(value) = value {
                 conditions.push(format!("{column} = {}", params.text(value)));
             }
+        }
+        // Values are never empty, so a view without the key never matches.
+        for (key, value) in &self.custom {
+            conditions.push(format!(
+                "c_custom[{}] = {}",
+                params.text(key),
+                params.text(value)
+            ));
         }
         conditions.join(" AND ")
     }
@@ -475,11 +704,13 @@ impl Filters {
     }
 
     /// The filters hourly rollups can answer: a date range, a video, and at
-    /// most one first-start context value. Viewer, user, view and event
-    /// filters always read events.
+    /// most one first-start context value. Viewer, view and event filters
+    /// read events; user and custom filters read per-view rows (see
+    /// [`Filters::views_range`]).
     pub fn rollup_scope(&self) -> Option<RollupScope> {
         if self.viewer_id.is_some()
             || self.user_id.is_some()
+            || !self.custom.is_empty()
             || self.view_id.is_some()
             || self.event_name.is_some()
         {
@@ -494,6 +725,8 @@ impl Filters {
             (&self.city, "ctx_city"),
             (&self.page_origin, "ctx_page_origin"),
             (&self.page_path, "ctx_page_path"),
+            (&self.subtitle_language, "e_subtitle_language"),
+            (&self.playback_rate, "d_playback_rate"),
         ]
         .into_iter()
         .filter_map(|(value, column)| value.as_ref().map(|value| (column, value.clone())));
@@ -510,6 +743,24 @@ impl Filters {
     }
 }
 
+impl Filters {
+    /// Whether these filters use first-start values with many distinct
+    /// values, kept per view rather than in hourly rollups: `user_id` and
+    /// custom dimensions.
+    pub fn needs_views(&self) -> bool {
+        self.user_id.is_some() || !self.custom.is_empty()
+    }
+
+    /// The date range of per-view rollup rows these filters can read, or
+    /// `None` when they need events: viewer, view and event filters do.
+    pub fn views_range(&self) -> Option<(Option<i64>, Option<i64>)> {
+        if self.viewer_id.is_some() || self.view_id.is_some() || self.event_name.is_some() {
+            return None;
+        }
+        Some((self.from_ms, self.to_ms))
+    }
+}
+
 /// Filters a report can read from hourly rollups. See [`Filters::rollup_scope`].
 pub struct RollupScope {
     pub from_ms: Option<i64>,
@@ -517,40 +768,6 @@ pub struct RollupScope {
     pub video_id: Option<String>,
     /// A first-start context column and the value it must equal.
     pub dimension: Option<(&'static str, String)>,
-}
-
-impl Dimension {
-    /// Cohort column for this dimension.
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::BrowserName => "context_browser_name",
-            Self::OsName => "context_os_name",
-            Self::DeviceType => "context_device_type",
-            Self::Continent => "ctx_continent",
-            Self::Country => "ctx_country",
-            Self::City => "ctx_city",
-            Self::PageOrigin => "ctx_page_origin",
-            Self::PagePath => "ctx_page_path",
-            Self::VideoId => "video_id",
-            Self::ViewerId => "viewer_id",
-            Self::UserId => "e_user_id",
-        }
-    }
-}
-
-impl BreakdownBy {
-    pub fn column(self) -> &'static str {
-        match self {
-            Self::BrowserName => Dimension::BrowserName.column(),
-            Self::OsName => Dimension::OsName.column(),
-            Self::DeviceType => Dimension::DeviceType.column(),
-            Self::Continent => Dimension::Continent.column(),
-            Self::Country => Dimension::Country.column(),
-            Self::City => Dimension::City.column(),
-            Self::PageOrigin => Dimension::PageOrigin.column(),
-            Self::PagePath => Dimension::PagePath.column(),
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -608,5 +825,90 @@ impl<T: Serialize + DeserializeOwned> Cursor<T> {
     }
     pub fn encode(&self) -> Result<String, ApiError> {
         Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(self).map_err(|_| ApiError::internal())?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BreakdownBy, Dimension, Query};
+    use serde_json::json;
+
+    fn query(fields: serde_json::Value) -> Query {
+        serde_json::from_value(fields).unwrap()
+    }
+
+    #[test]
+    fn custom_filters_have_named_keys_and_other_parameters_are_rejected() {
+        let filters = query(json!({"custom.plan": "premium", "custom.ab_test": "B"}))
+            .filters()
+            .unwrap();
+        assert!(filters.needs_views());
+        assert!(filters.rollup_scope().is_none());
+        let mut params = crate::clickhouse::Params::default();
+        assert_eq!(
+            filters.clickhouse(&mut params).matches("c_custom[").count(),
+            2
+        );
+        for invalid in [
+            json!({"countyr": "FR"}),
+            json!({"custom.": "x"}),
+            json!({"custom.Plan": "x"}),
+            json!({"custom.plan.tier": "x"}),
+        ] {
+            assert!(
+                serde_json::from_value::<Query>(invalid.clone()).is_err(),
+                "{invalid}"
+            );
+        }
+        for invalid in [
+            json!({"custom.plan": ""}),
+            json!({"custom.plan": "x".repeat(257)}),
+        ] {
+            assert!(query(invalid.clone()).filters().is_err(), "{invalid}");
+        }
+        let eleven: serde_json::Map<_, _> = (0..11)
+            .map(|n| (format!("custom.k{n}"), json!("x")))
+            .collect();
+        assert!(query(serde_json::Value::Object(eleven)).filters().is_err());
+        // Viewer filters still need events; user IDs read per-view rows.
+        let user = query(json!({"user_id": "u"})).filters().unwrap();
+        assert!(user.needs_views() && user.views_range().is_some());
+        let viewer = query(json!({"custom.plan": "x", "viewer_id": "v"}))
+            .filters()
+            .unwrap();
+        assert!(viewer.views_range().is_none());
+    }
+
+    #[test]
+    fn dimensions_round_trip_by_name() {
+        for name in [
+            "country",
+            "custom.plan",
+            "custom_keys",
+            "user_id",
+            "playback_rate",
+        ] {
+            let dimension: Dimension = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(serde_json::to_value(&dimension).unwrap(), json!(name));
+        }
+        for name in ["custom.plan", "page_path", "subtitle_language"] {
+            let group: BreakdownBy = serde_json::from_value(json!(name)).unwrap();
+            assert_eq!(serde_json::to_value(&group).unwrap(), json!(name));
+        }
+        for name in [
+            "custom_keys",
+            "user_id",
+            "video_id",
+            "custom.Plan",
+            "custom.",
+        ] {
+            assert!(
+                serde_json::from_value::<BreakdownBy>(json!(name)).is_err(),
+                "{name}"
+            );
+        }
+        let custom: Dimension = serde_json::from_value(json!("custom.plan")).unwrap();
+        assert!(!custom.in_rollups());
+        assert_eq!(custom.start_column(), "c_custom");
     }
 }

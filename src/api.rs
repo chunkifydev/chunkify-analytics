@@ -140,6 +140,8 @@ pub fn router(
         .route("/v1/summary", get(summary))
         .route("/v1/quality", get(quality))
         .route("/v1/renditions", get(renditions))
+        .route("/v1/subtitles", get(subtitles))
+        .route("/v1/playback-rates", get(playback_rates))
         .route("/v1/retention", get(retention))
         .route("/v1/engagement", get(engagement))
         .route("/v1/timeseries", get(timeseries))
@@ -222,6 +224,8 @@ async fn access(
                     | "/v1/timeseries"
                     | "/v1/quality"
                     | "/v1/renditions"
+                    | "/v1/subtitles"
+                    | "/v1/playback-rates"
                     | "/v1/retention"
                     | "/v1/engagement"
                     | "/v1/views"
@@ -623,6 +627,28 @@ async fn renditions(
     Ok(Json(
         app.store
             .renditions(resolved.project.id.clone(), query)
+            .await?,
+    ))
+}
+async fn subtitles(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .subtitles(resolved.project.id.clone(), query)
+            .await?,
+    ))
+}
+async fn playback_rates(
+    State(app): State<App>,
+    Extension(resolved): Extension<Resolved>,
+    axum::extract::Query(query): axum::extract::Query<crate::query::Query>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        app.store
+            .playback_rates(resolved.project.id.clone(), query)
             .await?,
     ))
 }

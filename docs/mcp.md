@@ -175,7 +175,7 @@ video cursors from earlier versions are invalid.
 
 `get_metrics` also accepts `group_by` with `browser_name`, `os_name`,
 `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`,
-`subtitle_language`, `playback_rate` or a custom key such as `custom.plan` for summary, quality and
+`subtitle_language`, `playback_rate`, `video_title` or a custom key such as `custom.plan` for summary, quality and
 engagement. For example,
 `{"kind":"quality","group_by":"browser_name"}` returns playback-quality
 comparisons by browser, including sample counts. Each group has a `value` and
@@ -264,7 +264,7 @@ For error trends, call `get_timeseries` with `kind=quality`, date bounds and an
 interval. `kind=engagement` returns watch-time and reached-end metrics per bucket.
 For actual filter values, use `list_dimension_values` with
 `{"dimension":"browser_name"}`. Supported dimensions are `browser_name`,
-`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `viewer_id`, `user_id`, `custom.<key>` and `custom_keys` (the custom keys in use).
+`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `video_title`, `viewer_id`, `user_id`, `custom.<key>` and `custom_keys` (the custom keys in use).
 Tools take custom dimension filters as one `custom` object, such as
 `{"kind":"summary","custom":{"plan":"premium"}}`; `export_data` accepts the same
 object inside `query`.

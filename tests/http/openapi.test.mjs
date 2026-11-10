@@ -1496,6 +1496,49 @@ test("custom dimensions filter, group, list keys and export by first start", asy
   assert.ok(csv[1].startsWith("premium,2,"));
 });
 
+test("video titles filter, group, list values and export by first start", async t => {
+  const server = await collector(t);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const ids = { a: randomUUID(), b: randomUUID(), c: randomUUID(), d: randomUUID() };
+  const start = (view, video_title, sequence = 1) => ({ ...structuredClone(example), event_id: randomUUID(),
+    view_id: ids[view], video_id: "title-video", sequence, video_title });
+  // The video is renamed after view a started; a's later start keeps it under the old title.
+  for (const event of [start("a", "Épisode 1"), start("a", "Episode 1 (remastered)", 2),
+    start("b", "Episode 1 (remastered)"), start("c", "Episode 1 (remastered)"), start("d", null)]) {
+    assertRequest("/v1/events", "post", event);
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  const views = async title => (await server.get(
+    `/v1/summary?video_id=title-video&video_title=${encodeURIComponent(title)}`)).views;
+  assert.equal(await views("Épisode 1"), 1);
+  assert.equal(await views("Episode 1 (remastered)"), 2);
+  assert.equal(await views("episode 1 (remastered)"), 0);
+  const grouped = await server.get("/v1/quality?video_id=title-video&group_by=video_title&limit=10");
+  assert.equal(grouped.group_by, "video_title");
+  assert.deepEqual(grouped.groups.map(group => [group.value, group.data.views]),
+    [["Episode 1 (remastered)", 2], [null, 1], ["Épisode 1", 1]]);
+  const titles = await assertResponse("/v1/dimensions/{dimension}", "get",
+    await fetch(`${server.url}/v1/dimensions/video_title?video_id=title-video`,
+      { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 200);
+  assert.deepEqual(titles.values,
+    [{ value: "Episode 1 (remastered)", views: 2 }, { value: null, views: 1 }, { value: "Épisode 1", views: 1 }]);
+  const listed = await server.get("/v1/videos?video_id=title-video");
+  assert.equal(listed.videos[0].video_title, "Episode 1 (remastered)");
+  await server.get("/v1/summary?video_title=", 400);
+  await server.get(`/v1/summary?video_title=${"x".repeat(257)}`, 400);
+  assert.equal((await fetch(`${server.url}/v1/views/${ids.a}?video_title=x`,
+    { headers: { Authorization: `Bearer ${server.keys.secret_key}` } })).status, 400);
+  const request = { resource: "engagement", query: { video_id: "title-video", group_by: "video_title",
+    video_title: "Episode 1 (remastered)" } };
+  assertRequest("/v1/exports", "post", request);
+  const link = await assertResponse("/v1/exports", "post", await fetch(`${server.url}/v1/exports`, { method: "POST",
+    headers: { Authorization: `Bearer ${server.keys.secret_key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(request) }), 201);
+  const csv = (await (await fetch(link.download_url)).text()).trim().split(/\r?\n/);
+  assert.equal(csv.length, 2);
+  assert.ok(csv[1].startsWith("Episode 1 (remastered),2,"), csv[1]);
+});
+
 test(`location reports use first starts, filter consistently and export all groups`, async t => {
   const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;

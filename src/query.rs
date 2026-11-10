@@ -55,6 +55,7 @@ pub struct Query {
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
     pub user_id: Option<String>,
+    pub video_title: Option<String>,
     pub view_id: Option<String>,
     pub event_name: Option<String>,
     pub browser_name: Option<String>,
@@ -186,26 +187,46 @@ pub enum Dimension {
 #[derive(Clone, PartialEq)]
 pub struct CustomKey(String);
 
-/// Stored dimensions: API name, cohort column, and whether reports can group by it.
-const DIMENSIONS: &[(&str, &str, bool)] = &[
-    ("browser_name", "context_browser_name", true),
-    ("os_name", "context_os_name", true),
-    ("device_type", "context_device_type", true),
-    ("continent", "ctx_continent", true),
-    ("country", "ctx_country", true),
-    ("city", "ctx_city", true),
-    ("page_origin", "ctx_page_origin", true),
-    ("page_path", "ctx_page_path", true),
-    ("subtitle_language", "e_subtitle_language", true),
-    ("playback_rate", "d_playback_rate", true),
-    ("video_id", "video_id", false),
-    ("viewer_id", "viewer_id", false),
-    ("user_id", "e_user_id", false),
+/// How reports can use a stored dimension.
+#[derive(Clone, Copy, PartialEq)]
+enum Grouping {
+    /// Group by it from hourly rollups: few distinct values.
+    Hourly,
+    /// Group by it from per-view rows: many distinct values.
+    PerView,
+    /// Filter and list values only.
+    FilterOnly,
+}
+
+/// Stored dimensions: API name, cohort column, and how reports group by it.
+const DIMENSIONS: &[(&str, &str, Grouping)] = &[
+    ("browser_name", "context_browser_name", Grouping::Hourly),
+    ("os_name", "context_os_name", Grouping::Hourly),
+    ("device_type", "context_device_type", Grouping::Hourly),
+    ("continent", "ctx_continent", Grouping::Hourly),
+    ("country", "ctx_country", Grouping::Hourly),
+    ("city", "ctx_city", Grouping::Hourly),
+    ("page_origin", "ctx_page_origin", Grouping::Hourly),
+    ("page_path", "ctx_page_path", Grouping::Hourly),
+    ("subtitle_language", "e_subtitle_language", Grouping::Hourly),
+    ("playback_rate", "d_playback_rate", Grouping::Hourly),
+    ("video_title", "e_video_title", Grouping::PerView),
+    ("video_id", "video_id", Grouping::FilterOnly),
+    ("viewer_id", "viewer_id", Grouping::FilterOnly),
+    ("user_id", "e_user_id", Grouping::FilterOnly),
 ];
+
+/// The cohort columns hourly rollups break down by.
+pub fn hourly_columns() -> impl Iterator<Item = &'static str> {
+    DIMENSIONS
+        .iter()
+        .filter(|(_, _, grouping)| *grouping == Grouping::Hourly)
+        .map(|(_, column, _)| *column)
+}
 
 impl Dimension {
     /// A dimension by API name; `breakdown` accepts only the ones reports
-    /// can group by (stored context and custom keys).
+    /// can group by (stored context, video titles and custom keys).
     fn parse(name: &str, breakdown: bool) -> Option<Self> {
         if let Some(key) = name.strip_prefix("custom.") {
             return event::custom_key(key).then(|| Self::Custom(CustomKey(key.to_owned())));
@@ -215,7 +236,9 @@ impl Dimension {
         }
         DIMENSIONS
             .iter()
-            .find(|(api, _, groupable)| *api == name && (*groupable || !breakdown))
+            .find(|(api, _, grouping)| {
+                *api == name && (*grouping != Grouping::FilterOnly || !breakdown)
+            })
             .map(|(api, column, _)| Self::Column(api, column))
     }
 
@@ -250,7 +273,7 @@ impl Dimension {
 
     /// Whether hourly rollups hold this dimension.
     pub fn in_rollups(&self) -> bool {
-        matches!(self, Self::Column(..))
+        matches!(self, Self::Column(_, column) if hourly_columns().any(|hourly| hourly == *column))
     }
 }
 
@@ -267,7 +290,7 @@ impl<'de> Deserialize<'de> for Dimension {
     }
 }
 
-/// A dimension reports can group by: stored context or a custom key.
+/// A dimension reports can group by: stored context, video title or a custom key.
 #[derive(Clone, PartialEq)]
 pub struct BreakdownBy(pub Dimension);
 
@@ -325,6 +348,7 @@ pub struct TimeseriesQuery {
     pub video_id: Option<String>,
     pub viewer_id: Option<String>,
     pub user_id: Option<String>,
+    pub video_title: Option<String>,
     pub view_id: Option<String>,
     pub browser_name: Option<String>,
     pub os_name: Option<String>,
@@ -365,6 +389,7 @@ impl TimeseriesQuery {
             video_id: self.video_id,
             viewer_id: self.viewer_id,
             user_id: self.user_id,
+            video_title: self.video_title,
             view_id: self.view_id,
             browser_name: self.browser_name,
             os_name: self.os_name,
@@ -409,6 +434,8 @@ pub struct Filters {
     viewer_id: Option<String>,
     #[serde(default)]
     user_id: Option<String>,
+    #[serde(default)]
+    video_title: Option<String>,
     #[serde(default)]
     view_id: Option<String>,
     event_name: Option<String>,
@@ -507,15 +534,19 @@ impl Query {
                 event::MAX_LANGUAGE_CHARS
             )));
         }
-        if self
-            .user_id
-            .as_ref()
-            .is_some_and(|value| !(1..=event::MAX_LABEL_CHARS).contains(&value.chars().count()))
-        {
-            return Err(ApiError::bad(format!(
-                "user_id must contain between 1 and {} characters",
-                event::MAX_LABEL_CHARS
-            )));
+        for (name, value) in [
+            ("user_id", &self.user_id),
+            ("video_title", &self.video_title),
+        ] {
+            if value
+                .as_ref()
+                .is_some_and(|value| !(1..=event::MAX_LABEL_CHARS).contains(&value.chars().count()))
+            {
+                return Err(ApiError::bad(format!(
+                    "{name} must contain between 1 and {} characters",
+                    event::MAX_LABEL_CHARS
+                )));
+            }
         }
         if self
             .view_id
@@ -554,6 +585,7 @@ impl Query {
             video_id: self.video_id.clone(),
             viewer_id: self.viewer_id.clone(),
             user_id: self.user_id.clone(),
+            video_title: self.video_title.clone(),
             view_id: self.view_id.clone(),
             event_name: self.event_name.clone(),
             browser_name: self.browser_name.clone(),
@@ -671,6 +703,7 @@ impl Filters {
             (&self.video_id, "video_id"),
             (&self.viewer_id, "viewer_id"),
             (&self.user_id, "e_user_id"),
+            (&self.video_title, "e_video_title"),
             (&self.view_id, "view_id"),
             (&self.event_name, "event_name"),
             (&self.browser_name, "context_browser_name"),
@@ -705,12 +738,11 @@ impl Filters {
 
     /// The filters hourly rollups can answer: a date range, a video, and at
     /// most one first-start context value. Viewer, view and event filters
-    /// read events; user and custom filters read per-view rows (see
+    /// read events; user, title and custom filters read per-view rows (see
     /// [`Filters::views_range`]).
     pub fn rollup_scope(&self) -> Option<RollupScope> {
         if self.viewer_id.is_some()
-            || self.user_id.is_some()
-            || !self.custom.is_empty()
+            || self.needs_views()
             || self.view_id.is_some()
             || self.event_name.is_some()
         {
@@ -745,10 +777,10 @@ impl Filters {
 
 impl Filters {
     /// Whether these filters use first-start values with many distinct
-    /// values, kept per view rather than in hourly rollups: `user_id` and
-    /// custom dimensions.
+    /// values, kept per view rather than in hourly rollups: `user_id`,
+    /// `video_title` and custom dimensions.
     pub fn needs_views(&self) -> bool {
-        self.user_id.is_some() || !self.custom.is_empty()
+        self.user_id.is_some() || self.video_title.is_some() || !self.custom.is_empty()
     }
 
     /// The date range of per-view rollup rows these filters can read, or
@@ -886,12 +918,18 @@ mod tests {
             "custom.plan",
             "custom_keys",
             "user_id",
+            "video_title",
             "playback_rate",
         ] {
             let dimension: Dimension = serde_json::from_value(json!(name)).unwrap();
             assert_eq!(serde_json::to_value(&dimension).unwrap(), json!(name));
         }
-        for name in ["custom.plan", "page_path", "subtitle_language"] {
+        for name in [
+            "custom.plan",
+            "page_path",
+            "subtitle_language",
+            "video_title",
+        ] {
             let group: BreakdownBy = serde_json::from_value(json!(name)).unwrap();
             assert_eq!(serde_json::to_value(&group).unwrap(), json!(name));
         }
@@ -910,5 +948,10 @@ mod tests {
         let custom: Dimension = serde_json::from_value(json!("custom.plan")).unwrap();
         assert!(!custom.in_rollups());
         assert_eq!(custom.start_column(), "c_custom");
+        let title: BreakdownBy = serde_json::from_value(json!("video_title")).unwrap();
+        assert!(!title.0.in_rollups());
+        assert_eq!(title.0.start_column(), "e_video_title");
+        let country: BreakdownBy = serde_json::from_value(json!("country")).unwrap();
+        assert!(country.0.in_rollups());
     }
 }

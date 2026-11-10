@@ -2070,8 +2070,9 @@ fn rollup_rows(base: i64) -> Vec<Value> {
         let start = hour + 60_000 * (index + 1);
         let video = if index % 3 == 0 { "video-b" } else { "video-a" };
         let viewer = format!("viewer-{}", index % 5);
-        // Some starts lack a title, so videos keep the latest one they have.
-        let title = (index % 4 != 1).then(|| format!("title-{index}"));
+        // Some starts lack a title, so videos keep the latest one they have;
+        // titles repeat so reports can group by them.
+        let title = (index % 4 != 1).then(|| format!("title-{}", index % 3));
         let context = json!({
             "e_video_title": title, "e_user_id": format!("user-{}", index % 3),
             "context_browser_name": browsers[(index % 3) as usize],
@@ -2179,6 +2180,8 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             json!({"custom.plan": "free", "browser_name": "Chrome", "video_id": "video-a"}),
             json!({"user_id": "user-1"}),
             json!({"user_id": "user-2", "custom.seats": "0"}),
+            json!({"video_title": "title-1"}),
+            json!({"video_title": "title-2", "browser_name": "Chrome"}),
         ] {
             let mut fields = range.clone();
             fields
@@ -2232,6 +2235,7 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             "playback_rate",
             "custom.plan",
             "custom.seats",
+            "video_title",
         ] {
             for kind in [
                 MetricKind::Summary,
@@ -2244,6 +2248,7 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                     "playback_rate" => [None, Some("1.25"), Some("3")],
                     "custom.plan" => [None, Some("pro"), Some("none")],
                     "custom.seats" => [None, Some("1"), Some("2")],
+                    "video_title" => [None, Some("title-0"), Some("missing")],
                     _ => [None, Some("Chrome"), Some("Edge")],
                 };
                 for value in values {
@@ -2261,6 +2266,10 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                         // Custom groups also combine with another per-view filter.
                         if value.is_some() && group.starts_with("custom.") {
                             page["user_id"] = json!("user-0");
+                        }
+                        // Title groups also combine with an hourly context filter.
+                        if value.is_some() && group == "video_title" {
+                            page["browser_name"] = json!("Chrome");
                         }
                         page["limit"] = json!(1);
                         if let Some(cursor) = cursor.as_str() {
@@ -2287,15 +2296,19 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             }
         }
     }
-    for (interval, kind) in [
-        ("hour", "summary"),
-        ("hour", "quality"),
-        ("day", "engagement"),
+    for (interval, kind, title) in [
+        ("hour", "summary", None),
+        ("hour", "quality", None),
+        ("day", "engagement", None),
+        ("hour", "summary", Some("title-1")),
     ] {
-        let series: crate::query::TimeseriesQuery = serde_json::from_value(json!({
+        let mut fields = json!({
                 "from": iso(base + 1_200_000), "to": iso(base + 5 * HOUR),
-                "interval": interval, "kind": kind}))
-        .unwrap();
+                "interval": interval, "kind": kind});
+        if let Some(title) = title {
+            fields["video_title"] = json!(title);
+        }
+        let series: crate::query::TimeseriesQuery = serde_json::from_value(fields).unwrap();
         all.push(ok(store.timeseries("default".into(), series).await));
     }
     Value::Array(all)
@@ -2743,6 +2756,93 @@ async fn custom_dimensions_use_the_first_start_and_list_their_keys() {
     );
 }
 
+#[tokio::test]
+async fn video_titles_use_the_first_start_title_of_each_view() {
+    let fixture = Fixture::new(&["default"]).await;
+    let store = &fixture.store;
+    let start = |id: &str, view: &str, sequence: i64, title: Option<&str>| {
+        with(
+            event(
+                id,
+                "default",
+                view,
+                "video",
+                None,
+                "view_started",
+                sequence,
+                1000 + sequence,
+            ),
+            json!({"e_video_title": title}),
+        )
+    };
+    fixture
+        .insert(vec![
+            start("a", "a", 1, Some("Old title")),
+            // A later start of the same view keeps the view under its first title.
+            start("a-again", "a", 2, Some("New title")),
+            // The video was renamed: later views count under the new title.
+            start("b", "b", 3, Some("New title")),
+            start("c", "c", 4, Some("New title")),
+            start("d", "d", 5, None),
+        ])
+        .await;
+    let views = |fields: Value| async move {
+        let query: Query = serde_json::from_value(fields).unwrap();
+        ok(store.summary("default".into(), query, false).await)["views"].clone()
+    };
+    assert_eq!(views(json!({"video_title": "Old title"})).await, 1);
+    assert_eq!(views(json!({"video_title": "New title"})).await, 2);
+    assert_eq!(views(json!({"video_title": "new title"})).await, 0);
+    let series = ok(store
+        .timeseries(
+            "default".into(),
+            serde_json::from_value(json!({"video_title": "New title",
+                "from": "1970-01-01T00:00:00Z", "to": "1970-01-02T00:00:00Z", "interval": "day"}))
+            .unwrap(),
+        )
+        .await);
+    assert_eq!(series["buckets"][0]["views"], 2);
+    let grouped = ok(store
+        .summary(
+            "default".into(),
+            Query {
+                group_by: Some(breakdown("video_title")),
+                limit: Some(10),
+                ..Query::default()
+            },
+            false,
+        )
+        .await);
+    assert_eq!(grouped["group_by"], "video_title");
+    let groups: Vec<_> = grouped["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["value"].clone(), g["data"]["views"].clone()))
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            (json!("New title"), json!(2)),
+            (Value::Null, json!(1)),
+            (json!("Old title"), json!(1))
+        ]
+    );
+    let titles = ok(store
+        .dimension("default".into(), dimension("video_title"), Query::default())
+        .await);
+    assert_eq!(titles["dimension"], "video_title");
+    assert_eq!(
+        titles["values"],
+        json!([{"value": "New title", "views": 2}, {"value": null, "views": 1}, {"value": "Old title", "views": 1}])
+    );
+    // The video list still shows the latest title.
+    let videos = ok(store
+        .summary("default".into(), Query::default(), true)
+        .await);
+    assert_eq!(videos["videos"][0]["video_title"], "New title");
+}
+
 #[test]
 fn rollup_dimensions_are_carried_first_start_columns() {
     use super::reports::{START_COLUMNS, START_CONTEXT};
@@ -2750,5 +2850,10 @@ fn rollup_dimensions_are_carried_first_start_columns() {
         START_CONTEXT
             .iter()
             .all(|column| START_COLUMNS.contains(column))
+    );
+    // Breakdowns read hourly rollups exactly for the columns they hold.
+    assert_eq!(
+        crate::query::hourly_columns().collect::<Vec<_>>(),
+        START_CONTEXT
     );
 }

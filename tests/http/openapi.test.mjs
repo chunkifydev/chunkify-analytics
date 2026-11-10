@@ -1500,11 +1500,12 @@ test("video titles filter, group, list values and export by first start", async 
   const server = await collector(t);
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
   const ids = { a: randomUUID(), b: randomUUID(), c: randomUUID(), d: randomUUID() };
-  const start = (view, video_title, sequence = 1) => ({ ...structuredClone(example), event_id: randomUUID(),
-    view_id: ids[view], video_id: "title-video", sequence, video_title });
+  const start = (view, video_title, sequence = 1, user_id = null) => ({ ...structuredClone(example),
+    event_id: randomUUID(), view_id: ids[view], video_id: "title-video", sequence, video_title, user_id });
   // The video is renamed after view a started; a's later start keeps it under the old title.
-  for (const event of [start("a", "Épisode 1"), start("a", "Episode 1 (remastered)", 2),
-    start("b", "Episode 1 (remastered)"), start("c", "Episode 1 (remastered)"), start("d", null)]) {
+  for (const event of [start("a", "Épisode 1", 1, "u1"), start("a", "Episode 1 (remastered)", 2, "u2"),
+    start("b", "Episode 1 (remastered)", 1, "u1"), start("c", "Episode 1 (remastered)", 1, "u2"),
+    start("d", null)]) {
     assertRequest("/v1/events", "post", event);
     await server.post("/v1/events", JSON.stringify(event), 201);
   }
@@ -1524,6 +1525,8 @@ test("video titles filter, group, list values and export by first start", async 
     [{ value: "Episode 1 (remastered)", views: 2 }, { value: null, views: 1 }, { value: "Épisode 1", views: 1 }]);
   const listed = await server.get("/v1/videos?video_id=title-video");
   assert.equal(listed.videos[0].video_title, "Episode 1 (remastered)");
+  const users = await server.get("/v1/summary?video_id=title-video&group_by=user_id&limit=10");
+  assert.deepEqual(users.groups.map(group => [group.value, group.data.views]), [["u1", 2], [null, 1], ["u2", 1]]);
   await server.get("/v1/summary?video_title=", 400);
   await server.get(`/v1/summary?video_title=${"x".repeat(257)}`, 400);
   assert.equal((await fetch(`${server.url}/v1/views/${ids.a}?video_title=x`,

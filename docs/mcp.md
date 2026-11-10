@@ -175,7 +175,7 @@ video cursors from earlier versions are invalid.
 
 `get_metrics` also accepts `group_by` with `browser_name`, `os_name`,
 `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`,
-`subtitle_language`, `playback_rate`, `video_title` or a custom key such as `custom.plan` for summary, quality and
+`subtitle_language`, `playback_rate`, `video_title`, `user_id` or a custom key such as `custom.plan` for summary, quality and
 engagement. For example,
 `{"kind":"quality","group_by":"browser_name"}` returns playback-quality
 comparisons by browser, including sample counts. Each group has a `value` and

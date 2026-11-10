@@ -291,11 +291,11 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
 
-### Breakdowns by browser, OS, device, location, subtitles, rate and title
+### Breakdowns by browser, OS, device, location, subtitles, rate, title and user
 
 Add `group_by` with `browser_name`, `os_name`, `device_type`, `continent`,
 `country`, `city`, `page_origin`, `page_path`, `subtitle_language`,
-`playback_rate`, `video_title` or a custom key such as `custom.plan` to
+`playback_rate`, `video_title`, `user_id` or a custom key such as `custom.plan` to
 `GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
 `get_metrics` accepts the same argument, with `kind` selecting `summary`,
 `quality` or `engagement`. Without `group_by`, each route returns its

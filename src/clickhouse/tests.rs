@@ -2236,6 +2236,7 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             "custom.plan",
             "custom.seats",
             "video_title",
+            "user_id",
         ] {
             for kind in [
                 MetricKind::Summary,
@@ -2249,6 +2250,7 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                     "custom.plan" => [None, Some("pro"), Some("none")],
                     "custom.seats" => [None, Some("1"), Some("2")],
                     "video_title" => [None, Some("title-0"), Some("missing")],
+                    "user_id" => [None, Some("user-2"), Some("missing")],
                     _ => [None, Some("Chrome"), Some("Edge")],
                 };
                 for value in values {
@@ -2267,8 +2269,8 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                         if value.is_some() && group.starts_with("custom.") {
                             page["user_id"] = json!("user-0");
                         }
-                        // Title groups also combine with an hourly context filter.
-                        if value.is_some() && group == "video_title" {
+                        // Title and user groups also combine with an hourly context filter.
+                        if value.is_some() && ["video_title", "user_id"].contains(&group) {
                             page["browser_name"] = json!("Chrome");
                         }
                         page["limit"] = json!(1);

@@ -213,7 +213,7 @@ const DIMENSIONS: &[(&str, &str, Grouping)] = &[
     ("video_title", "e_video_title", Grouping::PerView),
     ("video_id", "video_id", Grouping::FilterOnly),
     ("viewer_id", "viewer_id", Grouping::FilterOnly),
-    ("user_id", "e_user_id", Grouping::FilterOnly),
+    ("user_id", "e_user_id", Grouping::PerView),
 ];
 
 /// The cohort columns hourly rollups break down by.
@@ -226,7 +226,7 @@ pub fn hourly_columns() -> impl Iterator<Item = &'static str> {
 
 impl Dimension {
     /// A dimension by API name; `breakdown` accepts only the ones reports
-    /// can group by (stored context, video titles and custom keys).
+    /// can group by (stored context, user IDs, video titles and custom keys).
     fn parse(name: &str, breakdown: bool) -> Option<Self> {
         if let Some(key) = name.strip_prefix("custom.") {
             return event::custom_key(key).then(|| Self::Custom(CustomKey(key.to_owned())));
@@ -290,7 +290,7 @@ impl<'de> Deserialize<'de> for Dimension {
     }
 }
 
-/// A dimension reports can group by: stored context, video title or a custom key.
+/// A dimension reports can group by: stored context, user ID, video title or a custom key.
 #[derive(Clone, PartialEq)]
 pub struct BreakdownBy(pub Dimension);
 
@@ -929,13 +929,14 @@ mod tests {
             "page_path",
             "subtitle_language",
             "video_title",
+            "user_id",
         ] {
             let group: BreakdownBy = serde_json::from_value(json!(name)).unwrap();
             assert_eq!(serde_json::to_value(&group).unwrap(), json!(name));
         }
         for name in [
             "custom_keys",
-            "user_id",
+            "viewer_id",
             "video_id",
             "custom.Plan",
             "custom.",

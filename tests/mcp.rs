@@ -1607,7 +1607,8 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                     "page_path",
                     "subtitle_language",
                     "playback_rate",
-                    "video_title"
+                    "video_title",
+                    "user_id"
                 ])
             );
             assert_eq!(schema["properties"]["limit"]["maximum"], 100);

@@ -105,6 +105,14 @@ fn with(mut row: Value, fields: Value) -> Value {
     row
 }
 
+fn breakdown(name: &str) -> BreakdownBy {
+    serde_json::from_value(json!(name)).unwrap()
+}
+
+fn dimension(name: &str) -> Dimension {
+    serde_json::from_value(json!(name)).unwrap()
+}
+
 fn ok(result: Result<Value, ApiError>) -> Value {
     result.unwrap_or_else(|e| panic!("{}", e.message))
 }
@@ -711,15 +719,15 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
         json!(["B", 2]),
         json!(["C", 1]),
     ];
-    for (group_by, dimension) in [
-        (BreakdownBy::BrowserName, Dimension::BrowserName),
-        (BreakdownBy::OsName, Dimension::OsName),
-        (BreakdownBy::DeviceType, Dimension::DeviceType),
-        (BreakdownBy::Continent, Dimension::Continent),
-        (BreakdownBy::Country, Dimension::Country),
-        (BreakdownBy::City, Dimension::City),
-        (BreakdownBy::PageOrigin, Dimension::PageOrigin),
-        (BreakdownBy::PagePath, Dimension::PagePath),
+    for (group_by, dimension_name) in [
+        ("browser_name", "browser_name"),
+        ("os_name", "os_name"),
+        ("device_type", "device_type"),
+        ("continent", "continent"),
+        ("country", "country"),
+        ("city", "city"),
+        ("page_origin", "page_origin"),
+        ("page_path", "page_path"),
     ] {
         for metrics in [
             MetricKind::Summary,
@@ -730,7 +738,7 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
             let mut actual = Vec::new();
             loop {
                 let query = Query {
-                    group_by: Some(group_by),
+                    group_by: Some(breakdown(group_by)),
                     limit: Some(1),
                     cursor,
                     ..Query::default()
@@ -760,7 +768,7 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
             let page = ok(store
                 .dimension(
                     "default".into(),
-                    dimension,
+                    dimension(dimension_name),
                     Query {
                         limit: Some(1),
                         cursor,
@@ -855,14 +863,14 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
         .summary(
             "default".into(),
             Query {
-                group_by: Some(BreakdownBy::OsName),
+                group_by: Some(breakdown("os_name")),
                 ..first_page()
             },
             false,
         )
         .await);
     let dimensions = ok(store
-        .dimension("default".into(), Dimension::OsName, first_page())
+        .dimension("default".into(), dimension("os_name"), first_page())
         .await);
     let error_page = ok(store.errors("default".into(), first_page()).await);
     let mut late = Vec::new();
@@ -895,7 +903,7 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
         .summary(
             "default".into(),
             Query {
-                group_by: Some(BreakdownBy::OsName),
+                group_by: Some(breakdown("os_name")),
                 ..rest(&first["next_cursor"])
             },
             false,
@@ -913,7 +921,7 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
     let remaining = ok(store
         .dimension(
             "default".into(),
-            Dimension::OsName,
+            dimension("os_name"),
             rest(&dimensions["next_cursor"]),
         )
         .await);
@@ -942,7 +950,7 @@ async fn counted_groups_rank_full_cohorts_and_preserve_pagination_snapshots() {
         .summary(
             "default".into(),
             Query {
-                group_by: Some(BreakdownBy::OsName),
+                group_by: Some(breakdown("os_name")),
                 ..Query::default()
             },
             false,
@@ -1449,6 +1457,203 @@ async fn renditions_select_one_measurement_per_view_and_weight_known_bitrates() 
 }
 
 #[tokio::test]
+async fn subtitle_and_rate_reports_split_watch_time_and_filters_use_the_start_state() {
+    let fixture = Fixture::new(&["default", "other"]).await;
+    let store = &fixture.store;
+    let times = |subtitles: Value, rates: Value| {
+        json!({"subtitle_playing_time": subtitles, "playback_rate_playing_time": rates}).to_string()
+    };
+    let lang = |language: Value, time: i64| json!({"language": language, "playing_time_ms": time});
+    let rate = |rate: f64, time: i64| json!({"rate": rate, "playing_time_ms": time});
+    let final_a = times(
+        json!([lang(json!("fr"), 6000), lang(Value::Null, 4000)]),
+        json!([rate(1.0, 7000), rate(1.5, 3000)]),
+    );
+    let stale = times(json!([lang(json!("de"), 99000)]), json!([rate(3.0, 99000)]));
+    let latest_b = times(json!([lang(Value::Null, 5000)]), json!([rate(2.0, 5000)]));
+    let row = |id: &str, project: &str, view: &str, kind: &str, sequence: i64, fields: Value| {
+        let time = if kind == "view_started" { 1000 } else { 2000 };
+        with(
+            event(id, project, view, "video", None, kind, sequence, time),
+            fields,
+        )
+    };
+    fixture
+        .insert(vec![
+            row(
+                "a-start",
+                "default",
+                "a",
+                "view_started",
+                1,
+                json!({"e_subtitle_language": "fr", "e_playback_rate": 1.0}),
+            ),
+            // A final event wins over a later snapshot.
+            row(
+                "a-snapshot",
+                "default",
+                "a",
+                "view_snapshot",
+                9,
+                json!({"event_remainder": stale}),
+            ),
+            row(
+                "a-end",
+                "default",
+                "a",
+                "view_ended",
+                2,
+                json!({"event_remainder": final_a}),
+            ),
+            // Storage keeps an integral float rate in the event JSON.
+            row(
+                "b-start",
+                "default",
+                "b",
+                "view_started",
+                1,
+                json!({"event_remainder": json!({"playback_rate": 2.0}).to_string()}),
+            ),
+            row(
+                "b-snapshot",
+                "default",
+                "b",
+                "view_snapshot",
+                2,
+                json!({"event_remainder": latest_b}),
+            ),
+            // An older SDK sends no state at all.
+            row(
+                "c-start",
+                "default",
+                "c",
+                "view_started",
+                1,
+                json!({"e_subtitle_language": "fr", "e_playback_rate": 1.5}),
+            ),
+            row("c-snapshot", "default", "c", "view_snapshot", 2, json!({})),
+            row(
+                "x-start",
+                "other",
+                "x",
+                "view_started",
+                1,
+                json!({"e_subtitle_language": "fr"}),
+            ),
+            row(
+                "x-end",
+                "other",
+                "x",
+                "view_ended",
+                2,
+                json!({"event_remainder": final_a}),
+            ),
+        ])
+        .await;
+
+    let subtitles = ok(store.subtitles("default".into(), Query::default()).await);
+    assert_eq!(
+        subtitles,
+        json!({"views": 3, "sample_views": 2, "total_playing_time_ms": 15000.0, "total_languages": 2,
+            "languages": [
+                {"language": null, "views": 2, "playing_time_ms": 9000.0, "playing_time_ratio": 0.6},
+                {"language": "fr", "views": 1, "playing_time_ms": 6000.0, "playing_time_ratio": 0.4}]})
+    );
+    let rates = ok(store
+        .playback_rates(
+            "default".into(),
+            Query {
+                limit: Some(2),
+                ..Query::default()
+            },
+        )
+        .await);
+    assert_eq!(
+        rates,
+        json!({"views": 3, "sample_views": 2, "total_playing_time_ms": 15000.0, "total_rates": 3,
+            "rates": [
+                {"rate": 1.0, "views": 1, "playing_time_ms": 7000.0, "playing_time_ratio": 7000.0 / 15000.0},
+                {"rate": 2.0, "views": 1, "playing_time_ms": 5000.0, "playing_time_ratio": 5000.0 / 15000.0}]})
+    );
+
+    // Filters and breakdowns use the state on each view's first start.
+    let views = |fields: Value| async move {
+        let query: Query = serde_json::from_value(fields).unwrap();
+        ok(store.summary("default".into(), query, false).await)["views"].clone()
+    };
+    assert_eq!(views(json!({"subtitle_language": "fr"})).await, 2);
+    assert_eq!(views(json!({"subtitle_language": "de"})).await, 0);
+    assert_eq!(views(json!({"playback_rate": "2.0"})).await, 1);
+    assert_eq!(
+        views(json!({"playback_rate": "1.5", "subtitle_language": "fr"})).await,
+        1
+    );
+    let rated = ok(store
+        .subtitles(
+            "default".into(),
+            Query {
+                playback_rate: Some("1".into()),
+                ..Query::default()
+            },
+        )
+        .await);
+    assert_eq!(rated["views"], 1);
+    assert_eq!(rated["languages"][0]["language"], "fr");
+    let grouped = ok(store
+        .summary(
+            "default".into(),
+            Query {
+                group_by: Some(breakdown("subtitle_language")),
+                limit: Some(10),
+                ..Query::default()
+            },
+            false,
+        )
+        .await);
+    let groups: Vec<_> = grouped["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["value"].clone(), g["data"]["views"].clone()))
+        .collect();
+    assert_eq!(groups, [(json!("fr"), json!(2)), (Value::Null, json!(1))]);
+    let values = ok(store
+        .dimension(
+            "default".into(),
+            dimension("playback_rate"),
+            Query::default(),
+        )
+        .await);
+    assert_eq!(
+        values["values"],
+        json!([{"value": "1", "views": 1}, {"value": "1.5", "views": 1}, {"value": "2", "views": 1}])
+    );
+    // Rates are checked and normalized when the query is read.
+    for value in [
+        "0", "0.001", "16.5", "1.234", "fast", "1e0", "+2", " 2", "2.", ".5",
+    ] {
+        assert!(
+            serde_json::from_value::<Query>(json!({ "playback_rate": value })).is_err(),
+            "{value}"
+        );
+    }
+    let normalized: Query = serde_json::from_value(json!({"playback_rate": "2.00"})).unwrap();
+    assert_eq!(normalized.playback_rate.as_deref(), Some("2"));
+    for value in ["", "  "] {
+        let query: Query = serde_json::from_value(json!({ "subtitle_language": value })).unwrap();
+        assert!(
+            store.subtitles("default".into(), query).await.is_err(),
+            "{value:?}"
+        );
+    }
+    let long = Query {
+        subtitle_language: Some("x".repeat(36)),
+        ..Query::default()
+    };
+    assert!(store.summary("default".into(), long, false).await.is_err());
+}
+
+#[tokio::test]
 async fn retention_uses_one_measurement_per_identity_and_preserves_unwatched_gaps() {
     let fixture = Fixture::new(&["default", "foreign"]).await;
     let store = &fixture.store;
@@ -1857,6 +2062,8 @@ fn rollup_rows(base: i64) -> Vec<Value> {
     let mut rows = Vec::new();
     let browsers = ["Chrome", "Firefox", "Safari"];
     let countries = ["FR", "US"];
+    let subtitles = [None, Some("fr"), Some("en"), Some("fr")];
+    let rates = [1.0, 1.0, 1.5, 2.0, 1.25];
     for index in 0..24i64 {
         let view = format!("v{index}");
         let hour = base + (index % 4) * HOUR;
@@ -1869,6 +2076,13 @@ fn rollup_rows(base: i64) -> Vec<Value> {
             "e_video_title": title, "e_user_id": format!("user-{}", index % 3),
             "context_browser_name": browsers[(index % 3) as usize],
             "context_os_name": "Linux", "context_device_type": "desktop",
+            "e_subtitle_language": subtitles[(index % 4) as usize],
+            "event_remainder": json!({"custom": match index % 3 {
+                0 => json!({"plan": "pro", "seats": index % 2}),
+                1 => json!({"plan": "free"}),
+                _ => json!({}),
+            }}).to_string(),
+            "e_playback_rate": rates[(index % 5) as usize],
             "context_remainder": json!({"continent": "EU", "country": countries[(index % 2) as usize],
                 "city": format!("city-{}", index % 4), "page_origin": "https://a.example",
                 "page_path": "/watch"}).to_string(),
@@ -1958,6 +2172,13 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             json!({"browser_name": "Chrome"}),
             json!({"video_id": "video-a"}),
             json!({"country": "FR", "video_id": "video-b"}),
+            json!({"subtitle_language": "fr"}),
+            json!({"playback_rate": "1.5", "video_id": "video-a"}),
+            json!({"playback_rate": "2", "browser_name": "Chrome"}),
+            json!({"custom.plan": "pro"}),
+            json!({"custom.plan": "free", "browser_name": "Chrome", "video_id": "video-a"}),
+            json!({"user_id": "user-1"}),
+            json!({"user_id": "user-2", "custom.seats": "0"}),
         ] {
             let mut fields = range.clone();
             fields
@@ -2004,16 +2225,26 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                 }
             }
         }
-        for group in ["browser_name", "country"] {
+        for group in [
+            "browser_name",
+            "country",
+            "subtitle_language",
+            "playback_rate",
+            "custom.plan",
+            "custom.seats",
+        ] {
             for kind in [
                 MetricKind::Summary,
                 MetricKind::Engagement,
                 MetricKind::Quality,
             ] {
-                let values = if group == "country" {
-                    [None, Some("FR"), Some("US")]
-                } else {
-                    [None, Some("Chrome"), Some("Edge")]
+                let values = match group {
+                    "country" => [None, Some("FR"), Some("US")],
+                    "subtitle_language" => [None, Some("fr"), Some("es")],
+                    "playback_rate" => [None, Some("1.25"), Some("3")],
+                    "custom.plan" => [None, Some("pro"), Some("none")],
+                    "custom.seats" => [None, Some("1"), Some("2")],
+                    _ => [None, Some("Chrome"), Some("Edge")],
                 };
                 for value in values {
                     let mut filter = json!({});
@@ -2027,6 +2258,10 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                             .unwrap()
                             .extend(filter.as_object().unwrap().clone());
                         page["group_by"] = json!(group);
+                        // Custom groups also combine with another per-view filter.
+                        if value.is_some() && group.starts_with("custom.") {
+                            page["user_id"] = json!("user-0");
+                        }
                         page["limit"] = json!(1);
                         if let Some(cursor) = cursor.as_str() {
                             page["cursor"] = json!(cursor);
@@ -2367,5 +2602,153 @@ fn lag_limits_leave_room_for_slow_refreshes() {
     assert!(
         load("clickhouse.rollup_interval_seconds = 20\nclickhouse.rollup_max_lag_seconds = 40\n")
             .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn databases_with_another_table_layout_fail_at_startup() {
+    let fixture = Fixture::new(&["default"]).await;
+    // A restart on the same layout keeps working.
+    assert!(
+        Store::open(&fixture.config, fixture.registry.clone())
+            .await
+            .is_ok()
+    );
+    let reopen = || Store::open(&fixture.config, fixture.registry.clone());
+    fixture.sql("TRUNCATE TABLE schema_version").await;
+    fixture.sql("INSERT INTO schema_version VALUES (1)").await;
+    let error = reopen().await.err().expect("outdated layout");
+    assert_eq!(error.to_string(), super::OUTDATED_SCHEMA);
+    // A database from before schema versions, like 0.15.0, fails the same way.
+    fixture.sql("DROP TABLE schema_version").await;
+    let error = reopen().await.err().expect("unversioned layout");
+    assert_eq!(error.to_string(), super::OUTDATED_SCHEMA);
+    // Another release's version fails even before its tables exist.
+    fixture.sql("DROP TABLE view_states_insert").await;
+    fixture.sql("DROP TABLE events").await;
+    fixture
+        .sql("CREATE TABLE schema_version (version UInt64) ENGINE = MergeTree ORDER BY version")
+        .await;
+    fixture.sql("INSERT INTO schema_version VALUES (3)").await;
+    let error = reopen().await.err().expect("newer layout");
+    assert_eq!(error.to_string(), super::OUTDATED_SCHEMA);
+}
+
+#[tokio::test]
+async fn custom_dimensions_use_the_first_start_and_list_their_keys() {
+    let fixture = Fixture::new(&["default", "other"]).await;
+    let store = &fixture.store;
+    let start = |id: &str, project: &str, view: &str, sequence: i64, custom: Value| {
+        with(
+            event(
+                id,
+                project,
+                view,
+                "video",
+                None,
+                "view_started",
+                sequence,
+                1000 + sequence,
+            ),
+            json!({"event_remainder": json!({"custom": custom}).to_string()}),
+        )
+    };
+    fixture
+        .insert(vec![
+            start(
+                "a",
+                "default",
+                "a",
+                1,
+                json!({"plan": "premium", "seats": 5, "trial": false}),
+            ),
+            // A later start of the same view does not change its values.
+            start("a-again", "default", "a", 2, json!({"plan": "free"})),
+            start("b", "default", "b", 1, json!({"plan": "premium"})),
+            start(
+                "c",
+                "default",
+                "c",
+                1,
+                json!({"plan": "free", "seats": 5.5}),
+            ),
+            start("d", "default", "d", 1, json!({})),
+            start(
+                "x",
+                "other",
+                "x",
+                1,
+                json!({"plan": "premium", "region": "eu"}),
+            ),
+        ])
+        .await;
+    let views = |fields: Value| async move {
+        let query: Query = serde_json::from_value(fields).unwrap();
+        ok(store.summary("default".into(), query, false).await)["views"].clone()
+    };
+    assert_eq!(views(json!({"custom.plan": "premium"})).await, 2);
+    assert_eq!(views(json!({"custom.plan": "free"})).await, 1);
+    assert_eq!(views(json!({"custom.seats": "5"})).await, 1);
+    assert_eq!(views(json!({"custom.seats": "5.5"})).await, 1);
+    assert_eq!(views(json!({"custom.trial": "false"})).await, 1);
+    assert_eq!(views(json!({"custom.plan": "Premium"})).await, 0);
+    assert_eq!(
+        views(json!({"custom.plan": "premium", "custom.seats": "5"})).await,
+        1
+    );
+    let grouped = ok(store
+        .summary(
+            "default".into(),
+            Query {
+                group_by: Some(breakdown("custom.plan")),
+                limit: Some(10),
+                ..Query::default()
+            },
+            false,
+        )
+        .await);
+    assert_eq!(grouped["group_by"], "custom.plan");
+    let groups: Vec<_> = grouped["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["value"].clone(), g["data"]["views"].clone()))
+        .collect();
+    assert_eq!(
+        groups,
+        [
+            (json!("premium"), json!(2)),
+            (Value::Null, json!(1)),
+            (json!("free"), json!(1))
+        ]
+    );
+    let keys = ok(store
+        .dimension("default".into(), dimension("custom_keys"), Query::default())
+        .await);
+    assert_eq!(keys["dimension"], "custom_keys");
+    assert_eq!(
+        keys["values"],
+        json!([{"value": "plan", "views": 3}, {"value": "seats", "views": 2}, {"value": "trial", "views": 1}])
+    );
+    let seats = ok(store
+        .dimension(
+            "default".into(),
+            dimension("custom.seats"),
+            Query::default(),
+        )
+        .await);
+    assert_eq!(
+        seats["values"],
+        json!([{"value": null, "views": 2}, {"value": "5", "views": 1}, {"value": "5.5", "views": 1}])
+    );
+}
+
+#[test]
+fn rollup_dimensions_are_carried_first_start_columns() {
+    use super::reports::{START_COLUMNS, START_CONTEXT};
+    assert!(
+        START_CONTEXT
+            .iter()
+            .all(|column| START_COLUMNS.contains(column))
     );
 }

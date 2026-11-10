@@ -27,6 +27,8 @@ pub(super) enum Cohort {
     Engagement,
     Complete,
     Renditions,
+    Subtitles,
+    PlaybackRates,
     Retention,
     /// Every measurement the rollups store, plus each view's start hours and
     /// receipt range across all of its identities.
@@ -66,6 +68,11 @@ fn measurement(cohort: Cohort) -> Vec<(&'static str, String)> {
         Cohort::Renditions => vec![(
             "rendition_playing_time",
             json_array("rendition_playing_time"),
+        )],
+        Cohort::Subtitles => vec![("subtitle_playing_time", json_array("subtitle_playing_time"))],
+        Cohort::PlaybackRates => vec![(
+            "playback_rate_playing_time",
+            json_array("playback_rate_playing_time"),
         )],
         Cohort::Quality | Cohort::Complete => vec![
             ("startup_time_ms", stored_number("startup_time_ms")),
@@ -194,6 +201,30 @@ fn json_array(field: &str) -> String {
     )
 }
 
+/// Each view's selected cumulative array `m_{field}` expanded to one row per
+/// object entry, with `columns` computed from `entry`. Only the final event,
+/// or latest snapshot, contributes, so time is never counted twice.
+fn expanded_entries(field: &str, columns: &str) -> String {
+    format!(
+        "SELECT view_id, {columns}
+        FROM view_metrics ARRAY JOIN JSONExtractArrayRaw(ifNull(m_{field}, '[]')) AS entry
+        WHERE JSONType(entry) = 'Object'"
+    )
+}
+
+/// Ranked reports over cumulative arrays have no pages, groups or sorting.
+fn reject_ranking_parameters(query: &Query, message: &'static str) -> Result<(), ApiError> {
+    if query.event_name.is_some()
+        || query.group_by.is_some()
+        || query.sort_by.is_some()
+        || query.order.is_some()
+        || query.cursor.is_some()
+    {
+        return Err(ApiError::bad(message));
+    }
+    Ok(())
+}
+
 fn json_number(source: &str, field: &str) -> String {
     format!(
         "if(JSONType({source}, '{field}') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat({source}, '{field}'), NULL)"
@@ -229,7 +260,8 @@ pub(super) const QUALITY_SAMPLES: &str = ", quality_samples AS (
 )";
 
 /// Values recorded on a view's first start, available to filters and callers:
-/// the context, then the integrator's user ID and video title.
+/// the context, the subtitle language and playback rate, then the
+/// integrator's user ID, video title and custom dimensions.
 pub(super) const START_COLUMNS: &[&str] = &[
     "context_browser_name",
     "context_os_name",
@@ -239,11 +271,25 @@ pub(super) const START_COLUMNS: &[&str] = &[
     "ctx_city",
     "ctx_page_origin",
     "ctx_page_path",
+    "e_subtitle_language",
+    "d_playback_rate",
     "e_user_id",
     "e_video_title",
+    "c_custom",
 ];
-/// First-start context, which rollups break down by.
-pub(super) const START_CONTEXT: &[&str] = START_COLUMNS.split_at(8).0;
+/// First-start values with few distinct values, which rollups break down by.
+pub(super) const START_CONTEXT: &[&str] = &[
+    "context_browser_name",
+    "context_os_name",
+    "context_device_type",
+    "ctx_continent",
+    "ctx_country",
+    "ctx_city",
+    "ctx_page_origin",
+    "ctx_page_path",
+    "e_subtitle_language",
+    "d_playback_rate",
+];
 const VIEW_CONTEXT: &[&str] = &[
     "context_browser_name",
     "context_os_name",
@@ -679,6 +725,13 @@ impl Store {
                 "sort_by and group_by are not supported by events",
             ));
         }
+        // Custom values exist only on view starts; filtering events by them
+        // would return starts alone, so event lists reject them.
+        if !query.custom.is_empty() {
+            return Err(ApiError::bad(
+                "Custom filters select views; use a view report instead of events",
+            ));
+        }
         let order = query.order.unwrap_or_default();
         let kind = match order {
             SortOrder::Asc => "events",
@@ -764,6 +817,7 @@ impl Store {
     ) -> Result<Value, ApiError> {
         let group_by = query
             .group_by
+            .clone()
             .ok_or_else(|| ApiError::bad("group_by is required"))?;
         if query.event_name.is_some() || query.sort_by.is_some() || query.order.is_some() {
             return Err(ApiError::bad("Unsupported breakdown query parameter"));
@@ -771,10 +825,11 @@ impl Store {
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
+        let dimension = &group_by.0;
         // Cursor kinds match local storage, so cursors keep the same format.
         let kind = format!(
             "breakdown_{}_{}_views_desc",
-            group_by.column(),
+            dimension.name(),
             metrics.name()
         );
         let cursor = query
@@ -785,12 +840,14 @@ impl Store {
         let work = async {
             let cutoff = self.cutoff(&project)?;
             let mut params = Params::default();
-            let column = group_by.column();
+            // Groups are named `group_value`: a custom key's value is an expression.
+            let column = "group_value";
+            let expression = dimension.expression();
             let (through, plan) = self
                 .report_plan(
                     &project,
                     &filters,
-                    Some(column),
+                    Some(dimension),
                     cutoff,
                     cursor
                         .as_ref()
@@ -811,10 +868,10 @@ impl Store {
                     Combined {
                         partials: partials_for(metrics),
                         cohort: cohort_for(metrics),
-                        context: &[column],
-                        raw_key: Some(column.to_owned()),
+                        context: &[dimension.start_column()],
+                        raw_key: Some(expression),
                         stored_key: Some("value"),
-                        dimension: Some(column),
+                        dimension: dimension.in_rollups().then(|| dimension.start_column()),
                     },
                 )?;
                 // Each merged row counts views as `sum(views)`.
@@ -840,7 +897,7 @@ impl Store {
                     cutoff,
                     &filters,
                     cohort_for(metrics),
-                    &[column],
+                    &[dimension.start_column()],
                     &Narrow::default(),
                 );
                 let continuation = match &cursor {
@@ -849,7 +906,7 @@ impl Store {
                 };
                 let (samples, source) = source_for(metrics);
                 format!(
-                    "{cohort}{samples} SELECT {column}, {} FROM {source}
+                    "{cohort}{samples} SELECT {expression} AS {column}, {} FROM {source}
                     GROUP BY {column} HAVING {continuation}
                     ORDER BY count() DESC, {column} ASC NULLS FIRST LIMIT {}",
                     metric_columns(metrics),
@@ -1340,14 +1397,7 @@ impl Store {
     }
 
     pub async fn renditions(&self, project: String, query: Query) -> Result<Value, ApiError> {
-        if query.event_name.is_some()
-            || query.group_by.is_some()
-            || query.sort_by.is_some()
-            || query.order.is_some()
-            || query.cursor.is_some()
-        {
-            return Err(ApiError::bad("Unsupported rendition query parameter"));
-        }
+        reject_ranking_parameters(&query, "Unsupported rendition query parameter")?;
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
@@ -1365,29 +1415,28 @@ impl Store {
                 &[],
                 &Narrow::default(),
             );
-            // Expand only the selected final/latest cumulative snapshot. Summing
-            // every snapshot would count the same watch time repeatedly.
+            let entries = expanded_entries(
+                "rendition_playing_time",
+                &format!(
+                    "{} AS r_width, {} AS r_height,
+                    if(JSONType(entry, 'codec') = 'String', JSONExtractString(entry, 'codec'), NULL) AS r_codec,
+                    {} AS r_bitrate_bps, {} AS r_frame_rate, {} AS r_playing_time_ms",
+                    json_number("entry", "width"),
+                    json_number("entry", "height"),
+                    json_number("entry", "bitrate_bps"),
+                    json_number("entry", "frame_rate"),
+                    json_number("entry", "playing_time_ms"),
+                ),
+            );
             let sql = format!(
-                "{cohort}, rendition_entries AS (
-                    SELECT view_id,
-                        {} AS r_width, {} AS r_height,
-                        if(JSONType(entry, 'codec') = 'String', JSONExtractString(entry, 'codec'), NULL) AS r_codec,
-                        {} AS r_bitrate_bps, {} AS r_frame_rate, {} AS r_playing_time_ms
-                    FROM view_metrics ARRAY JOIN JSONExtractArrayRaw(ifNull(m_rendition_playing_time, '[]')) AS entry
-                    WHERE JSONType(entry) = 'Object'
-                ), measured_renditions AS (
+                "{cohort}, rendition_entries AS ({entries}), measured_renditions AS (
                     SELECT * FROM rendition_entries WHERE r_playing_time_ms > 0
                 ), ranked_renditions AS (
                     SELECT r_width, r_height, r_codec, r_bitrate_bps, r_frame_rate,
                         uniqExact(view_id) AS r_views,
                         arraySum(arraySort(groupArray(r_playing_time_ms))) AS r_total
                     FROM measured_renditions GROUP BY r_width, r_height, r_codec, r_bitrate_bps, r_frame_rate
-                )",
-                json_number("entry", "width"),
-                json_number("entry", "height"),
-                json_number("entry", "bitrate_bps"),
-                json_number("entry", "frame_rate"),
-                json_number("entry", "playing_time_ms"),
+                )"
             );
             let totals = self
                 .client
@@ -1450,6 +1499,114 @@ impl Store {
             )
         };
         self.cached("renditions", &project, &query, export.is_some(), work)
+            .await
+    }
+
+    /// Watch time per subtitle language, `null` meaning subtitles off.
+    pub async fn subtitles(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        self.state_times(project, query, &SUBTITLES).await
+    }
+
+    /// Watch time per playback rate.
+    pub async fn playback_rates(&self, project: String, query: Query) -> Result<Value, ApiError> {
+        self.state_times(project, query, &PLAYBACK_RATES).await
+    }
+
+    /// Expand each view's selected cumulative per-state playing time once, like
+    /// renditions, and rank states by playing time.
+    async fn state_times(
+        &self,
+        project: String,
+        query: Query,
+        report: &'static StateTimes,
+    ) -> Result<Value, ApiError> {
+        reject_ranking_parameters(&query, report.unsupported)?;
+        let export = query.export.clone();
+        let filters = query.filters()?;
+        let limit = query.limit()?;
+        let work = async {
+            let cutoff = self.cutoff(&project)?;
+            let through = self.watermark(&project, cutoff).await?;
+            let mut params = Params::default();
+            let cohort = view_cohort(
+                &mut params,
+                &project,
+                through,
+                cutoff,
+                &filters,
+                report.cohort,
+                &[],
+                &Narrow::default(),
+            );
+            let entries = expanded_entries(
+                report.field,
+                &format!(
+                    "{} AS s_value, {} AS s_playing_time_ms",
+                    report.value,
+                    json_number("entry", "playing_time_ms")
+                ),
+            );
+            let sql = format!(
+                "{cohort}, state_entries AS ({entries}), measured_states AS (
+                    SELECT * FROM state_entries WHERE s_playing_time_ms > 0
+                ), ranked_states AS (
+                    SELECT s_value, uniqExact(view_id) AS s_views,
+                        arraySum(arraySort(groupArray(s_playing_time_ms))) AS s_total
+                    FROM measured_states GROUP BY s_value
+                )"
+            );
+            let totals = self
+                .client
+                .one(
+                    &format!(
+                        "{sql} SELECT (SELECT count() FROM view_metrics), uniqExact(view_id),
+                        ifNull(sum(s_playing_time_ms), 0), (SELECT count() FROM ranked_states)
+                        FROM measured_states"
+                    ),
+                    &params,
+                )
+                .await?;
+            let (views, samples, total, count) = (
+                int(&totals, 0)?,
+                int(&totals, 1)?,
+                float(&totals, 2)?,
+                int(&totals, 3)?,
+            );
+            if !total.is_finite() {
+                return Err(ApiError::internal());
+            }
+            let mut rows = self
+                .client
+                .rows(
+                    &format!(
+                        "{sql} SELECT s_value, s_views, s_total FROM ranked_states
+                        ORDER BY s_total DESC, s_value ASC NULLS FIRST LIMIT {limit}"
+                    ),
+                    &params,
+                )
+                .await?;
+            let mut states = Vec::new();
+            while let Some(row) = rows.next().await? {
+                let value = if report.numeric {
+                    json!(optional_float(&row, 0)?)
+                } else {
+                    json!(optional_text(&row, 0)?)
+                };
+                let time = float(&row, 2)?;
+                emit_async(
+                    &export,
+                    &mut states,
+                    json!({report.key:value, "views":int(&row, 1)?,
+                        "playing_time_ms":time, "playing_time_ratio": time / total}),
+                )
+                .await?;
+            }
+            Ok(
+                json!({"views":views, "sample_views":samples, "total_playing_time_ms":total,
+                report.total:count, report.list:states}),
+            )
+        };
+        self.cached(report.cache, &project, &query, export.is_some(), work)
             .await
     }
 
@@ -1692,6 +1849,9 @@ impl Store {
             || query.city.is_some()
             || query.page_origin.is_some()
             || query.page_path.is_some()
+            || query.subtitle_language.is_some()
+            || query.playback_rate.is_some()
+            || !query.custom.is_empty()
             || query.order.is_some()
         {
             return Err(ApiError::bad("View detail accepts only limit and cursor"));
@@ -1797,7 +1957,7 @@ impl Store {
         let export = query.export.clone();
         let filters = query.filters()?;
         let limit = query.limit()?;
-        let kind = format!("dimension_{}_views_desc", dimension.column());
+        let kind = format!("dimension_{}_views_desc", dimension.name());
         let cursor = query
             .cursor
             .as_deref()
@@ -1817,16 +1977,17 @@ impl Store {
                 cutoff,
                 &filters,
                 Cohort::Basic,
-                &[dimension.column()],
+                &[dimension.start_column()],
                 &Narrow::default(),
             );
-            let column = dimension.column();
+            let column = "dimension_value";
+            let expression = dimension.expression();
             let continuation = match &cursor {
                 None => "1".into(),
                 Some(c) => c.after.continuation(column, &mut params),
             };
             let sql = format!(
-                "{cohort} SELECT {column}, count() FROM view_metrics GROUP BY {column} HAVING {continuation}
+                "{cohort} SELECT {expression} AS {column}, count() FROM view_metrics GROUP BY {column} HAVING {continuation}
                 ORDER BY count() DESC, {column} ASC NULLS FIRST LIMIT {}",
                 limit + 1
             );
@@ -1862,7 +2023,7 @@ impl Store {
         self.cached(
             "dimension",
             &project,
-            (&query, dimension.column()),
+            (&query, dimension.name()),
             export.is_some(),
             work,
         )
@@ -1976,6 +2137,50 @@ impl Store {
             .await
     }
 }
+
+/// A report of watch time per playback state, read from each view's cumulative
+/// per-state array.
+struct StateTimes {
+    cohort: Cohort,
+    /// The cumulative array the cohort measures.
+    field: &'static str,
+    /// The state of one array `entry`, as SQL.
+    value: &'static str,
+    /// Whether the state is a number rather than text.
+    numeric: bool,
+    /// Response names: row key, row list and distinct state count.
+    key: &'static str,
+    list: &'static str,
+    total: &'static str,
+    cache: &'static str,
+    unsupported: &'static str,
+}
+
+/// A language tag, or `NULL` when subtitles are off.
+const SUBTITLES: StateTimes = StateTimes {
+    cohort: Cohort::Subtitles,
+    field: "subtitle_playing_time",
+    value: "if(JSONType(entry, 'language') = 'String', JSONExtractString(entry, 'language'), NULL)",
+    numeric: false,
+    key: "language",
+    list: "languages",
+    total: "total_languages",
+    cache: "subtitles",
+    unsupported: "Unsupported subtitle query parameter",
+};
+
+/// A rate rounded like the `playback_rate` dimension.
+const PLAYBACK_RATES: StateTimes = StateTimes {
+    cohort: Cohort::PlaybackRates,
+    field: "playback_rate_playing_time",
+    value: "if(JSONType(entry, 'rate') IN ('Int64', 'UInt64', 'Double'), round(JSONExtractFloat(entry, 'rate'), 2), NULL)",
+    numeric: true,
+    key: "rate",
+    list: "rates",
+    total: "total_rates",
+    cache: "playback_rates",
+    unsupported: "Unsupported playback rate query parameter",
+};
 
 fn validate_exploration(query: &Query) -> Result<(), ApiError> {
     if query.event_name.is_some() || query.group_by.is_some() || query.sort_by.is_some() {

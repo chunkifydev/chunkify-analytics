@@ -79,6 +79,58 @@ their fields; the SDK name does not select a different event format.
 string of 1 to 256 Unicode characters; empty or longer values reject the event.
 Reports use the values from each view's first retained start event.
 
+### Subtitles and playback rate
+
+The Chunkify player SDK detects both from the media element; integrators change
+nothing. All fields below are optional, so events from older SDKs stay valid.
+
+- `subtitle_language` is the language tag (BCP 47, such as `fr` or `en-US`) of the
+  showing subtitles or captions track, `und` when that track declares no language,
+  and `null` when subtitles are off. 1 to 35 characters.
+- `playback_rate` is the current rate, rounded to two decimals, such as `1`, `1.5`
+  or `2`, from 0.01 to 16.
+- Snapshot and end events also carry cumulative playing time per state:
+  `subtitle_playing_time` (`[{"language": "fr", "playing_time_ms": 90000}, ...]`)
+  and `playback_rate_playing_time` (`[{"rate": 2, "playing_time_ms": 60000}, ...]`),
+  at most 32 entries each.
+- `chunkify.video.subtitle_changed` (`previous_subtitle_language`,
+  `subtitle_language`) and `chunkify.video.playback_rate_changed`
+  (`previous_playback_rate`, `playback_rate`) record each change with
+  `playhead_seconds`, and appear in a view's event history.
+
+Reports read these two ways, under different names so neither is ambiguous: the
+`subtitle_language` and `playback_rate` filters and breakdowns use the value on
+each view's first retained start, so each view counts once; `/v1/subtitles` and
+`/v1/playback-rates` split watch time across states within each view.
+
+### Custom dimensions
+
+Integrators can label views with their own dimensions, such as a plan or an
+A/B test variant. The player SDK sends them as a `custom` object on
+`chunkify.video.view_started`:
+
+```json
+"custom": {"plan": "premium", "ab_test": "B", "seats": 5, "trial": false}
+```
+
+- At most 10 keys per view. Keys use 1 to 40 characters of `a-z`, `0-9` and `_`.
+- Values are text of 1 to 256 Unicode characters, finite numbers or booleans.
+  Anything else rejects the event.
+- Values are set once per view: reports use the first retained start, so each
+  view counts once under one value.
+- Never put personal data in custom values. Use `user_id` for user identity.
+
+Filter with `custom.<key>=<value>`, such as `?custom.plan=premium`, on every
+report route that accepts context filters, at most 10 per request; the
+contract marks them with `x-custom-filters`. `GET /v1/events` rejects custom
+filters, because only view starts carry custom values. Matching is exact
+and case-sensitive. Numbers compare as their JSON text (`5`, `5.5`): send
+whole numbers without a decimal part, as JavaScript does (`5`, not `5.0`, which
+stays `5.0`). Booleans compare as `true` or `false`. Views without the key never match. Group with
+`group_by=custom.plan`; views without the key form the null group. List values
+with `GET /v1/dimensions/custom.plan`, and the keys in use with
+`GET /v1/dimensions/custom_keys`, both ranked by views.
+
 Event IDs are deduplicated within each project. The first accepted payload and
 context win; later duplicates return 200 with
 `{"accepted":false,"duplicate":true}` and do not enrich or replace them.
@@ -150,7 +202,9 @@ Pages displaying or using bundled DB-IP location results must include an
 ### Filters and pagination
 
 Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `user_id`, `view_id`,
-`browser_name`, `os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, and `page_path`. View detail accepts only timeline
+`browser_name`, `os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`,
+`subtitle_language`, `playback_rate`, and custom dimension filters `custom.<key>`.
+Other query parameters are rejected. View detail accepts only timeline
 pagination; export downloads use their saved query. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
 exclusive. The raw event endpoint also accepts `event_name`.
@@ -163,6 +217,10 @@ name of 1 to 256 Unicode characters. Use `country` with `city` to distinguish
 names shared by different countries. Location filters use each event's location
 on `/v1/events` and the first retained start's location on metric, view,
 dimension, rendition, and time-series queries.
+`subtitle_language` is an exact, case-sensitive, non-blank language tag of up to 35
+characters; views with subtitles off at start do not match. `playback_rate`
+accepts digits with at most two decimals, from 0.01 to 16; `2` and `2.0`
+are the same rate.
 Multiple filters combine with AND. Missing, null, and nonstring context values
 do not match an explicit filter. `device_type=unknown` matches only a stored
 `unknown` value; it does not include events with no device information.
@@ -227,10 +285,11 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
 
-### Breakdowns by browser, OS, device and location
+### Breakdowns by browser, OS, device, location, subtitles and rate
 
 Add `group_by` with `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `page_origin`, or `page_path` to
+`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, or
+`playback_rate` or a custom key such as `custom.plan` to
 `GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
 `get_metrics` accepts the same argument, with `kind` selecting `summary`,
 `quality` or `engagement`. Without `group_by`, each route returns its
@@ -604,6 +663,28 @@ truncated ranking. There is no cursor or grouping parameter. CSV
 `resource=renditions` exports all matching rendition rows. MCP supports the same
 report through `get_metrics` with `kind=renditions`, bounded to 100 ranked rows.
 
+### Watch time per subtitle language and playback rate
+
+`GET /v1/subtitles` and `GET /v1/playback-rates` work like renditions: same
+filters and start cohort, only the final cumulative `subtitle_playing_time` or
+`playback_rate_playing_time` array of each view contributes (or the latest
+snapshot when there is no final event), and rows rank by measured playing time
+descending, then value ascending with null first.
+
+`/v1/subtitles` returns `views`, `sample_views`, `total_playing_time_ms`,
+`total_languages` and `languages`; each row has `language` (`null` for subtitles
+off), `views`, `playing_time_ms` and `playing_time_ratio`. `/v1/playback-rates`
+returns the same totals with `total_rates` and `rates`, whose rows have `rate`.
+A view can contribute to several rows, so row view counts must not be added.
+Playing time is wall-clock time: a minute at rate 2 covers about two minutes of
+media. Views from SDKs that send no measurement count in `views` but not in
+`sample_views`.
+
+`limit` defaults to 100 and accepts 1–1000; there is no cursor or grouping
+parameter. CSV `resource=subtitles` and `resource=playback_rates` export all rows.
+MCP supports both through `get_metrics` with `kind=subtitles` or
+`kind=playback_rates`, bounded to 100 ranked rows.
+
 ### Playback attempts and event history
 
 `GET /v1/views` returns `views` and `next_cursor`. Each row describes one attempt
@@ -655,7 +736,8 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 
 `GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
 Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `page_origin`, `page_path`, `video_id`, `viewer_id` and `user_id`. Each value has `value` and `views`;
+`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `viewer_id`, `user_id`,
+`custom.<key>` (one custom dimension) and `custom_keys` (the custom keys set on views). Each value has `value` and `views`;
 values and counts come from first retained starts after applying the usual date, identity and context filters.
 Values sort by views descending, then value ascending with null first for ties.
 Literal `unknown` remains distinct from
@@ -725,7 +807,7 @@ Cache hits consume no database slots or read-rate allowance; authentication
 still runs on every request. Raw events, sessions and exports bypass caching. See
 [configuration](configuration.md#read-and-export-limits) to override them.
 
-Supported resources are `summary`, `quality`, `renditions`, `engagement`, `timeseries`,
+Supported resources are `summary`, `quality`, `renditions`, `subtitles`, `playback_rates`, `engagement`, `timeseries`,
 `videos`, `events`, `views`, `errors` and `dimensions`. `query` uses the resource's
 normal query arguments. `timeseries` accepts `kind` and includes every requested
 UTC bucket, including ranges larger than the normal 1000-bucket query limit.
@@ -744,7 +826,7 @@ Event exports have one column for each documented scalar event field, such as
 Flat context columns use a `context.` prefix, such as `context.browser_name` and
 `context.continent`, `context.country` and `context.city`. Metadata columns include `received_at`, `project_id` and
 `ingest_key_id`. CSV cells never contain serialized JSON objects or arrays.
-Custom attributes, nested rendition arrays and historical OTLP payloads are
+Custom attributes, nested rendition, subtitle and rate arrays and historical OTLP payloads are
 excluded; use `GET /v1/events` for original payloads. Null values become empty
 cells. Strings that could be interpreted as spreadsheet formulas receive an
 apostrophe prefix. Empty exports contain headers.

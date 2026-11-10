@@ -4,7 +4,7 @@
   "info": {
     "title": "Chunkify analytics collector API",
     "version": "1.1.0",
-    "description": "Collect playback events, query analytics, and manage your project. Analytics reads share configurable per-project budgets across HTTP and MCP: defaults are 120 reads/minute with burst 20, at most 2 queued/running reads per project and 8 server-wide. Export link creation and downloads have separate project budgets. Rate/concurrency rejections return 429 with Retry-After. Limits use continuous refill and reset on collector restart, not key rotation. Configure [rate_limits] in config.toml.",
+    "description": "Collect playback events, query analytics, and manage your project. Analytics reads share configurable per-project budgets across HTTP and MCP: defaults are 120 reads/minute with burst 20, at most 2 queued/running reads per project and 8 server-wide. Export link creation and downloads have separate project budgets. Rate/concurrency rejections return 429 with Retry-After. Limits use continuous refill and reset on collector restart, not key rotation. Configure [rate_limits] in config.toml. Report routes marked x-custom-filters also accept custom dimension filters named custom.<key>, such as custom.plan=premium: exact, case-sensitive text of 1 to 256 characters, at most 10 per request, combined with other filters by AND. Views without the key never match. User ID and custom filters read one row per view rather than events.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -158,6 +158,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/event_name"
@@ -773,6 +779,12 @@
             "$ref": "#/components/parameters/page_path"
           },
           {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
+          },
+          {
             "$ref": "#/components/parameters/group_by"
           },
           {
@@ -929,7 +941,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/videos": {
@@ -979,6 +992,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -1135,7 +1154,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/timeseries": {
@@ -1188,6 +1208,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/view_id"
@@ -1356,7 +1382,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/quality": {
@@ -1406,6 +1433,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -1600,7 +1633,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/engagement": {
@@ -1650,6 +1684,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -1841,7 +1881,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/project/keys": {
@@ -2968,6 +3009,12 @@
             "$ref": "#/components/parameters/page_path"
           },
           {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3130,7 +3177,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/views/{view_id}": {
@@ -3376,6 +3424,12 @@
             "$ref": "#/components/parameters/page_path"
           },
           {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3514,7 +3568,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/dimensions/{dimension}": {
@@ -3570,6 +3625,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -3709,7 +3770,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/exports": {
@@ -4198,6 +4260,12 @@
             "$ref": "#/components/parameters/page_path"
           },
           {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
+          },
+          {
             "$ref": "#/components/parameters/view_id"
           }
         ],
@@ -4360,7 +4428,8 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
       }
     },
     "/v1/renditions": {
@@ -4410,6 +4479,12 @@
           },
           {
             "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -4587,7 +4662,456 @@
               }
             }
           }
-        }
+        },
+        "x-custom-filters": true
+      }
+    },
+    "/v1/subtitles": {
+      "get": {
+        "operationId": "getSubtitles",
+        "summary": "Read watch time per subtitle language",
+        "description": "Summarize watch time per subtitle language. Expand each view's cumulative subtitle_playing_time array once; a null language is time with subtitles off. Use only the selected final event, or latest snapshot when no final exists, for the filtered view-start cohort. Missing or empty measurements contribute no time; older SDKs send none. Rank by playing time descending, then value ascending with null first; limit bounds returned rows only, while totals cover every matching row. Views can contribute to several rows and must not be summed. No cursor, group_by, sort_by or order. Export resource=subtitles includes all matching rows.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered subtitle totals and ranked watch-time rows.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubtitleReport"
+                },
+                "example": {
+                  "views": 2,
+                  "sample_views": 2,
+                  "total_playing_time_ms": 10000,
+                  "total_languages": 2,
+                  "languages": [
+                    {
+                      "language": null,
+                      "views": 2,
+                      "playing_time_ms": 6000,
+                      "playing_time_ratio": 0.6
+                    },
+                    {
+                      "language": "fr",
+                      "views": 1,
+                      "playing_time_ms": 4000,
+                      "playing_time_ratio": 0.4
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, limit, or unsupported query parameters.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-custom-filters": true
+      }
+    },
+    "/v1/playback-rates": {
+      "get": {
+        "operationId": "getPlaybackRates",
+        "summary": "Read watch time per playback rate",
+        "description": "Summarize watch time per playback rate. Expand each view's cumulative playback_rate_playing_time array once; rates are rounded to two decimals. Playing time is wall-clock time, so a minute at 2 covers about two minutes of media. Use only the selected final event, or latest snapshot when no final exists, for the filtered view-start cohort. Missing or empty measurements contribute no time; older SDKs send none. Rank by playing time descending, then value ascending with null first; limit bounds returned rows only, while totals cover every matching row. Views can contribute to several rows and must not be summed. No cursor, group_by, sort_by or order. Export resource=playback_rates includes all matching rows.",
+        "tags": [
+          "Queries"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/from"
+          },
+          {
+            "$ref": "#/components/parameters/to"
+          },
+          {
+            "$ref": "#/components/parameters/video_id"
+          },
+          {
+            "$ref": "#/components/parameters/viewer_id"
+          },
+          {
+            "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/browser_name"
+          },
+          {
+            "$ref": "#/components/parameters/os_name"
+          },
+          {
+            "$ref": "#/components/parameters/device_type"
+          },
+          {
+            "$ref": "#/components/parameters/continent"
+          },
+          {
+            "$ref": "#/components/parameters/country"
+          },
+          {
+            "$ref": "#/components/parameters/city"
+          },
+          {
+            "$ref": "#/components/parameters/page_origin"
+          },
+          {
+            "$ref": "#/components/parameters/page_path"
+          },
+          {
+            "$ref": "#/components/parameters/subtitle_language"
+          },
+          {
+            "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/limit"
+          },
+          {
+            "$ref": "#/components/parameters/view_id"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Filtered playback rate totals and ranked watch-time rows.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlaybackRateReport"
+                },
+                "example": {
+                  "views": 2,
+                  "sample_views": 2,
+                  "total_playing_time_ms": 10000,
+                  "total_rates": 2,
+                  "rates": [
+                    {
+                      "rate": 1,
+                      "views": 2,
+                      "playing_time_ms": 7000,
+                      "playing_time_ratio": 0.7
+                    },
+                    {
+                      "rate": 1.5,
+                      "views": 1,
+                      "playing_time_ms": 3000,
+                      "playing_time_ratio": 0.3
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid filters, dates, limit, or unsupported query parameters.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid secret key.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request size exceeds the configured limit.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Project request rate or project/server concurrency limit exceeded. Retry-After is the rounded-up delay in seconds; concurrency rejections use one second.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              },
+              "Retry-After": {
+                "description": "Seconds before retrying.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^[1-9][0-9]*$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Storage operation failed or a numeric aggregate exceeded the finite response range.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Collector is busy or unavailable.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                },
+                "description": "Responses are not cacheable."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "x-custom-filters": true
       }
     }
   },
@@ -4629,6 +5153,8 @@
             "errors",
             "dimensions",
             "renditions",
+            "subtitles",
+            "playback_rates",
             "retention"
           ]
         }
@@ -4684,7 +5210,7 @@
           "minLength": 1,
           "maxLength": 256
         },
-        "description": "Exact integrator-supplied user ID. Selects views by their start event; event lists match each event's own value. Missing/null user IDs do not match."
+        "description": "Exact integrator-supplied user ID. Selects views by their start event; event lists match each event's own value. Missing/null user IDs do not match. Reports with this filter read one stored row per view."
       },
       "event_name": {
         "name": "event_name",
@@ -4697,7 +5223,9 @@
             "chunkify.video.view_ended",
             "chunkify.video.playback_state_changed",
             "chunkify.video.rendition_changed",
-            "chunkify.video.seek_completed"
+            "chunkify.video.seek_completed",
+            "chunkify.video.subtitle_changed",
+            "chunkify.video.playback_rate_changed"
           ]
         },
         "description": "Raw-event queries only. Summaries and videos reject this parameter."
@@ -4857,19 +5385,30 @@
         "name": "group_by",
         "in": "query",
         "schema": {
-          "type": "string",
-          "enum": [
-            "browser_name",
-            "os_name",
-            "device_type",
-            "continent",
-            "country",
-            "city",
-            "page_origin",
-            "page_path"
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "browser_name",
+                "os_name",
+                "device_type",
+                "continent",
+                "country",
+                "city",
+                "page_origin",
+                "page_path",
+                "subtitle_language",
+                "playback_rate"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+              "description": "A custom dimension key, such as custom.plan."
+            }
           ]
         },
-        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites."
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites. Use custom.<key>, such as custom.plan, to group by a custom dimension; views without the key form the null group."
       },
       "view_id": {
         "name": "view_id",
@@ -4897,21 +5436,33 @@
         "name": "dimension",
         "in": "path",
         "required": true,
-        "description": "Discover values from first retained view-start context, with view counts.",
+        "description": "Discover values from first retained view-start context, with view counts. custom.<key> lists one custom dimension's values (null for views without the key); custom_keys lists the custom keys set on views.",
         "schema": {
-          "type": "string",
-          "enum": [
-            "browser_name",
-            "os_name",
-            "device_type",
-            "video_id",
-            "viewer_id",
-            "user_id",
-            "continent",
-            "country",
-            "city",
-            "page_origin",
-            "page_path"
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "browser_name",
+                "os_name",
+                "device_type",
+                "video_id",
+                "viewer_id",
+                "user_id",
+                "continent",
+                "country",
+                "city",
+                "page_origin",
+                "page_path",
+                "subtitle_language",
+                "playback_rate",
+                "custom_keys"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+              "description": "One custom dimension's values, such as custom.plan."
+            }
           ]
         }
       },
@@ -5009,6 +5560,26 @@
         },
         "description": "Exact, case-sensitive page path captured by the player, such as /watch/video. Filter by page_origin as well to distinguish identical paths on different sites. Metrics use the first retained view start; raw events use each event context. Missing values do not match."
       },
+      "subtitle_language": {
+        "name": "subtitle_language",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 35,
+          "pattern": "\\S"
+        },
+        "description": "Exact, case-sensitive, non-blank subtitle language tag, such as fr or en-US; und for a subtitles track without a language. Metrics use the language showing on the first retained view start; raw events use each event's value. Views without subtitles at start do not match."
+      },
+      "playback_rate": {
+        "name": "playback_rate",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]{1,2})?$"
+        },
+        "description": "Playback rate from 0.01 to 16 with at most two decimals, such as 1, 1.5 or 2; 2.0 and 2 are the same rate. Metrics use the rate on the first retained view start; raw events use each event's value."
+      },
       "views_order": {
         "name": "order",
         "in": "query",
@@ -5046,6 +5617,12 @@
           },
           {
             "$ref": "#/components/schemas/SeekCompleted"
+          },
+          {
+            "$ref": "#/components/schemas/SubtitleChanged"
+          },
+          {
+            "$ref": "#/components/schemas/PlaybackRateChanged"
           }
         ],
         "description": "A schema version 1 playback event. Extra properties are preserved."
@@ -5064,7 +5641,9 @@
               "chunkify.video.view_ended",
               "chunkify.video.playback_state_changed",
               "chunkify.video.rendition_changed",
-              "chunkify.video.seek_completed"
+              "chunkify.video.seek_completed",
+              "chunkify.video.subtitle_changed",
+              "chunkify.video.playback_rate_changed"
             ]
           },
           "event_id": {
@@ -5595,6 +6174,47 @@
             "items": {
               "$ref": "#/components/schemas/RenditionPlayingTime"
             }
+          },
+          "subtitle_language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 35,
+            "description": "Language tag (BCP 47) of the showing subtitles or captions track; und when the track declares no language; null when subtitles are off. Optional.",
+            "pattern": "\\S"
+          },
+          "playback_rate": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0.01,
+            "maximum": 16,
+            "description": "Current playback rate, rounded to two decimals, such as 1, 1.5 or 2; from 0.01 to 16. Optional."
+          },
+          "subtitle_playing_time": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/SubtitlePlayingTime"
+            },
+            "description": "Cumulative playing time per subtitle language for this attempt, null language meaning subtitles off. At most 32 entries. Optional."
+          },
+          "playback_rate_playing_time": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/PlaybackRatePlayingTime"
+            },
+            "description": "Cumulative playing time per playback rate for this attempt. At most 32 entries. Optional."
           }
         },
         "required": [
@@ -5674,6 +6294,48 @@
           "codec",
           "bitrate_bps",
           "frame_rate",
+          "playing_time_ms"
+        ]
+      },
+      "SubtitlePlayingTime": {
+        "type": "object",
+        "properties": {
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 35,
+            "description": "Subtitle language tag, or null for subtitles off.",
+            "pattern": "\\S"
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "language",
+          "playing_time_ms"
+        ]
+      },
+      "PlaybackRatePlayingTime": {
+        "type": "object",
+        "properties": {
+          "rate": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 16,
+            "description": "Playback rate, rounded to two decimals."
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "rate",
           "playing_time_ms"
         ]
       },
@@ -6258,6 +6920,9 @@
             "properties": {
               "event_name": {
                 "const": "chunkify.video.view_started"
+              },
+              "custom": {
+                "$ref": "#/components/schemas/CustomDimensions"
               }
             },
             "required": [
@@ -6265,6 +6930,35 @@
             ]
           }
         ]
+      },
+      "CustomDimensions": {
+        "type": "object",
+        "maxProperties": 10,
+        "propertyNames": {
+          "pattern": "^[a-z0-9_]{1,40}$"
+        },
+        "additionalProperties": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        },
+        "description": "Integrator-defined dimensions set once when the view starts: at most 10 keys of 1 to 40 characters a-z, 0-9 and _, each with text of 1 to 256 characters, a number or a boolean. Reports compare values as text, exactly and case-sensitively: numbers as their JSON text (5, 5.5; send whole numbers without a decimal part, as JavaScript does), booleans as true or false. Only view_started accepts custom. Never put personal data here; use user_id for user identity.",
+        "example": {
+          "plan": "premium",
+          "ab_test": "B",
+          "seats": 5,
+          "trial": false
+        }
       },
       "ViewSnapshot": {
         "allOf": [
@@ -6608,6 +7302,100 @@
               "seek_interaction_duration_ms",
               "seek_resume_wait_ms",
               "seek_outcome"
+            ]
+          }
+        ]
+      },
+      "SubtitleChanged": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.subtitle_changed"
+              },
+              "playhead_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "previous_subtitle_language": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 35,
+                "description": "Language before the change; null when subtitles were off.",
+                "pattern": "\\S"
+              },
+              "subtitle_language": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 35,
+                "description": "Language after the change; null when subtitles are now off.",
+                "pattern": "\\S"
+              }
+            },
+            "required": [
+              "event_name",
+              "playhead_seconds",
+              "previous_subtitle_language",
+              "subtitle_language"
+            ]
+          }
+        ]
+      },
+      "PlaybackRateChanged": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/EventEnvelope"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "event_name": {
+                "const": "chunkify.video.playback_rate_changed"
+              },
+              "playhead_seconds": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0
+              },
+              "previous_playback_rate": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0.01,
+                "maximum": 16,
+                "description": "Rate before the change."
+              },
+              "playback_rate": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0.01,
+                "maximum": 16,
+                "description": "Rate after the change."
+              }
+            },
+            "required": [
+              "event_name",
+              "playhead_seconds",
+              "previous_playback_rate",
+              "playback_rate"
             ]
           }
         ]
@@ -7770,16 +8558,27 @@
         "additionalProperties": false,
         "properties": {
           "group_by": {
-            "type": "string",
-            "enum": [
-              "browser_name",
-              "os_name",
-              "device_type",
-              "continent",
-              "country",
-              "city",
-              "page_origin",
-              "page_path"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "browser_name",
+                  "os_name",
+                  "device_type",
+                  "continent",
+                  "country",
+                  "city",
+                  "page_origin",
+                  "page_path",
+                  "subtitle_language",
+                  "playback_rate"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+                "description": "A custom dimension key, such as custom.plan."
+              }
             ]
           },
           "groups": {
@@ -7823,16 +8622,27 @@
         "additionalProperties": false,
         "properties": {
           "group_by": {
-            "type": "string",
-            "enum": [
-              "browser_name",
-              "os_name",
-              "device_type",
-              "continent",
-              "country",
-              "city",
-              "page_origin",
-              "page_path"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "browser_name",
+                  "os_name",
+                  "device_type",
+                  "continent",
+                  "country",
+                  "city",
+                  "page_origin",
+                  "page_path",
+                  "subtitle_language",
+                  "playback_rate"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+                "description": "A custom dimension key, such as custom.plan."
+              }
             ]
           },
           "groups": {
@@ -7876,16 +8686,27 @@
         "additionalProperties": false,
         "properties": {
           "group_by": {
-            "type": "string",
-            "enum": [
-              "browser_name",
-              "os_name",
-              "device_type",
-              "continent",
-              "country",
-              "city",
-              "page_origin",
-              "page_path"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "browser_name",
+                  "os_name",
+                  "device_type",
+                  "continent",
+                  "country",
+                  "city",
+                  "page_origin",
+                  "page_path",
+                  "subtitle_language",
+                  "playback_rate"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+                "description": "A custom dimension key, such as custom.plan."
+              }
             ]
           },
           "groups": {
@@ -8454,19 +9275,31 @@
         "additionalProperties": false,
         "properties": {
           "dimension": {
-            "type": "string",
-            "enum": [
-              "browser_name",
-              "os_name",
-              "device_type",
-              "video_id",
-              "viewer_id",
-              "user_id",
-              "continent",
-              "country",
-              "city",
-              "page_origin",
-              "page_path"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "browser_name",
+                  "os_name",
+                  "device_type",
+                  "video_id",
+                  "viewer_id",
+                  "user_id",
+                  "continent",
+                  "country",
+                  "city",
+                  "page_origin",
+                  "page_path",
+                  "subtitle_language",
+                  "playback_rate",
+                  "custom_keys"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+                "description": "One custom dimension's values, such as custom.plan."
+              }
             ]
           },
           "values": {
@@ -8554,7 +9387,9 @@
               "chunkify.video.view_ended",
               "chunkify.video.playback_state_changed",
               "chunkify.video.rendition_changed",
-              "chunkify.video.seek_completed"
+              "chunkify.video.seek_completed",
+              "chunkify.video.subtitle_changed",
+              "chunkify.video.playback_rate_changed"
             ]
           },
           "order": {
@@ -8571,16 +9406,27 @@
             "maxLength": 4096
           },
           "group_by": {
-            "type": "string",
-            "enum": [
-              "browser_name",
-              "os_name",
-              "device_type",
-              "continent",
-              "country",
-              "city",
-              "page_origin",
-              "page_path"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "browser_name",
+                  "os_name",
+                  "device_type",
+                  "continent",
+                  "country",
+                  "city",
+                  "page_origin",
+                  "page_path",
+                  "subtitle_language",
+                  "playback_rate"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+                "description": "A custom dimension key, such as custom.plan."
+              }
             ]
           },
           "sort_by": {
@@ -8620,19 +9466,31 @@
             "type": "boolean"
           },
           "dimension": {
-            "type": "string",
-            "enum": [
-              "browser_name",
-              "os_name",
-              "device_type",
-              "video_id",
-              "viewer_id",
-              "user_id",
-              "continent",
-              "country",
-              "city",
-              "page_origin",
-              "page_path"
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "browser_name",
+                  "os_name",
+                  "device_type",
+                  "video_id",
+                  "viewer_id",
+                  "user_id",
+                  "continent",
+                  "country",
+                  "city",
+                  "page_origin",
+                  "page_path",
+                  "subtitle_language",
+                  "playback_rate",
+                  "custom_keys"
+                ]
+              },
+              {
+                "type": "string",
+                "pattern": "^custom\\.[a-z0-9_]{1,40}$",
+                "description": "One custom dimension's values, such as custom.plan."
+              }
             ]
           },
           "continent": {
@@ -8669,6 +9527,23 @@
             "minLength": 1,
             "maxLength": 4096,
             "description": "Exact, case-sensitive page_path from the first retained view start, or each event for raw-event exports."
+          },
+          "subtitle_language": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 35,
+            "pattern": "\\S"
+          },
+          "playback_rate": {
+            "type": "string",
+            "pattern": "^[0-9]+(\\.[0-9]{1,2})?$"
+          }
+        },
+        "patternProperties": {
+          "^custom\\.[a-z0-9_]{1,40}$": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
           }
         }
       },
@@ -8708,6 +9583,8 @@
               "errors",
               "dimensions",
               "renditions",
+              "subtitles",
+              "playback_rates",
               "retention"
             ]
           },
@@ -9172,6 +10049,153 @@
           "codec",
           "bitrate_bps",
           "frame_rate",
+          "views",
+          "playing_time_ms",
+          "playing_time_ratio"
+        ]
+      },
+      "SubtitleReport": {
+        "type": "object",
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "All attempts in the filtered start cohort."
+          },
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Attempts with positive measured playing time in this report. Older SDKs send no measurement."
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Total measured playing time across all matching rows."
+          },
+          "total_languages": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of distinct values before applying the row limit."
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubtitleMetric"
+            },
+            "description": "Most-watched first, then value ascending with null first. Defaults to 100 rows, maximum 1000. CSV exports include all matching rows."
+          }
+        },
+        "required": [
+          "views",
+          "sample_views",
+          "total_playing_time_ms",
+          "total_languages",
+          "languages"
+        ]
+      },
+      "SubtitleMetric": {
+        "type": "object",
+        "description": "Watch time with one subtitle language, or with subtitles off.",
+        "properties": {
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Subtitle language tag; und for a track without a language; null for subtitles off."
+          },
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct attempts with positive playing time in this language."
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Cumulative measured playing time in this language, summed once per attempt."
+          },
+          "playing_time_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Share of all measured playing time, including rows outside the returned limit."
+          }
+        },
+        "required": [
+          "language",
+          "views",
+          "playing_time_ms",
+          "playing_time_ratio"
+        ]
+      },
+      "PlaybackRateReport": {
+        "type": "object",
+        "properties": {
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "All attempts in the filtered start cohort."
+          },
+          "sample_views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Attempts with positive measured playing time in this report. Older SDKs send no measurement."
+          },
+          "total_playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Total measured playing time across all matching rows."
+          },
+          "total_rates": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of distinct values before applying the row limit."
+          },
+          "rates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaybackRateMetric"
+            },
+            "description": "Most-watched first, then value ascending with null first. Defaults to 100 rows, maximum 1000. CSV exports include all matching rows."
+          }
+        },
+        "required": [
+          "views",
+          "sample_views",
+          "total_playing_time_ms",
+          "total_rates",
+          "rates"
+        ]
+      },
+      "PlaybackRateMetric": {
+        "type": "object",
+        "description": "Watch time at one playback rate.",
+        "properties": {
+          "rate": {
+            "type": "number",
+            "minimum": 0.01,
+            "maximum": 16,
+            "description": "Playback rate, rounded to two decimals."
+          },
+          "views": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Distinct attempts with positive playing time at this rate."
+          },
+          "playing_time_ms": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Cumulative measured playing time at this rate, summed once per attempt."
+          },
+          "playing_time_ratio": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Share of all measured playing time, including rows outside the returned limit."
+          }
+        },
+        "required": [
+          "rate",
           "views",
           "playing_time_ms",
           "playing_time_ratio"

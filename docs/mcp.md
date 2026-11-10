@@ -174,7 +174,8 @@ unchanged with each cursor. Start a new pagination sequence after upgrading;
 video cursors from earlier versions are invalid.
 
 `get_metrics` also accepts `group_by` with `browser_name`, `os_name`,
-`device_type`, `continent`, `country`, `city`, `page_origin` or `page_path` for summary, quality and
+`device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`,
+`subtitle_language`, `playback_rate` or a custom key such as `custom.plan` for summary, quality and
 engagement. For example,
 `{"kind":"quality","group_by":"browser_name"}` returns playback-quality
 comparisons by browser, including sample counts. Each group has a `value` and
@@ -263,7 +264,10 @@ For error trends, call `get_timeseries` with `kind=quality`, date bounds and an
 interval. `kind=engagement` returns watch-time and reached-end metrics per bucket.
 For actual filter values, use `list_dimension_values` with
 `{"dimension":"browser_name"}`. Supported dimensions are `browser_name`,
-`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `video_id`, `viewer_id` and `user_id`.
+`os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `viewer_id`, `user_id`, `custom.<key>` and `custom_keys` (the custom keys in use).
+Tools take custom dimension filters as one `custom` object, such as
+`{"kind":"summary","custom":{"plan":"premium"}}`; `export_data` accepts the same
+object inside `query`.
 Values come from first retained starts, with null context separate from literal `unknown`.
 
 ## Export CSV
@@ -332,6 +336,16 @@ matching measurements; `limit` controls the ranked rows, default 10 and maximum
 100. Coverage reports whether more renditions exist. Use `export_data` with
 `resource=renditions` for all matching rows. Rendition counts can overlap across
 views. Missing bitrate contributes no weight to the average.
+
+### Subtitles and playback rate
+
+Use `get_metrics` with `kind=subtitles` for watch time per subtitle language
+(`null` is time with subtitles off) or `kind=playback_rates` for watch time per
+playback rate. Both work like renditions: totals cover all matching
+measurements, `limit` controls the ranked rows (default 10, maximum 100) and
+`export_data` with `resource=subtitles` or `resource=playback_rates` returns all
+rows. To count views by the state they started in instead, use `group_by` or the
+`subtitle_language` and `playback_rate` filters.
 
 ## Watched sections
 

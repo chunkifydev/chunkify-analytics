@@ -1398,6 +1398,104 @@ test("renditions report weights bitrate by watch time and exports every row with
   assert.ok(csv.startsWith("width,height,codec,bitrate_bps,frame_rate,views,playing_time_ms,playing_time_ratio"));
 });
 
+test("subtitle and playback rate state is collected, filtered and reported per state", async t => {
+  const server = await collector(t);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const start = { ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(), video_id: "state-video",
+    sequence: 1, subtitle_language: "fr", playback_rate: 1.5 };
+  const change = { ...structuredClone(start), event_id: randomUUID(), sequence: 2, playhead_seconds: 4 };
+  for (const key of Object.keys(change)) if (key in contract.components.schemas.ViewMetrics.properties) delete change[key];
+  change.playhead_seconds = 4;
+  const subtitleChanged = { ...change, event_name: "chunkify.video.subtitle_changed",
+    previous_subtitle_language: "fr", subtitle_language: null };
+  const rateChanged = { ...change, event_id: randomUUID(), sequence: 3, event_name: "chunkify.video.playback_rate_changed",
+    previous_playback_rate: 1.5, playback_rate: 2 };
+  const end = { ...structuredClone(start), event_id: randomUUID(), event_name: "chunkify.video.view_ended", sequence: 4,
+    reason: "destroyed", playing_time_ms: 10000, subtitle_language: null, playback_rate: 2,
+    subtitle_playing_time: [{ language: "fr", playing_time_ms: 4000 }, { language: null, playing_time_ms: 6000 }],
+    playback_rate_playing_time: [{ rate: 1.5, playing_time_ms: 4000 }, { rate: 2, playing_time_ms: 6000 }] };
+  for (const event of [start, subtitleChanged, rateChanged, end]) {
+    assertRequest("/v1/events", "post", event);
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  for (const invalid of [{ ...rateChanged, event_id: randomUUID(), playback_rate: 0 },
+    { ...subtitleChanged, event_id: randomUUID(), subtitle_language: "" },
+    { ...end, event_id: randomUUID(), playback_rate_playing_time: [{ rate: 2 }] }]) {
+    await server.post("/v1/events", JSON.stringify(invalid), 400);
+  }
+  const subtitles = await server.get("/v1/subtitles?video_id=state-video");
+  assert.deepEqual(subtitles.languages.map(row => [row.language, row.playing_time_ms]), [[null, 6000], ["fr", 4000]]);
+  const rates = await server.get("/v1/playback-rates?video_id=state-video&limit=1");
+  assert.equal(rates.total_rates, 2);
+  assert.deepEqual(rates.rates.map(row => [row.rate, row.playing_time_ratio]), [[2, 0.6]]);
+  // Filters and breakdowns use the state the view started in.
+  const grouped = await server.get("/v1/summary?video_id=state-video&playback_rate=1.50&group_by=subtitle_language&limit=10");
+  assert.deepEqual(grouped.groups.map(group => [group.value, group.data.views]), [["fr", 1]]);
+  assert.equal((await server.get("/v1/summary?video_id=state-video&playback_rate=2")).views, 0);
+  const values = await assertResponse("/v1/dimensions/{dimension}", "get",
+    await fetch(`${server.url}/v1/dimensions/playback_rate?video_id=state-video`,
+      { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 200);
+  assert.deepEqual(values.values, [{ value: "1.5", views: 1 }]);
+  const events = await server.get(`/v1/events?event_name=chunkify.video.subtitle_changed&video_id=state-video`);
+  assert.equal(events.events.length, 1);
+  await server.get("/v1/summary?playback_rate=1.234", 400);
+  await server.get("/v1/subtitles?group_by=browser_name", 400);
+  for (const [resource, header] of [["subtitles", "language,views,playing_time_ms,playing_time_ratio"],
+    ["playback_rates", "rate,views,playing_time_ms,playing_time_ratio"]]) {
+    const request = { resource, query: { video_id: "state-video" } };
+    assertRequest("/v1/exports", "post", request);
+    const link = await assertResponse("/v1/exports", "post", await fetch(`${server.url}/v1/exports`, { method: "POST",
+      headers: { Authorization: `Bearer ${server.keys.secret_key}`, "Content-Type": "application/json" },
+      body: JSON.stringify(request) }), 201);
+    const csv = (await (await fetch(link.download_url)).text()).trim().split(/\r?\n/);
+    assert.equal(csv[0], header);
+    assert.equal(csv.length, 3);
+  }
+});
+
+test("custom dimensions filter, group, list keys and export by first start", async t => {
+  const server = await collector(t);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const start = custom => ({ ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(),
+    video_id: "custom-video", sequence: 1, custom });
+  for (const event of [start({ plan: "premium", seats: 5, trial: false }), start({ plan: "premium" }),
+    start({ plan: "free" }), start(undefined)]) {
+    if (event.custom === undefined) delete event.custom;
+    assertRequest("/v1/events", "post", event);
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  for (const custom of [{ Plan: "x" }, { plan: "" }, { plan: null }, { plan: ["x"] },
+    Object.fromEntries(Array.from({ length: 11 }, (_, n) => [`k${n}`, n]))]) {
+    await server.post("/v1/events", JSON.stringify(start(custom)), 400);
+  }
+  assert.equal((await server.get("/v1/summary?video_id=custom-video&custom.plan=premium")).views, 2);
+  assert.equal((await server.get("/v1/summary?video_id=custom-video&custom.seats=5&custom.trial=false")).views, 1);
+  assert.equal((await server.get("/v1/summary?video_id=custom-video&custom.plan=Premium")).views, 0);
+  const grouped = await server.get("/v1/engagement?video_id=custom-video&group_by=custom.plan&limit=10");
+  assert.equal(grouped.group_by, "custom.plan");
+  assert.deepEqual(grouped.groups.map(group => [group.value, group.data.views]),
+    [["premium", 2], [null, 1], ["free", 1]]);
+  const dimension = async name => assertResponse("/v1/dimensions/{dimension}", "get",
+    await fetch(`${server.url}/v1/dimensions/${name}?video_id=custom-video`,
+      { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 200);
+  assert.deepEqual((await dimension("custom_keys")).values,
+    [{ value: "plan", views: 3 }, { value: "seats", views: 1 }, { value: "trial", views: 1 }]);
+  assert.deepEqual((await dimension("custom.seats")).values, [{ value: null, views: 3 }, { value: "5", views: 1 }]);
+  await server.get("/v1/summary?countyr=FR", 400);
+  await server.get("/v1/summary?custom.plan=a&custom.plan=b", 400);
+  await server.get("/v1/events?custom.plan=premium", 400);
+  await server.get("/v1/summary?custom.Plan=x", 400);
+  await server.get("/v1/summary?group_by=custom.Plan", 400);
+  const request = { resource: "summary", query: { video_id: "custom-video", group_by: "custom.plan", "custom.plan": "premium" } };
+  assertRequest("/v1/exports", "post", request);
+  const link = await assertResponse("/v1/exports", "post", await fetch(`${server.url}/v1/exports`, { method: "POST",
+    headers: { Authorization: `Bearer ${server.keys.secret_key}`, "Content-Type": "application/json" },
+    body: JSON.stringify(request) }), 201);
+  const csv = (await (await fetch(link.download_url)).text()).trim().split(/\r?\n/);
+  assert.equal(csv.length, 2);
+  assert.ok(csv[1].startsWith("premium,2,"));
+});
+
 test(`location reports use first starts, filter consistently and export all groups`, async t => {
   const server = await collector(t, { "server.trusted_proxies": "127.0.0.1" });
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;

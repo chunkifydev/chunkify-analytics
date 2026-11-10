@@ -23,7 +23,10 @@ use super::{
     Params, Store,
     reports::{Cohort, Narrow, START_COLUMNS, START_CONTEXT, view_cohort},
 };
-use crate::{api::ApiError, query::Filters};
+use crate::{
+    api::ApiError,
+    query::{Dimension, Filters},
+};
 use serde_json::{Value, json};
 
 pub(super) const HOUR_MS: i64 = 3_600_000;
@@ -257,7 +260,11 @@ const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("ctx_city", "Nullable(String)"),
     ("ctx_page_origin", "Nullable(String)"),
     ("ctx_page_path", "Nullable(String)"),
+    ("e_subtitle_language", "LowCardinality(Nullable(String))"),
+    ("d_playback_rate", "LowCardinality(Nullable(String))"),
+    ("e_user_id", "Nullable(String)"),
     ("e_video_title", "Nullable(String)"),
+    ("c_custom", "Map(String, String)"),
     ("playing_time_ms", "Float64"),
     ("m_playing_time_ms", "Nullable(Float64)"),
     ("m_startup_time_ms", "Nullable(Float64)"),
@@ -343,6 +350,9 @@ pub(super) struct Plan {
     raw: Vec<(i64, i64)>,
     from: i64,
     to: i64,
+    /// Every settled hour reads per-view rows with the full filters, for
+    /// values hourly rollups don't hold (user IDs and custom dimensions).
+    views: bool,
     /// The refresh run a lagged read uses; page cursors keep it.
     pub(super) run: Option<i64>,
 }
@@ -394,21 +404,25 @@ impl Plan {
     }
 }
 
-/// The date range of a report rollups can answer, or `None` when its filters
-/// need events. `group` is the breakdown column, if any.
-fn scope_range(filters: &Filters, group: Option<&str>) -> Option<(i64, i64)> {
+/// The date range of a report rollups can answer and whether it reads per-view
+/// rows only, or `None` when its filters need events. `group` is the breakdown
+/// dimension, if any.
+fn scope_range(filters: &Filters, group: Option<&Dimension>) -> Option<((i64, i64), bool)> {
+    let range =
+        |from: Option<i64>, to: Option<i64>| (from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX));
+    if filters.needs_views() || group.is_some_and(|group| !group.in_rollups()) {
+        let (from, to) = filters.views_range()?;
+        return Some((range(from, to), true));
+    }
     let scope = filters.rollup_scope()?;
     // Rollup rows hold one context value each: a breakdown can only be
     // filtered by its own column.
     if let (Some((column, _)), Some(group)) = (&scope.dimension, group)
-        && *column != group
+        && *column != group.start_column()
     {
         return None;
     }
-    Some((
-        scope.from_ms.unwrap_or(i64::MIN),
-        scope.to_ms.unwrap_or(i64::MAX),
-    ))
+    Some((range(scope.from_ms, scope.to_ms), false))
 }
 
 /// One report's combined query: rollup rows for whole hours, per-view rows for
@@ -438,7 +452,7 @@ impl Store {
         &self,
         project: &str,
         filters: &Filters,
-        group: Option<&str>,
+        group: Option<&Dimension>,
         cutoff: i64,
         cursor: Option<(i64, Option<i64>)>,
         paged: bool,
@@ -481,14 +495,14 @@ impl Store {
         &self,
         project: &str,
         filters: &Filters,
-        group: Option<&str>,
+        group: Option<&Dimension>,
         cutoff: i64,
         run: Option<i64>,
     ) -> Result<Option<Plan>, ApiError> {
         if !self.lag_enabled() {
             return Ok(None);
         }
-        let Some((from, to)) = scope_range(filters, group) else {
+        let Some(((from, to), views)) = scope_range(filters, group) else {
             return Ok(None);
         };
         let mut params = Params::default();
@@ -535,6 +549,7 @@ impl Store {
             raw: Vec::new(),
             from,
             to,
+            views,
             run: Some(version),
         };
         for hour in row.get(3).and_then(Value::as_array).into_iter().flatten() {
@@ -547,7 +562,7 @@ impl Store {
             if low < cutoff {
                 // Expired events must be hidden: read this hour from events.
                 plan.raw.push((hour.max(from), end.min(to)));
-            } else if hour >= from && end <= to {
+            } else if hour >= from && end <= to && !views {
                 plan.hours.push(hour);
                 plan.generations.push(generation);
             } else {
@@ -569,7 +584,12 @@ impl Store {
         plan: &Plan,
         query: Combined<'_>,
     ) -> Result<String, ApiError> {
-        let scope = filters.rollup_scope().ok_or_else(ApiError::internal)?;
+        // Per-view plans have no hourly rollup rows, so they need no rollup scope.
+        let scope = if plan.views {
+            None
+        } else {
+            Some(filters.rollup_scope().ok_or_else(ApiError::internal)?)
+        };
         let names = query.partials.names().join(", ");
         let raw_key = query
             .raw_key
@@ -615,10 +635,10 @@ impl Store {
         }
         let project_id = params.text(project);
         let video = scope
-            .video_id
             .as_ref()
+            .and_then(|scope| scope.video_id.as_ref())
             .map(|video| format!(" AND video_id = {}", params.text(video)));
-        if !plan.hours.is_empty() {
+        if let Some(scope) = scope.as_ref().filter(|_| !plan.hours.is_empty()) {
             let mut stored = vec![
                 format!("project_id = {project_id}"),
                 Plan::generations(params, &plan.hours, &plan.generations),
@@ -660,8 +680,15 @@ impl Store {
             if plan.to < i64::MAX {
                 conditions.push(format!("occurred_at_ms < {}", params.int(plan.to)));
             }
-            if let Some((column, value)) = &scope.dimension {
-                conditions.push(format!("{column} = {}", params.text(value)));
+            match &scope {
+                Some(scope) => {
+                    if let Some((column, value)) = &scope.dimension {
+                        conditions.push(format!("{column} = {}", params.text(value)));
+                    }
+                }
+                // Per-view rows carry every first-start column the filters
+                // can use once viewer, view and event filters are excluded.
+                None => conditions.push(filters.clickhouse(params)),
             }
             ctes.push(format!(
                 "view_parts AS (SELECT {raw_key}{} FROM rollup_views WHERE {}{}{group})",

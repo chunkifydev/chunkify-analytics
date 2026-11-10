@@ -1527,7 +1527,9 @@ test("video titles filter, group, list values and export by first start", async 
   assert.equal(listed.videos[0].video_title, "Episode 1 (remastered)");
   const users = await server.get("/v1/summary?video_id=title-video&group_by=user_id&limit=10");
   assert.deepEqual(users.groups.map(group => [group.value, group.data.views]), [["u1", 2], [null, 1], ["u2", 1]]);
-  await server.get("/v1/summary?video_title=", 400);
+  for (const empty of ["video_id=", "video_id=%20", "viewer_id=", "video_title="]) {
+    await server.get(`/v1/summary?${empty}`, 400);
+  }
   await server.get(`/v1/summary?video_title=${"x".repeat(257)}`, 400);
   assert.equal((await fetch(`${server.url}/v1/views/${ids.a}?video_title=x`,
     { headers: { Authorization: `Bearer ${server.keys.secret_key}` } })).status, 400);

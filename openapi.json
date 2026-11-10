@@ -5220,7 +5220,9 @@
         "name": "video_id",
         "in": "query",
         "schema": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         },
         "description": "Video to report. Retention measures one video at a time.",
         "required": true
@@ -5229,15 +5231,18 @@
         "name": "video_id",
         "in": "query",
         "schema": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         },
-        "description": "Exact video ID. Combined with all other filters using AND."
+        "description": "Exact video ID; must not be blank. Combined with all other filters using AND."
       },
       "viewer_id": {
         "name": "viewer_id",
         "in": "query",
         "schema": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "description": "Exact viewer ID. The Chunkify player SDK generates one per browser; missing/null viewer IDs do not match."
       },
@@ -9410,10 +9415,13 @@
             "format": "date-time"
           },
           "video_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "viewer_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "user_id": {
             "type": "string",

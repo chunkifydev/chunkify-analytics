@@ -461,6 +461,17 @@ impl Query {
         if from_ms.zip(to_ms).is_some_and(|(from, to)| from >= to) {
             return Err(ApiError::bad("from must be before to"));
         }
+        // Stored video IDs are never blank; filters cannot match an empty ID.
+        if self
+            .video_id
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(ApiError::bad("video_id must not be blank"));
+        }
+        if self.viewer_id.as_deref().is_some_and(str::is_empty) {
+            return Err(ApiError::bad("viewer_id must not be empty"));
+        }
         if self
             .event_name
             .as_deref()

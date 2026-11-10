@@ -223,8 +223,9 @@ dimension, rendition, and time-series queries.
 characters; views with subtitles off at start do not match. `playback_rate`
 accepts digits with at most two decimals, from 0.01 to 16; `2` and `2.0`
 are the same rate.
-`user_id` and `video_title` are exact, case-sensitive values of 1 to 256 Unicode
-characters. Views without the value do not match. Like custom dimensions, they
+`video_id` must not be blank and `viewer_id` must not be empty, like the event
+fields they match. `user_id` and `video_title` are exact, case-sensitive values of
+1 to 256 Unicode characters. Views without the value do not match. Like custom dimensions, they
 have many distinct values, so reports with these filters read one stored row per
 view.
 Multiple filters combine with AND. Missing, null, and nonstring context values

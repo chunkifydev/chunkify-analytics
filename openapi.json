@@ -136,6 +136,9 @@
             "$ref": "#/components/parameters/user_id"
           },
           {
+            "$ref": "#/components/parameters/video_title"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -755,6 +758,9 @@
             "$ref": "#/components/parameters/user_id"
           },
           {
+            "$ref": "#/components/parameters/video_title"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -968,6 +974,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -1184,6 +1193,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -1409,6 +1421,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -1660,6 +1675,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -2982,6 +3000,9 @@
             "$ref": "#/components/parameters/user_id"
           },
           {
+            "$ref": "#/components/parameters/video_title"
+          },
+          {
             "$ref": "#/components/parameters/view_id"
           },
           {
@@ -3397,6 +3418,9 @@
             "$ref": "#/components/parameters/user_id"
           },
           {
+            "$ref": "#/components/parameters/video_title"
+          },
+          {
             "$ref": "#/components/parameters/view_id"
           },
           {
@@ -3598,6 +3622,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/view_id"
@@ -4236,6 +4263,9 @@
             "$ref": "#/components/parameters/user_id"
           },
           {
+            "$ref": "#/components/parameters/video_title"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -4455,6 +4485,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -4691,6 +4724,9 @@
             "$ref": "#/components/parameters/user_id"
           },
           {
+            "$ref": "#/components/parameters/video_title"
+          },
+          {
             "$ref": "#/components/parameters/browser_name"
           },
           {
@@ -4913,6 +4949,9 @@
           },
           {
             "$ref": "#/components/parameters/user_id"
+          },
+          {
+            "$ref": "#/components/parameters/video_title"
           },
           {
             "$ref": "#/components/parameters/browser_name"
@@ -5181,7 +5220,9 @@
         "name": "video_id",
         "in": "query",
         "schema": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         },
         "description": "Video to report. Retention measures one video at a time.",
         "required": true
@@ -5190,15 +5231,18 @@
         "name": "video_id",
         "in": "query",
         "schema": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
         },
-        "description": "Exact video ID. Combined with all other filters using AND."
+        "description": "Exact video ID; must not be blank. Combined with all other filters using AND."
       },
       "viewer_id": {
         "name": "viewer_id",
         "in": "query",
         "schema": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "description": "Exact viewer ID. The Chunkify player SDK generates one per browser; missing/null viewer IDs do not match."
       },
@@ -5211,6 +5255,16 @@
           "maxLength": 256
         },
         "description": "Exact integrator-supplied user ID. Selects views by their start event; event lists match each event's own value. Missing/null user IDs do not match. Reports with this filter read one stored row per view."
+      },
+      "video_title": {
+        "name": "video_title",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "description": "Exact, case-sensitive video title. Selects views by the title on their first retained start; event lists match each event's own value. Views without a title do not match. Reports with this filter read one stored row per view."
       },
       "event_name": {
         "name": "event_name",
@@ -5398,7 +5452,9 @@
                 "page_origin",
                 "page_path",
                 "subtitle_language",
-                "playback_rate"
+                "playback_rate",
+                "video_title",
+                "user_id"
               ]
             },
             {
@@ -5408,7 +5464,7 @@
             }
           ]
         },
-        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites. Use custom.<key>, such as custom.plan, to group by a custom dimension; views without the key form the null group."
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites. video_title groups by the title on each view's first retained start, so a renamed video counts each view under the title it started with. user_id groups by the user ID on each view's first retained start. Use custom.<key>, such as custom.plan, to group by a custom dimension; views without the key form the null group."
       },
       "view_id": {
         "name": "view_id",
@@ -5448,6 +5504,7 @@
                 "video_id",
                 "viewer_id",
                 "user_id",
+                "video_title",
                 "continent",
                 "country",
                 "city",
@@ -8571,7 +8628,9 @@
                   "page_origin",
                   "page_path",
                   "subtitle_language",
-                  "playback_rate"
+                  "playback_rate",
+                  "video_title",
+                  "user_id"
                 ]
               },
               {
@@ -8635,7 +8694,9 @@
                   "page_origin",
                   "page_path",
                   "subtitle_language",
-                  "playback_rate"
+                  "playback_rate",
+                  "video_title",
+                  "user_id"
                 ]
               },
               {
@@ -8699,7 +8760,9 @@
                   "page_origin",
                   "page_path",
                   "subtitle_language",
-                  "playback_rate"
+                  "playback_rate",
+                  "video_title",
+                  "user_id"
                 ]
               },
               {
@@ -9285,6 +9348,7 @@
                   "video_id",
                   "viewer_id",
                   "user_id",
+                  "video_title",
                   "continent",
                   "country",
                   "city",
@@ -9351,12 +9415,20 @@
             "format": "date-time"
           },
           "video_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
           },
           "viewer_id": {
-            "type": "string"
+            "type": "string",
+            "minLength": 1
           },
           "user_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "video_title": {
             "type": "string",
             "minLength": 1,
             "maxLength": 256
@@ -9419,7 +9491,9 @@
                   "page_origin",
                   "page_path",
                   "subtitle_language",
-                  "playback_rate"
+                  "playback_rate",
+                  "video_title",
+                  "user_id"
                 ]
               },
               {
@@ -9476,6 +9550,7 @@
                   "video_id",
                   "viewer_id",
                   "user_id",
+                  "video_title",
                   "continent",
                   "country",
                   "city",

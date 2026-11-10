@@ -527,6 +527,15 @@ async fn exercise_project_queries(http: bool) {
     )
     .await;
     assert_eq!(grouped["data"]["groups"], json!([]));
+    let titled = call(
+        &client,
+        "get_metrics",
+        json!({"kind":"engagement", "group_by":"video_title", "video_title":"Episode 1"}),
+        false,
+    )
+    .await;
+    assert_eq!(titled["data"]["group_by"], "video_title");
+    assert_eq!(titled["data"]["groups"], json!([]));
     // Custom filters are one object argument; custom keys group like context.
     let custom = call(
         &client,
@@ -1597,7 +1606,9 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                     "page_origin",
                     "page_path",
                     "subtitle_language",
-                    "playback_rate"
+                    "playback_rate",
+                    "video_title",
+                    "user_id"
                 ])
             );
             assert_eq!(schema["properties"]["limit"]["maximum"], 100);

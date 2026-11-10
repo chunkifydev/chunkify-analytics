@@ -77,7 +77,9 @@ their fields; the SDK name does not select a different event format.
 
 `user_id` and `video_title` may be omitted or `null`. When present, each must be a
 string of 1 to 256 Unicode characters; empty or longer values reject the event.
-Reports use the values from each view's first retained start event.
+Reports use the values from each view's first retained start event. Filtering or
+grouping by `video_title` therefore counts a renamed video's views under the
+title each view started with; `/v1/videos` shows each video's latest title.
 
 ### Subtitles and playback rate
 
@@ -201,7 +203,7 @@ Pages displaying or using bundled DB-IP location results must include an
 
 ### Filters and pagination
 
-Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `user_id`, `view_id`,
+Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `user_id`, `video_title`, `view_id`,
 `browser_name`, `os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`,
 `subtitle_language`, `playback_rate`, and custom dimension filters `custom.<key>`.
 Other query parameters are rejected. View detail accepts only timeline
@@ -221,6 +223,11 @@ dimension, rendition, and time-series queries.
 characters; views with subtitles off at start do not match. `playback_rate`
 accepts digits with at most two decimals, from 0.01 to 16; `2` and `2.0`
 are the same rate.
+`video_id` must not be blank and `viewer_id` must not be empty, like the event
+fields they match. `user_id` and `video_title` are exact, case-sensitive values of
+1 to 256 Unicode characters. Views without the value do not match. Like custom dimensions, they
+have many distinct values, so reports with these filters read one stored row per
+view.
 Multiple filters combine with AND. Missing, null, and nonstring context values
 do not match an explicit filter. `device_type=unknown` matches only a stored
 `unknown` value; it does not include events with no device information.
@@ -285,11 +292,11 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
 
-### Breakdowns by browser, OS, device, location, subtitles and rate
+### Breakdowns by browser, OS, device, location, subtitles, rate, title and user
 
 Add `group_by` with `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, or
-`playback_rate` or a custom key such as `custom.plan` to
+`country`, `city`, `page_origin`, `page_path`, `subtitle_language`,
+`playback_rate`, `video_title`, `user_id` or a custom key such as `custom.plan` to
 `GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
 `get_metrics` accepts the same argument, with `kind` selecting `summary`,
 `quality` or `engagement`. Without `group_by`, each route returns its
@@ -736,7 +743,7 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 
 `GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
 Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `viewer_id`, `user_id`,
+`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `video_title`, `viewer_id`, `user_id`,
 `custom.<key>` (one custom dimension) and `custom_keys` (the custom keys set on views). Each value has `value` and `views`;
 values and counts come from first retained starts after applying the usual date, identity and context filters.
 Values sort by views descending, then value ascending with null first for ties.

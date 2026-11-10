@@ -1840,6 +1840,7 @@ impl Store {
             || query.video_id.is_some()
             || query.viewer_id.is_some()
             || query.user_id.is_some()
+            || query.video_title.is_some()
             || query.view_id.is_some()
             || query.browser_name.is_some()
             || query.os_name.is_some()

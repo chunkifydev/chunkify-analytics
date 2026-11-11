@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import SwaggerParser from "@apidevtools/swagger-parser";
 import { contractPath, contract, component, assertSchema, schemaAt } from "./openapi-support.mjs";
@@ -64,6 +65,45 @@ test("stored event ownership metadata uses typed schemas and supports legacy unk
   assertSchema(properties.ingest_key_id, null, "legacy source key");
   assert.throws(() => assertSchema(properties.project_id, 123, "invalid project ID"), assert.AssertionError);
   assert.throws(() => assertSchema(properties.ingest_key_id, 123, "invalid source key"), assert.AssertionError);
+});
+
+test("event_name discriminates every analytics event variant the server accepts", async () => {
+  const { oneOf, discriminator } = contract.components.schemas.AnalyticsEvent;
+  assert.equal(discriminator.propertyName, "event_name");
+  const source = await readFile(new URL("../../src/event.rs", import.meta.url), "utf8");
+  const accepted = [...source.match(/EVENT_NAMES: \[&str; \d+\] = \[([^\]]*)\]/)[1].matchAll(/"([^"]+)"/g)]
+    .map(match => match[1]);
+  assert.deepEqual(Object.keys(discriminator.mapping).sort(), accepted.sort());
+  const variants = oneOf.map(variant => variant.$ref);
+  assert.deepEqual(Object.values(discriminator.mapping).sort(), [...variants].sort());
+  for (const [eventName, ref] of Object.entries(discriminator.mapping)) {
+    const names = schemaAt({ $ref: ref }).allOf
+      .map(part => part.properties?.event_name?.const)
+      .filter(name => name !== undefined);
+    assert.deepEqual(names, [eventName], ref);
+  }
+});
+
+test("browser context is typed, versioned and accepts partial fields", () => {
+  assert.deepEqual(contract.components.schemas.EventEnvelope.properties.browser_context.anyOf,
+    [{ $ref: "#/components/schemas/BrowserContext" }, { type: "null" }]);
+  for (const value of [{ schema_version: 1 }, { schema_version: 1, browser_name: "Firefox" },
+    { schema_version: 1, page_origin: "https://example.com", page_path: "/watch", custom_tag: "kept" }]) {
+    component("BrowserContext", value);
+  }
+  // The server reads browser fields only with schema_version 1, so the contract requires it.
+  for (const value of ["Firefox", {}, { browser_name: "Firefox" }, { schema_version: 2 },
+    { schema_version: 1, screen_width_px: "wide" }]) {
+    assert.throws(() => component("BrowserContext", value), assert.AssertionError);
+  }
+});
+
+test("the documented read concurrency matches the server defaults", async () => {
+  const limits = await readFile(new URL("../../src/limits.rs", import.meta.url), "utf8");
+  const perProject = limits.match(/read_concurrent_per_project: (\d+),/)[1];
+  const server = limits.match(/read_concurrent: (\d+),/)[1];
+  assert.match(contract.info.description,
+    new RegExp(`at most ${perProject} queued/running reads per project and ${server} executing server-wide`));
 });
 
 test("removed ingestion routes are absent from the contract", () => {

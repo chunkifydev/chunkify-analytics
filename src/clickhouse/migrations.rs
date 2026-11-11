@@ -19,10 +19,11 @@ const MIGRATIONS: &[(i64, &str, &str)] =
 pub const UNREACHABLE: &str =
     "Cannot reach ClickHouse; check clickhouse.url, credentials and permissions";
 pub const NOT_INITIALIZED: &str = "This ClickHouse database is not initialized; run init first";
-pub const PENDING: &str = "The ClickHouse schema is older than this release; run `chunkify-analytics migrate`, then start again";
+pub const PENDING: &str = "The ClickHouse database needs schema migrations; run `chunkify-analytics migrate`, then start again";
 pub const DIRTY: &str =
     "A ClickHouse schema migration did not finish; run `chunkify-analytics migrate` again";
 pub const NEWER: &str = "The ClickHouse schema is newer than this release supports; upgrade chunkify-analytics before using this database";
+pub const OVERLAP: &str = "Another `chunkify-analytics migrate` ran at the same time; when it has stopped, run `chunkify-analytics migrate` again";
 
 /// The version this release needs.
 pub fn latest() -> i64 {
@@ -50,7 +51,7 @@ fn statements(sql: &str) -> Vec<String> {
             }
         }
     }
-    // Text after the last `;` would never run; a test rejects such files.
+    // Text after the last `;` is a statement too; a test rejects such files.
     if !current.trim().is_empty() {
         statements.push(current.trim().to_owned());
     }
@@ -98,7 +99,9 @@ impl Client {
         Ok(Some(engine.trim().to_owned()).filter(|engine| !engine.is_empty()))
     }
 
-    async fn table_exists(&self, table: &str) -> Result<bool, ApiError> {
+    /// Whether the configured database has this table. Works without the
+    /// database, which may not exist.
+    pub(super) async fn table_exists(&self, table: &str) -> Result<bool, ApiError> {
         let mut params = Params::default();
         let sql = format!(
             "SELECT count() FROM system.tables WHERE database = {} AND name = {} FORMAT TSV",
@@ -184,9 +187,29 @@ impl Client {
         Ok(())
     }
 
+    /// Whether another run recorded a row after this run's dirty marker at
+    /// `started`, not counting this run's own row at `finished`, and the
+    /// highest sequence recorded.
+    async fn overlapped(&self, started: u64, finished: u64) -> Result<(bool, u64), String> {
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT countIf(sequence > {} AND sequence != {}), max(sequence) FROM schema_migrations",
+            params.int(started as i64),
+            params.int(finished as i64)
+        );
+        let row = self.one(&sql, &params).await.map_err(unreachable)?;
+        let number = |index: usize| row.get(index).and_then(Value::as_u64);
+        match (number(0), number(1)) {
+            (Some(later), Some(highest)) => Ok((later > 0, highest)),
+            _ => Err(UNREACHABLE.into()),
+        }
+    }
+
     /// Apply every pending migration and return the names of those applied.
     /// Only `init` creates a missing database. Safe to run again after a
-    /// failure, and from two places at once: statements repeat without harm.
+    /// failure. Run it from one place at a time: nothing locks the database,
+    /// but runs that overlap leave the migration marked unfinished, so it is
+    /// repeated from its start by the next run.
     pub async fn migrate(&self, create_database: bool) -> Result<Vec<String>, String> {
         let control = self.with_timeout(CONTROL_TIMEOUT);
         // Migrations can rewrite data, so their statements have no time limit.
@@ -242,11 +265,11 @@ impl Client {
             .await?;
         // Later rows win, whatever the clocks of the machines that wrote them.
         let mut sequence = state.sequence;
-        let mut next = || {
+        let mut next = |above: u64| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_nanos() as u64);
-            sequence = now.max(sequence + 1);
+            sequence = now.max(sequence.max(above) + 1);
             sequence
         };
         let mut applied = Vec::new();
@@ -256,13 +279,37 @@ impl Client {
                 continue;
             }
             let label = format!("{version:04}_{name}");
-            control.record(*version, true, next()).await?;
+            let started = next(0);
+            control.record(*version, true, started).await?;
             for statement in statements(sql) {
                 unlimited.run(prepared(&statement)).await.map_err(|error| {
                     format!("Migration {label} failed: {error}. Fix the cause, then run `chunkify-analytics migrate` again")
                 })?;
             }
-            control.record(*version, false, next()).await?;
+            // Another run may have repeated statements while these ran, for
+            // example emptying a table this run was filling. Every run records
+            // its dirty row before its first statement, so of two overlapping
+            // runs at least the one with the lower row sees the other's.
+            let mut overlap = control.overlapped(started, started).await?.0;
+            if !overlap {
+                let finished = next(0);
+                control.record(*version, false, finished).await?;
+                // The other run may have started since the check.
+                overlap = control.overlapped(started, finished).await?.0;
+            }
+            if overlap {
+                // Leave the migration dirty above every row, including a
+                // clean row the other run records meanwhile.
+                for _ in 0..5 {
+                    let highest = control.overlapped(started, started).await?.1;
+                    let dirty = next(highest);
+                    control.record(*version, true, dirty).await?;
+                    if control.overlapped(started, started).await?.1 == dirty {
+                        break;
+                    }
+                }
+                return Err(OVERLAP.into());
+            }
             applied.push(label);
         }
         Ok(applied)
@@ -338,6 +385,37 @@ mod tests {
         record(latest() + 1, 0).await.unwrap();
         assert_eq!(start(&config).await.unwrap_err(), NEWER);
         assert_eq!(client.migrate(false).await.unwrap_err(), NEWER);
+    }
+
+    #[tokio::test]
+    async fn overlapping_runs_leave_the_migration_to_repeat() {
+        let (client, config, _guard) = database();
+        // Both runs start before either finishes: each needs many requests.
+        let runs = tokio::join!(client.migrate(true), client.migrate(true));
+        let runs = [runs.0, runs.1];
+        for run in &runs {
+            if let Err(error) = run {
+                assert_eq!(error, OVERLAP);
+            }
+        }
+        // A run that saw the other never leaves the schema marked complete.
+        if runs.iter().any(Result::is_err) {
+            assert_eq!(start(&config).await.unwrap_err(), DIRTY);
+        }
+        client.migrate(false).await.unwrap();
+        start(&config).await.unwrap();
+
+        // Rows after a run's dirty marker are another run's, except its own
+        // completion.
+        let state = client.schema_state().await.unwrap().unwrap();
+        let top = state.sequence;
+        assert_eq!(client.overlapped(top, top).await.unwrap(), (false, top));
+        assert_eq!(client.overlapped(top - 1, top).await.unwrap(), (false, top));
+        assert_eq!(
+            client.overlapped(top - 1, top - 1).await.unwrap(),
+            (true, top)
+        );
+        assert_eq!(client.overlapped(0, top).await.unwrap(), (true, top));
     }
 
     #[test]

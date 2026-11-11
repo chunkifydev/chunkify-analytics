@@ -186,6 +186,10 @@ export async function launchDemo({ collector, clickhouse = process.env.CHUNKIFY_
     const origins = [dashboardUrl, 'http://localhost:4173', 'http://127.0.0.1:4173', 'http://localhost:5173', 'http://127.0.0.1:5173'];
     await writeConfig(dir, clickhouse, state.database, origins);
     signal.throwIfAborted();
+    // A demo directory outlives the executable that created it, and servers do not change tables.
+    try { await exec(binary, ['migrate'], { env, cwd: dir, signal, timeout: 120000 }); }
+    catch { throw new Error(`Could not upgrade the demo database. Check that ClickHouse is running at ${clickhouse} and that the executable matches your OS and this repository version.`); }
+    signal.throwIfAborted();
     collectorLog = createWriteStream(path.join(dir, 'collector.log'), { flags: 'a', mode: 0o600 });
     child = spawn(binary, ['serve'], { env, cwd: dir, stdio: ['ignore', 'pipe', 'pipe'] });
     child.stdout.pipe(collectorLog, { end: false }); child.stderr.pipe(collectorLog, { end: false });

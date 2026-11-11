@@ -419,23 +419,14 @@ pub fn migrate(config: &ClickHouseConfig, create_database: bool) -> Result<Vec<S
 pub fn read_registry(config: &ClickHouseConfig) -> Result<Option<(u64, Vec<u8>)>> {
     let config = config.clone();
     block_on(move || async move {
-        let client = Client::new(config.clone())?.with_timeout(CONTROL_TIMEOUT);
+        let client = Client::new(config)?.with_timeout(CONTROL_TIMEOUT);
         // A missing database or registry is not initialized; reads never
         // create one, so a mistyped database name creates nothing.
-        // Without a default database: the configured one may not exist.
-        let mut params = Params::default();
-        let sql = format!(
-            "SELECT count() FROM system.tables WHERE database = {} AND name = 'registry' FORMAT TSV",
-            params.text(&config.database)
-        );
-        let exists = client
-            .send(sql, &params, &[], false)
+        if !client
+            .table_exists("registry")
             .await
             .map_err(registry_error)?
-            .text()
-            .await
-            .map_err(|_| "Cannot reach the ClickHouse project registry")?;
-        if exists.trim() == "0" {
+        {
             return Ok(None);
         }
         latest(&client).await.map_err(registry_error)

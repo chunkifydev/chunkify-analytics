@@ -439,7 +439,7 @@ to run `migrate`. See [upgrade the schema](docs/storage.md#upgrade-the-schema).
 | Ingestion receives `429` | Requests exceed an installation or project rate limit. See the admission settings. |
 | Requests receive `503` | The write/read queue or another configured resource budget is full. Retry later and check logs. |
 | `init` or `serve` cannot reach ClickHouse | Check `clickhouse.url`, the user and password, and that ClickHouse is running. `docker compose logs clickhouse` shows the server's log. |
-| `serve` stops and reports that the ClickHouse schema is older than this release | Run `chunkify-analytics migrate` once (`docker compose run --rm analytics migrate`), then start the server again. See [upgrade](#upgrade). |
+| `serve` stops and reports that the ClickHouse database needs schema migrations | Run `chunkify-analytics migrate` once (`docker compose run --rm analytics migrate`), then start the server again. See [upgrade](#upgrade). |
 | A command reports that the registry changed on another server | Another server or command changed projects at the same time. Run the command again. |
 | Container configuration did not change | Run `docker compose up -d` after editing `config.toml` or `.env`. |
 

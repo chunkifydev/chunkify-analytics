@@ -239,7 +239,9 @@ Rules for a migration file:
 - There are no down migrations. Fix a released migration with a new one.
 
 The runner waits for each statement's mutations (`mutations_sync = 2`) and has
-no time limit on migration statements.
+no time limit on migration statements. It takes no lock. When two `migrate`
+runs overlap, at least one fails and leaves the migration marked unfinished, so
+that the next run repeats it alone from its first statement.
 
 Three tests guard the schema. `schema_file_matches_the_migrations` compares
 `src/clickhouse/schema.sql` with a freshly migrated database, as printed by the

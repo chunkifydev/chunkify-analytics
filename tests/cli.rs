@@ -207,7 +207,23 @@ fn initialization_and_primary_rotation_return_secrets_without_persisting_them() 
     assert!(migrated.status.success(), "{migrated:?}");
     let migrated: serde_json::Value = serde_json::from_slice(&migrated.stdout).unwrap();
     assert_eq!(migrated["applied"], serde_json::json!([]));
-    assert!(migrated["version"].as_i64().unwrap() >= 1);
+    let version = migrated["version"].as_i64().unwrap();
+    assert!(version >= 1);
+    // `init` never changes a database that is already in use: a migration
+    // that still has to run is left to `migrate`.
+    let name = &database.0;
+    sql(&format!(
+        "INSERT INTO {name}.schema_migrations SELECT {version}, 1, max(sequence) + 1 FROM {name}.schema_migrations"
+    ));
+    let rows = || sql(&format!("SELECT count() FROM {name}.schema_migrations"));
+    let recorded = rows();
+    let repeated = run_in(db, &["init"]);
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("already initialized"));
+    assert_eq!(rows(), recorded);
+    let migrated = run_in(db, &["migrate"]);
+    assert!(migrated.status.success(), "{migrated:?}");
+    let migrated: serde_json::Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    assert_eq!(migrated["applied"].as_array().unwrap().len(), 1);
 }
 
 #[test]

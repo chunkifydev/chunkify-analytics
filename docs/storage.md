@@ -178,6 +178,12 @@ in the ClickHouse user's profile. Registry changes, rollup runs and claims
 stay single-winner across replicas, because ClickHouse Keeper deduplicates
 their inserts. This setup was tested with two replicas and ClickHouse Keeper.
 
+The schema version replicates the same way. When `clickhouse.url` balances
+requests across replicas without read-your-writes behavior, a server that starts
+right after `migrate` can read a replica that does not have the result yet and
+stop with a schema message; start it again. For the same reason, point
+`migrate` at one replica.
+
 ## Schema
 
 | Table | Contents |
@@ -198,7 +204,7 @@ this release creates it.
 
 Each release contains numbered schema migrations. `init` applies all of them to
 a new database. After you upgrade the executable or image, apply the new ones
-once, from any machine that can reach ClickHouse:
+once, from one machine that can reach ClickHouse:
 
 ```sh
 chunkify-analytics migrate
@@ -208,13 +214,19 @@ It prints the schema version and the migrations it applied, for example
 `{"applied":["0003_add_example"],"version":3}`, and an empty list when nothing
 was pending. Then restart the servers.
 
-`serve` never creates or changes tables. At startup it compares the database
-with the version its release needs and stops with a message when they differ:
+Nothing locks the database while `migrate` runs, so run it from one place at a
+time. If two runs overlap, at least one of them fails and says so, and the
+migration stays marked unfinished: when both have stopped, run `migrate` once
+more.
+
+`serve` never creates or changes tables, and `init` does not change a database
+that is already initialized. At startup `serve` compares the database with the
+version its release needs and stops with a message when they differ:
 
 | Message | What to do |
 | --- | --- |
-| The schema is older than this release | Run `chunkify-analytics migrate`, then start the server again. |
-| A schema migration did not finish | Run `chunkify-analytics migrate` again. It repeats the interrupted migration from its start, which is safe. |
+| The database needs schema migrations | Run `chunkify-analytics migrate`, then start the server again. The release is newer than the database, or the database was restored without all its tables. |
+| A schema migration did not finish | A `migrate` run was interrupted or is still running, or two runs overlapped. When none is running, run `chunkify-analytics migrate` again. It repeats the migration from its start, which is safe. |
 | The schema is newer than this release supports | Another server already runs a newer release. Upgrade this server too. |
 
 Running servers check the schema only at startup, so they keep serving while

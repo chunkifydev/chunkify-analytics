@@ -202,6 +202,12 @@ fn initialization_and_primary_rotation_return_secrets_without_persisting_them() 
     assert!(repeated.stdout.is_empty());
     assert!(String::from_utf8_lossy(&repeated.stderr).contains("already initialized"));
     assert_eq!(registry(&database.0), before);
+    // `init` applied every migration, so none is pending.
+    let migrated = run_in(db, &["migrate"]);
+    assert!(migrated.status.success(), "{migrated:?}");
+    let migrated: serde_json::Value = serde_json::from_slice(&migrated.stdout).unwrap();
+    assert_eq!(migrated["applied"], serde_json::json!([]));
+    assert!(migrated["version"].as_i64().unwrap() >= 1);
 }
 
 #[test]
@@ -210,7 +216,11 @@ fn commands_fail_clearly_before_initialization_or_without_clickhouse() {
     let output = run_in(Some(&database.0), &["project", "list"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("run init first"));
-    // Reading a registry never creates a database, for example under a typo.
+    let output = run_in(Some(&database.0), &["migrate"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("run init first"));
+    // Neither reading a registry nor migrating creates a database, for
+    // example under a typo.
     let created = sql(&format!(
         "SELECT count() FROM system.databases WHERE name = '{}'",
         database.0

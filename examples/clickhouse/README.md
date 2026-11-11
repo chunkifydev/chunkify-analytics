@@ -61,6 +61,19 @@ docker compose exec analytics chunkify-analytics project list
 
 Every server applies project and key changes within a few seconds.
 
+## Upgrade
+
+Pull the new image, apply its schema migrations once, then restart the servers:
+
+```sh
+docker compose pull analytics
+docker compose run --rm analytics migrate
+docker compose up -d --scale analytics=3
+```
+
+Analytics servers do not start on a database that still needs migrations. See
+[upgrade the schema](../../docs/storage.md#upgrade-the-schema).
+
 ## Use a locally built image
 
 To use a locally built image, build it from the repository root and select it:

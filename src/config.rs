@@ -180,10 +180,11 @@ impl Config {
         })
     }
 
-    /// Create the ClickHouse schema and the initial project registry once.
+    /// Create the ClickHouse database, apply the schema migrations and save
+    /// the initial project registry once.
     pub fn initialize(&self) -> Result<serde_json::Value> {
-        crate::clickhouse::prepare(&self.clickhouse)?;
-        if crate::clickhouse::load_registry(&self.clickhouse)?.is_some() {
+        crate::clickhouse::migrate(&self.clickhouse, true)?;
+        if crate::clickhouse::read_registry(&self.clickhouse)?.is_some() {
             return Err(
                 "This ClickHouse database is already initialized; run serve to use it".into(),
             );

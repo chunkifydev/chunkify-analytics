@@ -34,9 +34,9 @@ user = "chunkify"
 | `clickhouse.rollup_interval_seconds` | — | `45` | How often servers refresh [report rollups](#report-rollups) when `rollup_max_lag_seconds` is above zero. 0 to 3600. `0` turns rollups off. |
 | `clickhouse.rollup_max_lag_seconds` | — | `120` | Let reports read [report rollups](#report-rollups) while the last refresh is at most this old. A refresh covers events stored until about 10 s before it starts, so its age when reports read it also includes the interval and its own duration. 0 to 3600, and at least twice `rollup_interval_seconds` unless 0. `0` makes reports exact and turns refreshes off. |
 
-The user needs permission to create the database and tables, and to read,
-insert and delete rows in them. Run `init` once per database, not once per
-server.
+The user needs permission to create the database, to create, alter and drop
+tables in it, and to read, insert and delete rows in them. Run `init` once per
+database, not once per server.
 
 Each server applies its own `server.ingest_per_second`, `[batch]` and
 `[rate_limits]` settings, so installation-wide limits grow with the number of
@@ -162,7 +162,7 @@ There is no manual event deletion command.
 One ClickHouse server is enough for most installations. To replicate it, create
 the database with the
 [Replicated database engine](https://clickhouse.com/docs/engines/database-engines/replicated)
-before running `init`. `init` and `serve` detect the Replicated engine and
+before running `init`. `init` and `migrate` detect the Replicated engine and
 create every table as `ReplicatedMergeTree`, so all replicas share events, the
 registry, rollups and claims. Plain `MergeTree` tables in a Replicated database
 would keep their data on one node. The database must exist before `init`:
@@ -188,12 +188,38 @@ their inserts. This setup was tested with two replicas and ClickHouse Keeper.
 | `rollup`, `rollup_hours`, `rollup_views` | [Report rollups](#report-rollups): partial aggregates per hour, each hour's receipt range, and per-view results. Derived from `events`; superseded rows are deleted after 20 refreshes and expired hours by the expiration sweep. |
 | `rollup_runs` | Rollup refresh claims and completions. |
 | `claims` | Short leases between servers: node IDs and expiration sweeps. Rows expire after a day. |
-| `schema_version` | The table layout the database was created with. |
+| `schema_migrations` | The schema version: the row with the highest `sequence` is current, and `dirty = 1` marks a migration that did not finish. |
 
-`init` and `serve` create missing tables. Do not change these tables by hand.
+Do not change these tables by hand.
+[`src/clickhouse/schema.sql`](../src/clickhouse/schema.sql) lists every table as
+this release creates it.
 
-Tables are not upgraded in place. When a release changes the table layout, the
-server refuses to start on a database created by an earlier layout, with a
-message saying so. Use a new `clickhouse.database`, or drop the old database,
-then start again. Events in the old database are not migrated.
+## Upgrade the schema
+
+Each release contains numbered schema migrations. `init` applies all of them to
+a new database. After you upgrade the executable or image, apply the new ones
+once, from any machine that can reach ClickHouse:
+
+```sh
+chunkify-analytics migrate
+```
+
+It prints the schema version and the migrations it applied, for example
+`{"applied":["0003_add_example"],"version":3}`, and an empty list when nothing
+was pending. Then restart the servers.
+
+`serve` never creates or changes tables. At startup it compares the database
+with the version its release needs and stops with a message when they differ:
+
+| Message | What to do |
+| --- | --- |
+| The schema is older than this release | Run `chunkify-analytics migrate`, then start the server again. |
+| A schema migration did not finish | Run `chunkify-analytics migrate` again. It repeats the interrupted migration from its start, which is safe. |
+| The schema is newer than this release supports | Another server already runs a newer release. Upgrade this server too. |
+
+Running servers check the schema only at startup, so they keep serving while
+`migrate` runs. A server of the previous release that restarts after `migrate`
+does not start again, so upgrade all servers soon after migrating. Back up the
+database before an upgrade: there are no downgrade migrations, and going back
+to an earlier release means restoring the backup.
 See [backup and restore](administration.md#backup-and-restore).

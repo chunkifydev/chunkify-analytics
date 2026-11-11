@@ -52,7 +52,7 @@ pub(super) fn hour_of(column: &str) -> String {
 /// Partial aggregates stored per rollup row: name, column type, and the
 /// expression over per-view rows that produces it. Reads compute the same
 /// expressions for unsettled hours and merge both.
-const PARTIALS: &[(&str, &str, &str)] = &[
+pub(super) const PARTIALS: &[(&str, &str, &str)] = &[
     ("views", "UInt64", "count()"),
     (
         "viewers",
@@ -240,7 +240,7 @@ impl Partials {
 }
 
 /// Per-view rows kept by refreshes, with the columns the partials read.
-const VIEW_COLUMNS: &[(&str, &str)] = &[
+pub(super) const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("project_id", "LowCardinality(String)"),
     ("generation", "Int64"),
     ("view_id", "String"),
@@ -279,66 +279,6 @@ const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("startup_outcome", "String"),
     ("has_buffering_sample", "UInt8"),
 ];
-
-/// Statements that create the rollup tables.
-pub(super) fn tables() -> Vec<String> {
-    let views = VIEW_COLUMNS
-        .iter()
-        .map(|(name, kind)| format!("{name} {kind}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let partials = PARTIALS
-        .iter()
-        .map(|(name, kind, _)| format!("{name} {kind}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    // Each identity's aggregation states, kept as events are inserted.
-    let aggregates = super::reports::identity_aggregates(Cohort::Rollup, START_COLUMNS);
-    let states = format!(
-        "SELECT project_id, view_id, video_id, viewer_id, {} FROM events
-        WHERE event_name IN ({}) GROUP BY project_id, view_id, video_id, viewer_id",
-        aggregates
-            .iter()
-            .map(|(function, arguments, name)| format!("{function}State({arguments}) AS {name}"))
-            .collect::<Vec<_>>()
-            .join(", "),
-        super::reports::cohort_events(Cohort::Rollup)
-    );
-    vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS view_states
-            ENGINE = AggregatingMergeTree ORDER BY (project_id, view_id, video_id, viewer_id)
-            SETTINGS allow_nullable_key = 1
-            EMPTY AS {states}"
-        ),
-        format!(
-            "CREATE MATERIALIZED VIEW IF NOT EXISTS view_states_insert TO view_states AS {states}"
-        ),
-        "CREATE TABLE IF NOT EXISTS rollup_runs (
-            version Int64, write_id String, since_ms Int64, through_ms Int64, completed UInt8,
-            written_at DateTime64(3) DEFAULT now64(3)
-        ) ENGINE = MergeTree ORDER BY (version, completed)
-        SETTINGS non_replicated_deduplication_window = 100000"
-            .into(),
-        format!(
-            "CREATE TABLE IF NOT EXISTS rollup_views ({views},
-                INDEX rollup_views_view view_id TYPE bloom_filter GRANULARITY 1)
-            ENGINE = MergeTree ORDER BY (project_id, generation, view_id)"
-        ),
-        "CREATE TABLE IF NOT EXISTS rollup_hours (
-            project_id LowCardinality(String), hour_ms Int64, generation Int64,
-            min_received_ms Int64, max_received_ms Int64
-        ) ENGINE = MergeTree ORDER BY (project_id, hour_ms, generation)"
-            .into(),
-        format!(
-            "CREATE TABLE IF NOT EXISTS rollup (
-                project_id LowCardinality(String), dim LowCardinality(String), hour_ms Int64,
-                generation Int64, value Nullable(String), video_id String, {partials}
-            ) ENGINE = MergeTree ORDER BY (project_id, dim, hour_ms, generation, value, video_id)
-            SETTINGS allow_nullable_key = 1"
-        ),
-    ]
-}
 
 /// Hours a report reads from rollups, and the date ranges it reads from events.
 pub(super) struct Plan {

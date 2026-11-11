@@ -43,6 +43,7 @@ impl Fixture {
         }
         let keys = crate::config::Keys { projects: list };
         let registry = Arc::new(crate::projects::Registry::new(&keys, &config).unwrap());
+        testing::migrate(&config.clickhouse).await;
         let store = Store::open(&config, registry.clone()).await.unwrap();
         Self {
             store,
@@ -2621,35 +2622,6 @@ fn lag_limits_leave_room_for_slow_refreshes() {
 }
 
 #[tokio::test]
-async fn databases_with_another_table_layout_fail_at_startup() {
-    let fixture = Fixture::new(&["default"]).await;
-    // A restart on the same layout keeps working.
-    assert!(
-        Store::open(&fixture.config, fixture.registry.clone())
-            .await
-            .is_ok()
-    );
-    let reopen = || Store::open(&fixture.config, fixture.registry.clone());
-    fixture.sql("TRUNCATE TABLE schema_version").await;
-    fixture.sql("INSERT INTO schema_version VALUES (1)").await;
-    let error = reopen().await.err().expect("outdated layout");
-    assert_eq!(error.to_string(), super::OUTDATED_SCHEMA);
-    // A database from before schema versions, like 0.15.0, fails the same way.
-    fixture.sql("DROP TABLE schema_version").await;
-    let error = reopen().await.err().expect("unversioned layout");
-    assert_eq!(error.to_string(), super::OUTDATED_SCHEMA);
-    // Another release's version fails even before its tables exist.
-    fixture.sql("DROP TABLE view_states_insert").await;
-    fixture.sql("DROP TABLE events").await;
-    fixture
-        .sql("CREATE TABLE schema_version (version UInt64) ENGINE = MergeTree ORDER BY version")
-        .await;
-    fixture.sql("INSERT INTO schema_version VALUES (3)").await;
-    let error = reopen().await.err().expect("newer layout");
-    assert_eq!(error.to_string(), super::OUTDATED_SCHEMA);
-}
-
-#[tokio::test]
 async fn custom_dimensions_use_the_first_start_and_list_their_keys() {
     let fixture = Fixture::new(&["default", "other"]).await;
     let store = &fixture.store;
@@ -2857,5 +2829,191 @@ fn rollup_dimensions_are_carried_first_start_columns() {
     assert_eq!(
         crate::query::hourly_columns().collect::<Vec<_>>(),
         START_CONTEXT
+    );
+}
+
+/// Rows of a query as text, in the format the query names.
+async fn text(client: &super::Client, sql: String) -> String {
+    client
+        .send(sql, &Params::default(), &[], true)
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.message))
+        .text()
+        .await
+        .unwrap()
+}
+
+/// `src/clickhouse/schema.sql` is the schema the migrations produce on an
+/// empty database. After adding a migration, regenerate it with
+/// `CHUNKIFY_UPDATE_SCHEMA=1 cargo test schema_file` and review the change.
+#[tokio::test]
+async fn schema_file_matches_the_migrations() {
+    let fixture = Fixture::new(&["default"]).await;
+    let client = &fixture.store.client;
+    let database = &fixture.config.clickhouse.database;
+    let tables = text(
+        client,
+        "SELECT name FROM system.tables WHERE database = currentDatabase() ORDER BY name FORMAT TSV"
+            .into(),
+    )
+    .await;
+    let mut schema = String::from(
+        "-- The tables after every migration in src/clickhouse/migrations, as ClickHouse\n\
+         -- 26.10 prints them. Generated: do not edit. To change a table, add a migration,\n\
+         -- then regenerate this file (see docs/development.md).\n",
+    );
+    for table in tables.lines() {
+        let create = text(client, format!("SHOW CREATE TABLE {table} FORMAT TSVRaw")).await;
+        schema.push('\n');
+        schema.push_str(&create.trim_end().replace(&format!("{database}."), ""));
+        schema.push_str(";\n");
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/clickhouse/schema.sql");
+    if std::env::var_os("CHUNKIFY_UPDATE_SCHEMA").is_some() {
+        std::fs::write(&path, &schema).unwrap();
+    }
+    assert!(
+        std::fs::read_to_string(&path).unwrap_or_default() == schema,
+        "src/clickhouse/schema.sql does not match the migrations; regenerate it with CHUNKIFY_UPDATE_SCHEMA=1 cargo test schema_file"
+    );
+}
+
+/// The type of an events column for a `storage::COLUMNS` entry.
+fn event_column_type(name: &str, kind: &str) -> String {
+    let required = matches!(
+        name,
+        "event_id"
+            | "project_id"
+            | "view_id"
+            | "video_id"
+            | "event_name"
+            | "sequence"
+            | "occurred_at_ms"
+            | "received_at_ms"
+            | "event_remainder"
+            | "context_format"
+    );
+    let low_cardinality = matches!(
+        name,
+        "event_name"
+            | "project_id"
+            | "context_browser_name"
+            | "context_os_name"
+            | "context_device_type"
+    );
+    match (required, low_cardinality) {
+        (true, true) => format!("LowCardinality({kind})"),
+        (true, false) => kind.into(),
+        (false, true) => format!("LowCardinality(Nullable({kind}))"),
+        (false, false) => format!("Nullable({kind})"),
+    }
+}
+
+/// The code writes and reads tables through its own column lists and
+/// aggregates. Changing one of them without a migration fails here.
+#[tokio::test]
+async fn migrated_tables_match_the_columns_the_code_uses() {
+    use super::{
+        reports::{Cohort, START_COLUMNS, cohort_events, identity_aggregates},
+        rollup::{PARTIALS, VIEW_COLUMNS},
+    };
+    let fixture = Fixture::new(&["default"]).await;
+    let client = &fixture.store.client;
+    // Columns that inserts set, in table order.
+    let columns = |table: &'static str| async move {
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT name, type FROM system.columns
+            WHERE database = currentDatabase() AND table = {} AND default_kind = ''
+            ORDER BY position",
+            params.text(table)
+        );
+        ok(client.all(&sql, &params).await.map(Value::from))
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row[0].as_str().unwrap().to_owned(),
+                    row[1].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |columns: &[(&str, &str)]| {
+        columns
+            .iter()
+            .map(|(name, kind)| (name.to_string(), kind.to_string()))
+            .collect::<Vec<_>>()
+    };
+
+    let mut events = vec![("ingest_id".to_owned(), "Int64".to_owned())];
+    events.extend(
+        crate::storage::COLUMNS
+            .iter()
+            .map(|(name, kind)| (name.clone(), event_column_type(name, kind))),
+    );
+    events.push(("otlp_payload".into(), "Nullable(String)".into()));
+    assert_eq!(columns("events").await, events);
+
+    assert_eq!(columns("rollup_views").await, owned(VIEW_COLUMNS));
+
+    let mut rollup = owned(&[
+        ("project_id", "LowCardinality(String)"),
+        ("dim", "LowCardinality(String)"),
+        ("hour_ms", "Int64"),
+        ("generation", "Int64"),
+        ("value", "Nullable(String)"),
+        ("video_id", "String"),
+    ]);
+    rollup.extend(
+        PARTIALS
+            .iter()
+            .map(|(name, kind, _)| (name.to_string(), kind.to_string())),
+    );
+    assert_eq!(columns("rollup").await, rollup);
+
+    // The states the code merges, created from the code's own aggregates.
+    let states = format!(
+        "SELECT project_id, view_id, video_id, viewer_id, {} FROM events
+        WHERE event_name IN ({}) GROUP BY project_id, view_id, video_id, viewer_id",
+        identity_aggregates(Cohort::Rollup, START_COLUMNS)
+            .iter()
+            .map(|(function, arguments, name)| format!("{function}State({arguments}) AS {name}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+        cohort_events(Cohort::Rollup)
+    );
+    fixture
+        .sql(&format!(
+            "CREATE TABLE expected_states
+            ENGINE = AggregatingMergeTree ORDER BY (project_id, view_id, video_id, viewer_id)
+            SETTINGS allow_nullable_key = 1
+            EMPTY AS {states}"
+        ))
+        .await;
+    fixture
+        .sql(&format!(
+            "CREATE MATERIALIZED VIEW expected_states_insert TO expected_states AS {states}"
+        ))
+        .await;
+    assert_eq!(
+        columns("view_states").await,
+        columns("expected_states").await
+    );
+    let select = |view: &'static str| async move {
+        text(
+            client,
+            format!(
+                "SELECT as_select FROM system.tables
+                WHERE database = currentDatabase() AND name = '{view}' FORMAT TSVRaw"
+            ),
+        )
+        .await
+    };
+    assert!(!select("view_states_insert").await.trim().is_empty());
+    assert_eq!(
+        select("view_states_insert").await,
+        select("expected_states_insert").await
     );
 }

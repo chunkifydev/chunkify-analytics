@@ -39,6 +39,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{}", config.initialize()?);
             Ok(())
         }
+        cli::Command::Migrate => {
+            let applied = clickhouse::migrate(&config.clickhouse, false)?;
+            println!(
+                "{}",
+                serde_json::json!({"version": clickhouse::migrations::latest(), "applied": applied})
+            );
+            Ok(())
+        }
         cli::Command::Config {
             command: cli::ConfigCommand::Check,
         } => {

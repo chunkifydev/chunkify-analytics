@@ -1,0 +1,396 @@
+//! Schema migrations. The numbered SQL files under `migrations/` are the only
+//! definition of the tables: `init` and `migrate` apply them in order, and
+//! `serve` only checks that the database is at this release's version.
+//!
+//! The state table has golang-migrate's layout. The row with the highest
+//! `sequence` holds the current version, and `dirty` marks a migration that
+//! started and did not finish. ClickHouse DDL is not transactional, so every
+//! statement must be safe to run again (`IF NOT EXISTS`, `IF EXISTS`): an
+//! interrupted migration is retried from its first statement.
+use super::{CONTROL_TIMEOUT, Client, Params};
+use crate::api::ApiError;
+use serde_json::Value;
+
+/// Version, name and SQL of every migration, in order. Released files never
+/// change: a schema change is a new file, registered here.
+const MIGRATIONS: &[(i64, &str, &str)] =
+    &[(1, "init", include_str!("migrations/0001_init.up.sql"))];
+
+pub const UNREACHABLE: &str =
+    "Cannot reach ClickHouse; check clickhouse.url, credentials and permissions";
+pub const NOT_INITIALIZED: &str = "This ClickHouse database is not initialized; run init first";
+pub const PENDING: &str = "The ClickHouse schema is older than this release; run `chunkify-analytics migrate`, then start again";
+pub const DIRTY: &str =
+    "A ClickHouse schema migration did not finish; run `chunkify-analytics migrate` again";
+pub const NEWER: &str = "The ClickHouse schema is newer than this release supports; upgrade chunkify-analytics before using this database";
+
+/// The version this release needs.
+pub fn latest() -> i64 {
+    MIGRATIONS.last().map_or(0, |(version, _, _)| *version)
+}
+
+/// The statements of a migration file. A statement ends at a line that ends
+/// with `;`, and lines that start with `--` are comments.
+fn statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    for line in sql.lines() {
+        let line = line.trim_end();
+        if line.trim_start().starts_with("--") {
+            continue;
+        }
+        match line.strip_suffix(';') {
+            Some(end) => {
+                current.push_str(end);
+                statements.push(std::mem::take(&mut current).trim().to_owned());
+            }
+            None => {
+                current.push_str(line);
+                current.push('\n');
+            }
+        }
+    }
+    // Text after the last `;` would never run; a test rejects such files.
+    if !current.trim().is_empty() {
+        statements.push(current.trim().to_owned());
+    }
+    statements.retain(|statement| !statement.is_empty());
+    statements
+}
+
+/// In a Replicated database, plain MergeTree tables keep their data on one
+/// node; replicate every table so all servers share the same data.
+fn replicate(statement: &str) -> String {
+    statement
+        .replace("ENGINE = MergeTree", "ENGINE = ReplicatedMergeTree")
+        .replace(
+            "ENGINE = AggregatingMergeTree",
+            "ENGINE = ReplicatedAggregatingMergeTree",
+        )
+}
+
+fn unreachable(_: ApiError) -> String {
+    UNREACHABLE.into()
+}
+
+/// The schema version a database is at.
+struct State {
+    version: i64,
+    dirty: bool,
+    sequence: u64,
+}
+
+impl Client {
+    /// The database's engine, or `None` when the database does not exist.
+    async fn database_engine(&self) -> Result<Option<String>, ApiError> {
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT engine FROM system.databases WHERE name = {} FORMAT TSV",
+            params.text(&self.config.database)
+        );
+        // Without a default database: the configured one may not exist.
+        let engine = self
+            .send(sql, &params, &[], false)
+            .await?
+            .text()
+            .await
+            .map_err(|_| ApiError::unavailable())?;
+        Ok(Some(engine.trim().to_owned()).filter(|engine| !engine.is_empty()))
+    }
+
+    async fn table_exists(&self, table: &str) -> Result<bool, ApiError> {
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT count() FROM system.tables WHERE database = {} AND name = {} FORMAT TSV",
+            params.text(&self.config.database),
+            params.text(table)
+        );
+        let count = self
+            .send(sql, &params, &[], false)
+            .await?
+            .text()
+            .await
+            .map_err(|_| ApiError::unavailable())?;
+        Ok(count.trim() != "0")
+    }
+
+    /// The recorded schema version, or `None` before any migration started.
+    /// Never creates anything.
+    async fn schema_state(&self) -> Result<Option<State>, ApiError> {
+        if !self.table_exists("schema_migrations").await? {
+            return Ok(None);
+        }
+        let rows = self
+            .all(
+                "SELECT version, dirty, sequence FROM schema_migrations ORDER BY sequence DESC LIMIT 1",
+                &Params::default(),
+            )
+            .await?;
+        let state = |row: &Vec<Value>| {
+            Some(State {
+                version: row.first()?.as_i64()?,
+                dirty: row.get(1)?.as_u64()? != 0,
+                sequence: row.get(2)?.as_u64()?,
+            })
+        };
+        rows.first()
+            .map(|row| state(row).ok_or_else(ApiError::internal))
+            .transpose()
+    }
+
+    /// Whether this release can use the database as it is. `serve` calls this
+    /// at startup and changes nothing.
+    pub async fn check_schema(&self) -> Result<(), String> {
+        match self.schema_state().await.map_err(unreachable)? {
+            Some(state) if state.version > latest() => Err(NEWER.into()),
+            Some(state) if state.dirty => Err(DIRTY.into()),
+            Some(state) if state.version == latest() => Ok(()),
+            _ => Err(PENDING.into()),
+        }
+    }
+
+    async fn record(&self, version: i64, dirty: bool, sequence: u64) -> Result<(), String> {
+        let mut params = Params::default();
+        let sql = format!(
+            "INSERT INTO schema_migrations (version, dirty, sequence) SELECT {}, {}, {}",
+            params.int(version),
+            params.int(dirty.into()),
+            params.int(sequence as i64)
+        );
+        self.execute_with(sql, &params, &[("async_insert", "0")])
+            .await
+            .map_err(unreachable)
+    }
+
+    /// Run one migration statement and wait for its mutations. Unlike other
+    /// requests, a failure reports ClickHouse's message: migrations hold no
+    /// event data, and the operator needs the reason.
+    async fn run(&self, statement: String) -> Result<(), String> {
+        let response = self
+            .request(
+                statement,
+                &Params::default(),
+                &[("mutations_sync", "2")],
+                true,
+            )
+            .send()
+            .await
+            .map_err(|_| UNREACHABLE.to_owned())?;
+        let failed = !response.status().is_success();
+        let body = response.text().await.map_err(|_| UNREACHABLE.to_owned())?;
+        if failed || body.contains("DB::Exception") {
+            return Err(body.lines().next().unwrap_or("unknown error").to_owned());
+        }
+        Ok(())
+    }
+
+    /// Apply every pending migration and return the names of those applied.
+    /// Only `init` creates a missing database. Safe to run again after a
+    /// failure, and from two places at once: statements repeat without harm.
+    pub async fn migrate(&self, create_database: bool) -> Result<Vec<String>, String> {
+        let control = self.with_timeout(CONTROL_TIMEOUT);
+        // Migrations can rewrite data, so their statements have no time limit.
+        let unlimited = Self {
+            timeout: None,
+            ..self.clone()
+        };
+        let mut engine = control.database_engine().await.map_err(unreachable)?;
+        if engine.is_none() {
+            if !create_database {
+                return Err(NOT_INITIALIZED.into());
+            }
+            control
+                .send(
+                    format!("CREATE DATABASE IF NOT EXISTS {}", self.config.database),
+                    &Params::default(),
+                    &[],
+                    false,
+                )
+                .await
+                .map_err(unreachable)?
+                .text()
+                .await
+                .map_err(|_| UNREACHABLE.to_owned())?;
+            engine = control.database_engine().await.map_err(unreachable)?;
+        }
+        let replicated = engine.as_deref() == Some("Replicated");
+        let prepared = |statement: &str| {
+            if replicated {
+                replicate(statement)
+            } else {
+                statement.to_owned()
+            }
+        };
+        let state = control
+            .schema_state()
+            .await
+            .map_err(unreachable)?
+            .unwrap_or(State {
+                version: 0,
+                dirty: false,
+                sequence: 0,
+            });
+        if state.version > latest() {
+            return Err(NEWER.into());
+        }
+        control
+            .run(prepared(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version Int64, dirty UInt8, sequence UInt64
+                ) ENGINE = MergeTree ORDER BY sequence",
+            ))
+            .await?;
+        // Later rows win, whatever the clocks of the machines that wrote them.
+        let mut sequence = state.sequence;
+        let mut next = || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+            sequence = now.max(sequence + 1);
+            sequence
+        };
+        let mut applied = Vec::new();
+        for (version, name, sql) in MIGRATIONS {
+            let pending = *version > state.version || (*version == state.version && state.dirty);
+            if !pending {
+                continue;
+            }
+            let label = format!("{version:04}_{name}");
+            control.record(*version, true, next()).await?;
+            for statement in statements(sql) {
+                unlimited.run(prepared(&statement)).await.map_err(|error| {
+                    format!("Migration {label} failed: {error}. Fix the cause, then run `chunkify-analytics migrate` again")
+                })?;
+            }
+            control.record(*version, false, next()).await?;
+            applied.push(label);
+        }
+        Ok(applied)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clickhouse::{Store, testing};
+    use std::sync::Arc;
+
+    /// A client for a new database name, a way to start a server on it, and
+    /// the guard that drops the database.
+    fn database() -> (Client, crate::config::Config, testing::Disposable) {
+        let config = testing::config("retention.seconds = 0");
+        let guard = testing::Disposable(config.clickhouse.clone());
+        let client = Client::new(config.clickhouse.clone()).unwrap();
+        (client, config, guard)
+    }
+
+    async fn start(config: &crate::config::Config) -> Result<(), String> {
+        let keys = crate::config::Keys {
+            projects: vec![crate::projects::primary_project(
+                "test-public",
+                "test-secret",
+            )],
+        };
+        let registry = Arc::new(crate::projects::Registry::new(&keys, config).unwrap());
+        Store::open(config, registry)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    #[tokio::test]
+    async fn servers_start_only_at_this_release_s_schema_version() {
+        let (client, config, _guard) = database();
+        // Neither a server nor `migrate` creates a database, for example
+        // under a mistyped name.
+        assert_eq!(start(&config).await.unwrap_err(), PENDING);
+        assert_eq!(client.migrate(false).await.unwrap_err(), NOT_INITIALIZED);
+        assert_eq!(client.database_engine().await.unwrap(), None);
+
+        let all: Vec<String> = MIGRATIONS
+            .iter()
+            .map(|(version, name, _)| format!("{version:04}_{name}"))
+            .collect();
+        assert_eq!(client.migrate(true).await.unwrap(), all);
+        start(&config).await.unwrap();
+        // Nothing is pending the second time.
+        assert!(client.migrate(false).await.unwrap().is_empty());
+
+        // A migration that stopped halfway is retried from its start.
+        let record = |version: i64, dirty: u8| {
+            client.run(format!(
+                "INSERT INTO schema_migrations
+                SELECT {version}, {dirty}, max(sequence) + 1 FROM schema_migrations"
+            ))
+        };
+        record(latest(), 1).await.unwrap();
+        assert_eq!(start(&config).await.unwrap_err(), DIRTY);
+        assert_eq!(client.migrate(false).await.unwrap(), all[all.len() - 1..]);
+        start(&config).await.unwrap();
+
+        // A database behind this release needs `migrate`.
+        record(latest() - 1, 0).await.unwrap();
+        assert_eq!(start(&config).await.unwrap_err(), PENDING);
+        assert_eq!(client.migrate(false).await.unwrap(), all[all.len() - 1..]);
+        start(&config).await.unwrap();
+
+        // A later release's database is left alone.
+        record(latest() + 1, 0).await.unwrap();
+        assert_eq!(start(&config).await.unwrap_err(), NEWER);
+        assert_eq!(client.migrate(false).await.unwrap_err(), NEWER);
+    }
+
+    #[test]
+    fn statements_end_at_semicolon_lines_and_skip_comments() {
+        let sql = "-- A comment; with a semicolon;\nCREATE TABLE a (\n    b String -- not a comment line\n);\n\n  -- indented comment\nDROP TABLE IF EXISTS c;\n";
+        assert_eq!(
+            statements(sql),
+            [
+                "CREATE TABLE a (\n    b String -- not a comment line\n)",
+                "DROP TABLE IF EXISTS c"
+            ]
+        );
+        assert_eq!(statements("SELECT 1"), ["SELECT 1"]);
+    }
+
+    #[test]
+    fn replicated_databases_get_replicated_engines() {
+        assert_eq!(
+            replicate("CREATE TABLE a (b String) ENGINE = MergeTree ORDER BY b"),
+            "CREATE TABLE a (b String) ENGINE = ReplicatedMergeTree ORDER BY b"
+        );
+        assert_eq!(
+            replicate("CREATE TABLE a ENGINE = AggregatingMergeTree ORDER BY b"),
+            "CREATE TABLE a ENGINE = ReplicatedAggregatingMergeTree ORDER BY b"
+        );
+    }
+
+    /// Every file under `migrations/` is registered under its own number and
+    /// name, numbers have no gaps, and every statement ends with `;`.
+    #[test]
+    fn migration_files_are_registered_in_order() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/clickhouse/migrations");
+        let mut files: Vec<String> = std::fs::read_dir(directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        files.sort();
+        let registered: Vec<String> = MIGRATIONS
+            .iter()
+            .map(|(version, name, _)| format!("{version:04}_{name}.up.sql"))
+            .collect();
+        assert_eq!(files, registered);
+        for (index, (version, name, sql)) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(*version, index as i64 + 1, "{name}");
+            assert!(!statements(sql).is_empty(), "{name} has no statements");
+            let last = sql
+                .lines()
+                .rfind(|line| !line.trim().is_empty() && !line.trim_start().starts_with("--"));
+            assert!(
+                last.is_some_and(|line| line.trim_end().ends_with(';')),
+                "{name} must end its last statement with `;`"
+            );
+        }
+    }
+}

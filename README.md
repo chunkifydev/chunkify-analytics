@@ -409,6 +409,26 @@ Reports hide expired events immediately, and a periodic sweep deletes them.
 See [storage](docs/storage.md) for settings, scaling and replication, and
 [backup and restore](docs/administration.md#backup-and-restore) before moving data.
 
+## Upgrade
+
+After installing a new release, apply its schema migrations once, then restart
+the servers:
+
+```sh
+chunkify-analytics migrate
+```
+
+With Docker Compose, pull the new image first:
+
+```sh
+docker compose pull analytics
+docker compose run --rm analytics migrate
+docker compose up -d
+```
+
+A server does not start on a database that still needs migrations; its log says
+to run `migrate`. See [upgrade the schema](docs/storage.md#upgrade-the-schema).
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -419,6 +439,7 @@ See [storage](docs/storage.md) for settings, scaling and replication, and
 | Ingestion receives `429` | Requests exceed an installation or project rate limit. See the admission settings. |
 | Requests receive `503` | The write/read queue or another configured resource budget is full. Retry later and check logs. |
 | `init` or `serve` cannot reach ClickHouse | Check `clickhouse.url`, the user and password, and that ClickHouse is running. `docker compose logs clickhouse` shows the server's log. |
+| `serve` stops and reports that the ClickHouse schema is older than this release | Run `chunkify-analytics migrate` once (`docker compose run --rm analytics migrate`), then start the server again. See [upgrade](#upgrade). |
 | A command reports that the registry changed on another server | Another server or command changed projects at the same time. Run the command again. |
 | Container configuration did not change | Run `docker compose up -d` after editing `config.toml` or `.env`. |
 

@@ -317,7 +317,8 @@ FROM Disk('backups', 'analytics-2026-11-08.zip');
 
 Include both the `events` and `registry` tables. Rollup tables are derived from
 `events`: without them, the first refresh rebuilds every hour. Use the same analytics server
-version or a newer one. Check `/healthz`, events and summaries before sending
+version or a newer one; with a newer one, run `chunkify-analytics migrate`
+against the restored database before starting servers. Check `/healthz`, events and summaries before sending
 traffic. A restore also restores old credentials and retention settings;
 reapply later changes as needed. Startup expiration still applies to restored
 data.

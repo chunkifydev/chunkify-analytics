@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.1](https://github.com/chunkifydev/chunkify-analytics/compare/v0.17.0...v0.17.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **api:** discriminate events and type browser context in the contract ([#73](https://github.com/chunkifydev/chunkify-analytics/issues/73)) ([fae9f81](https://github.com/chunkifydev/chunkify-analytics/commit/fae9f81ba95707e821df965d809a35986b4efb5b))
+
 ## [0.17.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.16.0...v0.17.0) (2026-11-10)
 
 

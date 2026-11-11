@@ -4,7 +4,7 @@
   "info": {
     "title": "Chunkify analytics collector API",
     "version": "1.1.0",
-    "description": "Collect playback events, query analytics, and manage your project. Analytics reads share configurable per-project budgets across HTTP and MCP: defaults are 120 reads/minute with burst 20, at most 2 queued/running reads per project and 8 server-wide. Export link creation and downloads have separate project budgets. Rate/concurrency rejections return 429 with Retry-After. Limits use continuous refill and reset on collector restart, not key rotation. Configure [rate_limits] in config.toml. Report routes marked x-custom-filters also accept custom dimension filters named custom.<key>, such as custom.plan=premium: exact, case-sensitive text of 1 to 256 characters, at most 10 per request, combined with other filters by AND. Views without the key never match. User ID and custom filters read one row per view rather than events.",
+    "description": "Collect playback events, query analytics, and manage your project. Analytics reads share configurable per-project budgets across HTTP and MCP: defaults are 120 reads/minute with burst 20, at most 16 queued/running reads per project and 32 executing server-wide. Export link creation and downloads have separate project budgets. Rate/concurrency rejections return 429 with Retry-After. Limits use continuous refill and reset on collector restart, not key rotation. Configure [rate_limits] in config.toml. Report routes marked x-custom-filters also accept custom dimension filters named custom.<key>, such as custom.plan=premium: exact, case-sensitive text of 1 to 256 characters, at most 10 per request, combined with other filters by AND. Views without the key never match. User ID and custom filters read one row per view rather than events.",
     "license": {
       "name": "MIT",
       "identifier": "MIT"
@@ -5682,6 +5682,20 @@
             "$ref": "#/components/schemas/PlaybackRateChanged"
           }
         ],
+        "discriminator": {
+          "propertyName": "event_name",
+          "mapping": {
+            "chunkify.video.view_started": "#/components/schemas/ViewStarted",
+            "chunkify.video.view_snapshot": "#/components/schemas/ViewSnapshot",
+            "chunkify.video.playback_error": "#/components/schemas/PlaybackError",
+            "chunkify.video.view_ended": "#/components/schemas/ViewEnded",
+            "chunkify.video.playback_state_changed": "#/components/schemas/PlaybackStateChanged",
+            "chunkify.video.rendition_changed": "#/components/schemas/RenditionChanged",
+            "chunkify.video.seek_completed": "#/components/schemas/SeekCompleted",
+            "chunkify.video.subtitle_changed": "#/components/schemas/SubtitleChanged",
+            "chunkify.video.playback_rate_changed": "#/components/schemas/PlaybackRateChanged"
+          }
+        },
         "description": "A schema version 1 playback event. Extra properties are preserved."
       },
       "EventEnvelope": {
@@ -6017,6 +6031,14 @@
             ]
           },
           "browser_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserContext"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "description": "Optional browser information supplied by the player."
           }
         },
@@ -6539,25 +6561,9 @@
           }
         },
         "required": [
-          "schema_version",
-          "user_agent",
-          "browser_name",
-          "browser_version",
-          "os_name",
-          "os_version",
-          "device_type",
-          "device_family",
-          "language",
-          "language_prefix",
-          "timezone",
-          "timezone_offset_minutes",
-          "screen_width_px",
-          "screen_height_px",
-          "viewport_width_px",
-          "viewport_height_px",
-          "pixel_ratio"
+          "schema_version"
         ],
-        "description": "Browser and device information reported by the player. Unavailable measurements are null."
+        "description": "Browser and device information. The Chunkify player sends every field, with null for unavailable measurements. Other integrations may omit any field except schema_version. Extra properties are preserved."
       },
       "EventContext": {
         "type": "object",

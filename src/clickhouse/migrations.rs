@@ -23,11 +23,27 @@ pub const PENDING: &str = "The ClickHouse database needs schema migrations; run 
 pub const DIRTY: &str =
     "A ClickHouse schema migration did not finish; run `chunkify-analytics migrate` again";
 pub const NEWER: &str = "The ClickHouse schema is newer than this release supports; upgrade chunkify-analytics before using this database";
+pub const INCOMPLETE: &str = "The ClickHouse database is still missing tables after every migration ran; check that this ClickHouse server finished creating them, then run `chunkify-analytics migrate` again. Missing:";
 pub const OVERLAP: &str = "Another `chunkify-analytics migrate` ran at the same time; when it has stopped, run `chunkify-analytics migrate` again";
 
 /// The version this release needs.
 pub fn latest() -> i64 {
     MIGRATIONS.last().map_or(0, |(version, _, _)| *version)
+}
+
+/// The tables of a migrated database, as the generated `schema.sql` lists
+/// them. A recorded version does not prove they exist: a restore can bring
+/// the version back without them.
+fn expected_tables() -> Vec<&'static str> {
+    include_str!("schema.sql")
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("CREATE TABLE ")
+                .or_else(|| line.strip_prefix("CREATE MATERIALIZED VIEW "))
+        })
+        .filter_map(|rest| rest.split_whitespace().next())
+        .map(|name| name.trim_matches('`'))
+        .collect()
 }
 
 /// The statements of a migration file. A statement ends at a line that ends
@@ -141,13 +157,39 @@ impl Client {
             .transpose()
     }
 
+    /// The tables of this release that the database does not have.
+    async fn missing_tables(&self) -> Result<Vec<&'static str>, ApiError> {
+        let mut params = Params::default();
+        let sql = format!(
+            "SELECT name FROM system.tables WHERE database = {} FORMAT TSV",
+            params.text(&self.config.database)
+        );
+        let names = self
+            .send(sql, &params, &[], false)
+            .await?
+            .text()
+            .await
+            .map_err(|_| ApiError::unavailable())?;
+        let existing: std::collections::HashSet<&str> = names.lines().collect();
+        Ok(expected_tables()
+            .into_iter()
+            .filter(|table| !existing.contains(table))
+            .collect())
+    }
+
     /// Whether this release can use the database as it is. `serve` calls this
     /// at startup and changes nothing.
     pub async fn check_schema(&self) -> Result<(), String> {
         match self.schema_state().await.map_err(unreachable)? {
             Some(state) if state.version > latest() => Err(NEWER.into()),
             Some(state) if state.dirty => Err(DIRTY.into()),
-            Some(state) if state.version == latest() => Ok(()),
+            Some(state) if state.version == latest() => {
+                // The version alone is not enough after a partial restore.
+                match self.missing_tables().await.map_err(unreachable)? {
+                    missing if missing.is_empty() => Ok(()),
+                    _ => Err(PENDING.into()),
+                }
+            }
             _ => Err(PENDING.into()),
         }
     }
@@ -206,8 +248,11 @@ impl Client {
     }
 
     /// Apply every pending migration and return the names of those applied.
-    /// Only `init` creates a missing database. Safe to run again after a
-    /// failure. Run it from one place at a time: nothing locks the database,
+    /// When tables are still missing afterwards, for example after a restore
+    /// that kept the version but not every table, apply all migrations again
+    /// from the first to recreate them. Only `init` creates a missing
+    /// database. Safe to run again after a failure. Run it from one place at
+    /// a time: nothing locks the database,
     /// but runs that overlap leave the migration marked unfinished, so it is
     /// repeated from its start by the next run.
     pub async fn migrate(&self, create_database: bool) -> Result<Vec<String>, String> {
@@ -273,44 +318,64 @@ impl Client {
             sequence
         };
         let mut applied = Vec::new();
-        for (version, name, sql) in MIGRATIONS {
-            let pending = *version > state.version || (*version == state.version && state.dirty);
-            if !pending {
-                continue;
-            }
-            let label = format!("{version:04}_{name}");
-            let started = next(0);
-            control.record(*version, true, started).await?;
-            for statement in statements(sql) {
-                unlimited.run(prepared(&statement)).await.map_err(|error| {
-                    format!("Migration {label} failed: {error}. Fix the cause, then run `chunkify-analytics migrate` again")
-                })?;
-            }
-            // Another run may have repeated statements while these ran, for
-            // example emptying a table this run was filling. Every run records
-            // its dirty row before its first statement, so of two overlapping
-            // runs at least the one with the lower row sees the other's.
-            let mut overlap = control.overlapped(started, started).await?.0;
-            if !overlap {
-                let finished = next(0);
-                control.record(*version, false, finished).await?;
-                // The other run may have started since the check.
-                overlap = control.overlapped(started, finished).await?.0;
-            }
-            if overlap {
-                // Leave the migration dirty above every row, including a
-                // clean row the other run records meanwhile.
-                for _ in 0..5 {
-                    let highest = control.overlapped(started, started).await?.1;
-                    let dirty = next(highest);
-                    control.record(*version, true, dirty).await?;
-                    if control.overlapped(started, started).await?.1 == dirty {
-                        break;
-                    }
+        for repair in [false, true] {
+            if repair {
+                // Every migration was recorded, and tables are missing.
+                if control
+                    .missing_tables()
+                    .await
+                    .map_err(unreachable)?
+                    .is_empty()
+                {
+                    break;
                 }
-                return Err(OVERLAP.into());
+                applied.clear();
             }
-            applied.push(label);
+            for (version, name, sql) in MIGRATIONS {
+                let pending = repair
+                    || *version > state.version
+                    || (*version == state.version && state.dirty);
+                if !pending {
+                    continue;
+                }
+                let label = format!("{version:04}_{name}");
+                let started = next(0);
+                control.record(*version, true, started).await?;
+                for statement in statements(sql) {
+                    unlimited.run(prepared(&statement)).await.map_err(|error| {
+                        format!("Migration {label} failed: {error}. Fix the cause, then run `chunkify-analytics migrate` again")
+                    })?;
+                }
+                // Another run may have repeated statements while these ran, for
+                // example emptying a table this run was filling. Every run records
+                // its dirty row before its first statement, so of two overlapping
+                // runs at least the one with the lower row sees the other's.
+                let mut overlap = control.overlapped(started, started).await?.0;
+                if !overlap {
+                    let finished = next(0);
+                    control.record(*version, false, finished).await?;
+                    // The other run may have started since the check.
+                    overlap = control.overlapped(started, finished).await?.0;
+                }
+                if overlap {
+                    // Leave the migration dirty above every row, including a
+                    // clean row the other run records meanwhile.
+                    for _ in 0..5 {
+                        let highest = control.overlapped(started, started).await?.1;
+                        let dirty = next(highest);
+                        control.record(*version, true, dirty).await?;
+                        if control.overlapped(started, started).await?.1 == dirty {
+                            break;
+                        }
+                    }
+                    return Err(OVERLAP.into());
+                }
+                applied.push(label);
+            }
+        }
+        let missing = control.missing_tables().await.map_err(unreachable)?;
+        if !missing.is_empty() {
+            return Err(format!("{INCOMPLETE} {}", missing.join(", ")));
         }
         Ok(applied)
     }
@@ -385,6 +450,40 @@ mod tests {
         record(latest() + 1, 0).await.unwrap();
         assert_eq!(start(&config).await.unwrap_err(), NEWER);
         assert_eq!(client.migrate(false).await.unwrap_err(), NEWER);
+    }
+
+    #[tokio::test]
+    async fn tables_missing_behind_a_recorded_version_are_recreated() {
+        let (client, config, _guard) = database();
+        let all: Vec<String> = MIGRATIONS
+            .iter()
+            .map(|(version, name, _)| format!("{version:04}_{name}"))
+            .collect();
+        client.migrate(true).await.unwrap();
+        assert!(client.missing_tables().await.unwrap().is_empty());
+        // A restore can bring back the version without every table.
+        for table in ["view_states_insert", "rollup"] {
+            client.run(format!("DROP TABLE {table}")).await.unwrap();
+        }
+        assert_eq!(
+            client.missing_tables().await.unwrap(),
+            ["rollup", "view_states_insert"]
+        );
+        assert_eq!(start(&config).await.unwrap_err(), PENDING);
+        assert_eq!(client.migrate(false).await.unwrap(), all);
+        start(&config).await.unwrap();
+        assert!(client.migrate(false).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn expected_tables_come_from_the_schema_file() {
+        let tables = expected_tables();
+        for table in ["events", "registry", "rollup", "schema_migrations"] {
+            assert!(tables.contains(&table), "{table}");
+        }
+        // The materialized view counts: without it no view state is stored.
+        assert!(tables.contains(&"view_states_insert"));
+        assert!(tables.iter().all(|table| !table.contains('`')));
     }
 
     #[tokio::test]

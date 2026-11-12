@@ -225,7 +225,7 @@ version its release needs and stops with a message when they differ:
 
 | Message | What to do |
 | --- | --- |
-| The database needs schema migrations | Run `chunkify-analytics migrate`, then start the server again. The release is newer than the database, or the database was restored without all its tables. |
+| The database needs schema migrations | Run `chunkify-analytics migrate`, then start the server again. The release is newer than the database, or tables are missing, for example after a restore that left some out. `migrate` recreates missing tables. |
 | A schema migration did not finish | A `migrate` run was interrupted or is still running, or two runs overlapped. When none is running, run `chunkify-analytics migrate` again. It repeats the migration from its start, which is safe. |
 | The schema is newer than this release supports | Another server already runs a newer release. Upgrade this server too. |
 

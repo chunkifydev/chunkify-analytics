@@ -319,7 +319,8 @@ Include both the `events` and `registry` tables. Rollup tables are derived from
 `events`: without them, the first refresh rebuilds every hour. Use the same analytics server
 version or a newer one. Servers do not create tables, so when the restore left
 tables out or the server is newer than the backup, run `chunkify-analytics migrate`
-against the restored database before starting servers. Check `/healthz`, events and summaries before sending
+against the restored database before starting servers. It recreates the missing
+tables, whether or not `schema_migrations` was restored. Check `/healthz`, events and summaries before sending
 traffic. A restore also restores old credentials and retention settings;
 reapply later changes as needed. Startup expiration still applies to restored
 data.

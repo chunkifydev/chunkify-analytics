@@ -236,6 +236,10 @@ Rules for a migration file:
   Refreshes rebuild missing rollup hours. A new `view_states` must be filled
   from `events`; truncate it before the `INSERT … SELECT`, so that a retried
   migration does not count events twice.
+- Keep every migration safe to run again on a database that later migrations
+  already changed. When tables are missing behind a recorded version, for
+  example after a partial restore, `migrate` applies all migrations again from
+  the first.
 - There are no down migrations. Fix a released migration with a new one.
 
 The runner waits for each statement's mutations (`mutations_sync = 2`) and has
@@ -245,7 +249,8 @@ that the next run repeats it alone from its first statement.
 
 Three tests guard the schema. `schema_file_matches_the_migrations` compares
 `src/clickhouse/schema.sql` with a freshly migrated database, as printed by the
-pinned ClickHouse version. `migrated_tables_match_the_columns_the_code_uses`
+pinned ClickHouse version. The executable also reads the table names from that
+file: `serve` and `migrate` check that each table exists. `migrated_tables_match_the_columns_the_code_uses`
 fails when the column lists and aggregates in the code differ from the migrated
 tables, for example after adding an event field without a migration.
 `migration_files_are_registered_in_order` fails for an unregistered or

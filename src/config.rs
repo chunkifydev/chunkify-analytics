@@ -180,14 +180,16 @@ impl Config {
         })
     }
 
-    /// Create the ClickHouse schema and the initial project registry once.
+    /// Create the ClickHouse database, apply the schema migrations and save
+    /// the initial project registry once.
     pub fn initialize(&self) -> Result<serde_json::Value> {
-        crate::clickhouse::prepare(&self.clickhouse)?;
-        if crate::clickhouse::load_registry(&self.clickhouse)?.is_some() {
+        // Check first: `init` never changes a database that is already in use.
+        if crate::clickhouse::read_registry(&self.clickhouse)?.is_some() {
             return Err(
                 "This ClickHouse database is already initialized; run serve to use it".into(),
             );
         }
+        crate::clickhouse::migrate(&self.clickhouse, true)?;
         let public_key = crate::projects::generate_key(crate::projects::Permission::Public);
         let secret_key = crate::projects::generate_key(crate::projects::Permission::Secret);
         let keys = Keys {

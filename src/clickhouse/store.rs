@@ -230,11 +230,11 @@ impl Store {
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let settings = &config.clickhouse;
         let client = Client::new(settings.clone())?;
+        // Servers never create or change tables: `init` and `migrate` do.
         client
             .with_timeout(super::CONTROL_TIMEOUT)
-            .ensure_schema()
-            .await
-            .map_err(super::schema_error)?;
+            .check_schema()
+            .await?;
         let (sender, receiver) = mpsc::channel(config.batch.queue_requests);
         // Every server leases its node ID, configured or not, so leased IDs
         // never collide with configured ones; configured IDs never move.

@@ -729,6 +729,7 @@ mod tests {
         let owner = registry
             .authorize("test-secret", crate::projects::Permission::Secret)
             .unwrap();
+        crate::clickhouse::testing::migrate(&config.clickhouse).await;
         let store = crate::clickhouse::Store::open(&config, registry.clone())
             .await
             .unwrap();

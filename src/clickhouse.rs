@@ -6,6 +6,7 @@ use serde_json::Value;
 use std::{fmt::Write as _, sync::atomic::Ordering, time::Duration};
 
 mod claims;
+pub mod migrations;
 pub mod reports;
 pub mod rollup;
 pub mod store;
@@ -290,6 +291,9 @@ impl Client {
             let mut query = url.query_pairs_mut();
             query.append_pair("database", &self.config.database);
             query.append_pair("query", &format!("INSERT INTO {table} FORMAT JSONEachRow"));
+            // A field without a column fails the insert instead of being
+            // dropped, so a table behind the code never loses data silently.
+            query.append_pair("input_format_skip_unknown_fields", "0");
             for (name, value) in QUERY_SETTINGS.iter().chain(settings) {
                 query.append_pair(name, value);
             }
@@ -309,137 +313,6 @@ impl Client {
         let body = response.text().await.map_err(|_| failure(None, ""))?;
         if !status.is_success() || body.contains("DB::Exception") {
             return Err(failure(Some(status), &body));
-        }
-        Ok(())
-    }
-
-    /// Create the database and tables. Safe to run concurrently from many servers.
-    /// Fails with [`OUTDATED_SCHEMA`] when the database was created by a
-    /// version with another table layout: tables are never upgraded in place.
-    pub async fn ensure_schema(&self) -> std::result::Result<(), ApiError> {
-        let database = &self.config.database;
-        let none = Params::default();
-        self.send(
-            format!("CREATE DATABASE IF NOT EXISTS {database}"),
-            &none,
-            &[],
-            false,
-        )
-        .await?
-        .text()
-        .await
-        .map_err(|_| failure(None, ""))?;
-        // In a Replicated database, plain MergeTree tables keep their data on
-        // one node; replicate every table so all servers share the same data.
-        let mut params = Params::default();
-        let sql = format!(
-            "SELECT engine FROM system.databases WHERE name = {}",
-            params.text(database)
-        );
-        let replicated = self
-            .one(&sql, &params)
-            .await?
-            .first()
-            .and_then(Value::as_str)
-            == Some("Replicated");
-        let engine = |statement: String| {
-            if replicated {
-                statement
-                    .replace("ENGINE = MergeTree", "ENGINE = ReplicatedMergeTree")
-                    .replace(
-                        "ENGINE = AggregatingMergeTree",
-                        "ENGINE = ReplicatedAggregatingMergeTree",
-                    )
-            } else {
-                statement
-            }
-        };
-        // A database with events but another (or no) schema version was
-        // created by another release. Check before creating anything.
-        let mut params = Params::default();
-        let sql = format!(
-            "SELECT (SELECT count() FROM system.tables WHERE database = {db} AND name = 'events'),
-                (SELECT count() FROM system.tables WHERE database = {db} AND name = 'schema_version')",
-            db = params.text(database)
-        );
-        let tables = self.one(&sql, &params).await?;
-        let exists = |index: usize| {
-            tables
-                .get(index)
-                .and_then(Value::as_u64)
-                .is_some_and(|n| n > 0)
-        };
-        let outdated = || ApiError::new(OUTDATED_STATUS, OUTDATED_SCHEMA.into());
-        let stored = || async {
-            Ok::<_, ApiError>(
-                self.one("SELECT max(version) FROM schema_version", &none)
-                    .await?
-                    .first()
-                    .and_then(Value::as_u64)
-                    .filter(|version| *version > 0),
-            )
-        };
-        if exists(1) {
-            // Another release's version, even before it created its tables.
-            if stored()
-                .await?
-                .is_some_and(|version| version != SCHEMA_VERSION)
-            {
-                return Err(outdated());
-            }
-        } else if exists(0) {
-            // Events without a version: a release from before schema versions.
-            return Err(outdated());
-        }
-        // Record the layout before creating any other table, so a database
-        // with events always has its version, even after an interrupted start.
-        self.execute(
-            engine(
-                "CREATE TABLE IF NOT EXISTS schema_version (version UInt64) ENGINE = MergeTree ORDER BY version"
-                    .into(),
-            ),
-            &none,
-        )
-        .await?;
-        // Concurrent servers may each record the version; duplicates are
-        // harmless. Read it back: a server of another release starting on the
-        // same empty database at the same time may have recorded its own.
-        let mut params = Params::default();
-        let version = params.int(SCHEMA_VERSION as i64);
-        self.execute(
-            format!(
-                "INSERT INTO schema_version SELECT {version} WHERE (SELECT count() FROM schema_version) = 0"
-            ),
-            &params,
-        )
-        .await?;
-        let versions = self
-            .one(
-                "SELECT min(version), max(version) FROM schema_version",
-                &none,
-            )
-            .await?;
-        if versions
-            .iter()
-            .any(|version| version.as_u64() != Some(SCHEMA_VERSION))
-        {
-            return Err(outdated());
-        }
-        let mut tables = vec![
-            events_table(),
-            "CREATE TABLE IF NOT EXISTS registry (
-                version UInt64,
-                write_id String,
-                document String CODEC(ZSTD(3)),
-                written_at DateTime64(3) DEFAULT now64(3)
-            ) ENGINE = MergeTree ORDER BY version
-            SETTINGS non_replicated_deduplication_window = 100000"
-                .to_owned(),
-            claims::TABLE.to_owned(),
-        ];
-        tables.extend(rollup::tables());
-        for table in tables {
-            self.execute(engine(table), &none).await?;
         }
         Ok(())
     }
@@ -493,57 +366,6 @@ fn parse_row(line: &[u8]) -> std::result::Result<Vec<Value>, ApiError> {
     })
 }
 
-fn clickhouse_type(name: &str, kind: &str) -> String {
-    let required = matches!(
-        name,
-        "event_id"
-            | "project_id"
-            | "view_id"
-            | "video_id"
-            | "event_name"
-            | "sequence"
-            | "occurred_at_ms"
-            | "received_at_ms"
-            | "event_remainder"
-            | "context_format"
-    );
-    let base = kind;
-    let low_cardinality = matches!(
-        name,
-        "event_name"
-            | "project_id"
-            | "context_browser_name"
-            | "context_os_name"
-            | "context_device_type"
-    );
-    match (required, low_cardinality) {
-        (true, true) => format!("LowCardinality({base})"),
-        (true, false) => base.into(),
-        (false, true) => format!("LowCardinality(Nullable({base}))"),
-        (false, false) => format!("Nullable({base})"),
-    }
-}
-
-/// Location and page context, extracted once at insert time from the stored
-/// context JSON. Only JSON strings are dimension values, as in local storage.
-pub const CONTEXT_DIMENSIONS: &[(&str, &str)] = &[
-    ("ctx_continent", "continent"),
-    ("ctx_country", "country"),
-    ("ctx_city", "city"),
-    ("ctx_page_origin", "page_origin"),
-    ("ctx_page_path", "page_path"),
-];
-
-/// The playback rate as dimension text, such as `1` or `1.5`, rounded to two
-/// decimals so rollups, filters and breakdowns share one value per rate.
-/// Storage keeps integral floats such as `2.0` in the event JSON, so the rate
-/// falls back to that JSON when its typed column is empty.
-const PLAYBACK_RATE_TEXT: &str = "d_playback_rate Nullable(String) MATERIALIZED toString(round(if(isNotNull(e_playback_rate), e_playback_rate, if(JSONType(event_remainder, 'playback_rate') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, 'playback_rate'), NULL)), 2))";
-
-/// Custom dimensions of a view start as text: strings unchanged, numbers and
-/// booleans as sent (`5`, `true`). Other events keep an empty map.
-const CUSTOM_MAP: &str = "c_custom Map(String, String) MATERIALIZED if(event_name = 'chunkify.video.view_started', CAST(arrayMap(entry -> (entry.1, if(JSONType(entry.2) = 'String', JSONExtractString(entry.2), entry.2)), JSONExtractKeysAndValuesRaw(event_remainder, 'custom')), 'Map(String, String)'), map())";
-
 /// Numeric report fields of snapshot and end events, the only events reports
 /// measure, extracted once at insert time. Storage keeps integral floats in the
 /// event JSON to preserve their representation, so a field falls back to that
@@ -554,43 +376,6 @@ pub const REPORT_NUMBERS: &[&str] = &[
     "media_duration_seconds",
     "furthest_progress_ratio",
 ];
-
-fn events_table() -> String {
-    let mut columns = vec!["ingest_id Int64".to_owned()];
-    for (name, kind) in crate::storage::COLUMNS.iter() {
-        columns.push(format!("{name} {}", clickhouse_type(name, kind)));
-    }
-    columns.push("otlp_payload Nullable(String) CODEC(ZSTD(3))".into());
-    for (column, key) in CONTEXT_DIMENSIONS {
-        columns.push(format!(
-            "{column} Nullable(String) MATERIALIZED if(JSONType(ifNull(context_remainder, '{{}}'), '{key}') = 'String', JSONExtractString(ifNull(context_remainder, '{{}}'), '{key}'), NULL)"
-        ));
-    }
-    columns.push(PLAYBACK_RATE_TEXT.into());
-    columns.push(CUSTOM_MAP.into());
-    for field in REPORT_NUMBERS {
-        columns.push(format!(
-            "n_{field} Nullable(Float64) MATERIALIZED if(event_name NOT IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended'), NULL, if(isNotNull(e_{field}), e_{field}, if(JSONType(event_remainder, '{field}') IN ('Int64', 'UInt64', 'Double'), JSONExtractFloat(event_remainder, '{field}'), NULL)))"
-        ));
-    }
-    // ClickHouse's own clock when the row is written, which rollups use to find
-    // rows stored since their last refresh. Callers cannot set it.
-    columns.push("stored_at_ms Int64 MATERIALIZED toUnixTimestamp64Milli(now64(3))".into());
-    columns.push("INDEX events_event event_id TYPE bloom_filter(0.0001) GRANULARITY 1".into());
-    columns.push("INDEX events_stored stored_at_ms TYPE minmax GRANULARITY 1".into());
-    columns.push("INDEX events_view view_id TYPE bloom_filter GRANULARITY 4".into());
-    columns.push("INDEX events_video video_id TYPE bloom_filter GRANULARITY 4".into());
-    columns.push("INDEX events_occurred occurred_at_ms TYPE minmax GRANULARITY 4".into());
-    // Project first keeps each tenant contiguous; ingest order serves event pages
-    // and watermarks. Monthly receipt partitions keep expiration work bounded.
-    format!(
-        "CREATE TABLE IF NOT EXISTS events ({})
-        ENGINE = MergeTree
-        PARTITION BY toYYYYMM(toDateTime(intDiv(received_at_ms, 1000), 'UTC'))
-        ORDER BY (project_id, ingest_id)",
-        columns.join(",\n            ")
-    )
-}
 
 /// Run registry operations on a private runtime. Administration commands and
 /// startup call these from synchronous code, inside or outside async contexts.
@@ -613,81 +398,39 @@ fn block_on<T: Send, F: std::future::Future<Output = Result<T>>>(
     result.map_err(Into::into)
 }
 
-fn registry_error(error: ApiError) -> Box<dyn std::error::Error> {
-    if error.status == OUTDATED_STATUS {
-        return OUTDATED_SCHEMA.into();
-    }
+fn registry_error(_: ApiError) -> Box<dyn std::error::Error> {
     "Cannot reach the ClickHouse project registry".into()
 }
 
-/// The table layout this release creates. Increase it with every change to a
-/// table definition: databases created with another layout must be recreated.
-pub const SCHEMA_VERSION: u64 = 2;
-/// The status that marks [`OUTDATED_SCHEMA`]; no other schema error uses it.
-const OUTDATED_STATUS: reqwest::StatusCode = reqwest::StatusCode::CONFLICT;
-/// Startup error for a database created by a release with another layout.
-pub const OUTDATED_SCHEMA: &str = "The ClickHouse database was created by an analytics release with a different table layout and cannot be upgraded in place. Use a new clickhouse.database, or drop this one, then start again";
-
-/// Startup message for a schema error: the outdated-layout error as is, any
-/// other failure as a connection hint.
-pub fn schema_error(error: ApiError) -> Box<dyn std::error::Error> {
-    if error.status == OUTDATED_STATUS {
-        OUTDATED_SCHEMA.into()
-    } else {
-        "Cannot create the ClickHouse schema; check clickhouse.url, credentials and permissions"
-            .into()
-    }
-}
-
-/// Create the schema used by every analytics server for this database.
-pub fn prepare(config: &ClickHouseConfig) -> Result<()> {
+/// Apply pending schema migrations and return the names of those applied.
+/// Only `init` passes `create_database`.
+pub fn migrate(config: &ClickHouseConfig, create_database: bool) -> Result<Vec<String>> {
     let config = config.clone();
     block_on(move || async move {
         Client::new(config)?
-            .with_timeout(CONTROL_TIMEOUT)
-            .ensure_schema()
+            .migrate(create_database)
             .await
-            .map_err(schema_error)
+            .map_err(Into::into)
     })
 }
 
-/// The latest registry document and its version, if `init` has run. Unlike
-/// `load_registry`, it never creates the database or tables.
+/// The latest registry document and its version, if `init` has run. It never
+/// creates the database or tables.
 pub fn read_registry(config: &ClickHouseConfig) -> Result<Option<(u64, Vec<u8>)>> {
     let config = config.clone();
     block_on(move || async move {
-        let client = Client::new(config.clone())?.with_timeout(CONTROL_TIMEOUT);
+        let client = Client::new(config)?.with_timeout(CONTROL_TIMEOUT);
         // A missing database or registry is not initialized; reads never
         // create one, so a mistyped database name creates nothing.
-        // Without a default database: the configured one may not exist.
-        let mut params = Params::default();
-        let sql = format!(
-            "SELECT count() FROM system.tables WHERE database = {} AND name = 'registry' FORMAT TSV",
-            params.text(&config.database)
-        );
-        let exists = client
-            .send(sql, &params, &[], false)
+        if !client
+            .table_exists("registry")
             .await
             .map_err(registry_error)?
-            .text()
-            .await
-            .map_err(|_| "Cannot reach the ClickHouse project registry")?;
-        if exists.trim() == "0" {
+        {
             return Ok(None);
         }
         latest(&client).await.map_err(registry_error)
     })
-}
-
-/// The latest registry document and its version, if `init` has run.
-pub fn load_registry(config: &ClickHouseConfig) -> Result<Option<(u64, Vec<u8>)>> {
-    let config = config.clone();
-    let loaded = block_on(move || async move {
-        let client = Client::new(config)?.with_timeout(CONTROL_TIMEOUT);
-        client.ensure_schema().await.map_err(registry_error)?;
-        latest(&client).await.map_err(registry_error)
-    })?;
-    Ok(loaded)
 }
 
 async fn latest(client: &Client) -> std::result::Result<Option<(u64, Vec<u8>)>, ApiError> {
@@ -819,6 +562,15 @@ pub mod testing {
         let config = crate::config::Config::load_with(&settings, None).unwrap();
         std::fs::remove_dir_all(directory).unwrap();
         config
+    }
+
+    /// Create the test database and its tables, as `init` does.
+    pub async fn migrate(config: &crate::backend::ClickHouseConfig) {
+        super::Client::new(config.clone())
+            .unwrap()
+            .migrate(true)
+            .await
+            .unwrap();
     }
 
     /// Drops the test database when it goes out of scope, even after a panic.

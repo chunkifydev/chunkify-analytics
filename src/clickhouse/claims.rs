@@ -5,14 +5,6 @@ use super::{Client, Params};
 use crate::api::ApiError;
 use serde_json::{Value, json};
 
-/// The claims table. Rows expire after a day; terms are minutes to hours.
-pub(super) const TABLE: &str = "CREATE TABLE IF NOT EXISTS claims (
-        kind LowCardinality(String), key Int64, term Int64, owner String,
-        written_at DateTime64(3) DEFAULT now64(3)
-    ) ENGINE = MergeTree ORDER BY (kind, key, term)
-    TTL toDateTime(written_at) + INTERVAL 1 DAY
-    SETTINGS non_replicated_deduplication_window = 100000";
-
 impl Client {
     /// ClickHouse's clock, shared by every server, in milliseconds.
     pub(super) async fn now_ms(&self) -> Result<i64, ApiError> {

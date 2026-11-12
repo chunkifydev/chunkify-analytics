@@ -138,6 +138,8 @@ export async function containerCollector({ settings = {}, resources = [], enviro
       "--env", `CHUNKIFY_CLICKHOUSE_URL=${store.url}`, "--env", `CHUNKIFY_CLICKHOUSE_DATABASE=${database}`, image, ...args]);
     if (!seed) server.keys = JSON.parse(await run(["init"]));
     else {
+      // The copy holds only events and the registry; servers do not create the other tables.
+      await run(["migrate"]);
       server.keys = {};
       for (const kind of ["public", "secret"]) {
         server.keys[`${kind}_key`] = JSON.parse(await run(["key", "rotate-primary", kind])).key;

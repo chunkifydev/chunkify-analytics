@@ -192,7 +192,6 @@ impl Controller {
     /// Adopt a newer project registry saved by the CLI or another server.
     pub fn sync(&self) -> Result<()> {
         let settings = &self.config.clickhouse;
-        // `serve` created the schema at startup; refreshes only read the registry.
         let Some((version, bytes)) = crate::clickhouse::read_registry(settings)? else {
             return Ok(());
         };
@@ -463,7 +462,7 @@ mod tests {
             }
         }
         fn saved(&self) -> (u64, Vec<u8>) {
-            crate::clickhouse::load_registry(&self.config.clickhouse)
+            crate::clickhouse::read_registry(&self.config.clickhouse)
                 .unwrap()
                 .unwrap()
         }

@@ -199,6 +199,63 @@ time, download size and peak analytics server memory. Set
 `CHUNKIFY_EXPORT_BENCHMARK_ROWS` to change the dataset size, and drop the
 `chunkify_export_benchmark_*` database afterward.
 
+## Schema migrations
+
+The ClickHouse tables are defined only by the numbered SQL files in
+`src/clickhouse/migrations`. `init` and `migrate` apply them in order and record
+the version in the `schema_migrations` table; `serve` only checks the version.
+The executable embeds the files.
+
+To change a table:
+
+1. Add the next file, named `NNNN_description.up.sql`. Never edit a file that
+   was part of a release.
+2. Register it in `MIGRATIONS` in `src/clickhouse/migrations.rs`.
+3. Regenerate the schema snapshot and review its diff:
+
+   ```sh
+   CHUNKIFY_UPDATE_SCHEMA=1 cargo test --locked schema_file
+   ```
+
+Rules for a migration file:
+
+- End every statement with `;` at the end of a line. Lines that start with `--`
+  are comments.
+- Make every statement safe to run twice (`IF NOT EXISTS`, `IF EXISTS`,
+  `ADD COLUMN IF NOT EXISTS`). ClickHouse DDL is not transactional, so a
+  migration that fails halfway is run again from its first statement.
+- Write `ENGINE = MergeTree` or `ENGINE = AggregatingMergeTree`. In a Replicated
+  database the runner creates the replicated engine instead.
+- On `events` and `registry`, only add: new columns, indexes or settings. A
+  `MATERIALIZED` or `DEFAULT` column added this way is computed on read for
+  existing parts. Changing a column type, `ORDER BY` or `PARTITION BY` rewrites
+  the table.
+- `view_states`, its materialized view and the `rollup*` tables are derived from
+  `events`, so replace them instead of altering them: create the new table under
+  a new name and drop the old one in a later release, after no server reads it.
+  Refreshes rebuild missing rollup hours. A new `view_states` must be filled
+  from `events`; truncate it before the `INSERT … SELECT`, so that a retried
+  migration does not count events twice.
+- Keep every migration safe to run again on a database that later migrations
+  already changed. When tables are missing behind a recorded version, for
+  example after a partial restore, `migrate` applies all migrations again from
+  the first.
+- There are no down migrations. Fix a released migration with a new one.
+
+The runner waits for each statement's mutations (`mutations_sync = 2`) and has
+no time limit on migration statements. It takes no lock. When two `migrate`
+runs overlap, at least one fails and leaves the migration marked unfinished, so
+that the next run repeats it alone from its first statement.
+
+Three tests guard the schema. `schema_file_matches_the_migrations` compares
+`src/clickhouse/schema.sql` with a freshly migrated database, as printed by the
+pinned ClickHouse version. The executable also reads the table names from that
+file: `serve` and `migrate` check that each table exists. `migrated_tables_match_the_columns_the_code_uses`
+fails when the column lists and aggregates in the code differ from the migrated
+tables, for example after adding an event field without a migration.
+`migration_files_are_registered_in_order` fails for an unregistered or
+misnumbered file. Inserts also reject fields that have no column.
+
 ## Documentation
 
 The root README is the installation and usage guide. Detailed user references

@@ -18,6 +18,8 @@ pub struct Cli {
 pub enum Command {
     /// Create the ClickHouse database and the initial project credentials
     Init,
+    /// Apply pending ClickHouse schema migrations after an upgrade
+    Migrate,
     /// Run the analytics HTTP API and MCP endpoint
     Serve {
         /// Listening IP address and port

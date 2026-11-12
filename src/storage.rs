@@ -14,7 +14,8 @@ enum Kind {
 use Kind::*;
 
 // This is a storage schema, independent of which fields today's validator
-// requires. Changing it changes the ClickHouse table definition.
+// requires. Every field is a column of the ClickHouse events table, so adding
+// one needs a schema migration (see docs/development.md).
 const EVENT_FIELDS: &[(&str, Kind)] = &[
     ("schema_version", Integer),
     ("occurred_at", Text),

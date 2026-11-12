@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.18.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.17.1...v0.18.0) (2026-11-12)
+
+
+### ⚠ BREAKING CHANGES
+
+* **storage:** `serve` no longer creates or updates tables. Databases created by earlier releases have no schema version and are not upgraded: use a new `clickhouse.database`, or drop the old one, then run `init`. After later upgrades, run `chunkify-analytics migrate` before starting servers.
+
+### Features
+
+* **storage:** add ClickHouse schema migrations ([#72](https://github.com/chunkifydev/chunkify-analytics/issues/72)) ([3c1b7a9](https://github.com/chunkifydev/chunkify-analytics/commit/3c1b7a9bf0bcf0ed439c9ef1d65cf2bfc9e71919))
+
 ## [0.17.1](https://github.com/chunkifydev/chunkify-analytics/compare/v0.17.0...v0.17.1) (2026-11-11)
 
 

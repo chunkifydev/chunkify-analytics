@@ -24,6 +24,10 @@ const STATES: [&str; 9] = [
     "stopped",
 ];
 
+/// How the player receives the media: an HLS stream or a single file, such as
+/// an MP4 rendition.
+pub const DELIVERY_FORMATS: [&str; 2] = ["hls", "file"];
+
 /// Maximum Unicode characters in `user_id` and `video_title`.
 pub const MAX_LABEL_CHARS: usize = 256;
 /// Maximum custom dimension keys on one view.
@@ -275,6 +279,12 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
     if object.contains_key("playback_rate") {
         field(object, "playback_rate", |v| v.is_null() || rate(v))?;
     }
+    // How the source is delivered. Optional: older SDKs omit it.
+    if object.contains_key("delivery_format") {
+        field(object, "delivery_format", |v| {
+            v.is_null() || one_of(v, &DELIVERY_FORMATS)
+        })?;
+    }
     if object.contains_key("subtitle_playing_time") {
         field(object, "subtitle_playing_time", |v| {
             state_times(v, "language", subtitle_language)
@@ -493,6 +503,35 @@ mod tests {
             with(json!({"playback_rate_playing_time": [{"rate": null, "playing_time_ms": 1}]}))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn delivery_format_is_optional_hls_file_or_null() {
+        // Older SDKs omit it.
+        let old = change(json!({}));
+        assert!(old.get("delivery_format").is_none());
+        assert!(validate(&old).is_ok());
+        for value in [json!("hls"), json!("file"), Value::Null] {
+            assert!(validate(&change(json!({"delivery_format": value}))).is_ok());
+            assert!(
+                validate(&rate_change(json!({"delivery_format": value}))).is_ok(),
+                "{value}"
+            );
+        }
+        for value in [
+            json!("HLS"),
+            json!("mp4"),
+            json!("dash"),
+            json!(""),
+            json!(1),
+            json!(true),
+            json!(["hls"]),
+        ] {
+            assert!(
+                validate(&change(json!({"delivery_format": value}))).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]

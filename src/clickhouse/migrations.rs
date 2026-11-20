@@ -13,8 +13,14 @@ use serde_json::Value;
 
 /// Version, name and SQL of every migration, in order. Released files never
 /// change: a schema change is a new file, registered here.
-const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "init", include_str!("migrations/0001_init.up.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "init", include_str!("migrations/0001_init.up.sql")),
+    (
+        2,
+        "delivery_format",
+        include_str!("migrations/0002_delivery_format.up.sql"),
+    ),
+];
 
 pub const UNREACHABLE: &str =
     "Cannot reach ClickHouse; check clickhouse.url, credentials and permissions";
@@ -418,12 +424,12 @@ mod tests {
         client.migrate(true).await.unwrap();
         assert!(client.missing_tables().await.unwrap().is_empty());
         // A restore can bring back the version without every table.
-        for table in ["view_states_insert", "rollup"] {
+        for table in ["view_states_v2_insert", "rollup_v2"] {
             client.run(format!("DROP TABLE {table}")).await.unwrap();
         }
         assert_eq!(
             client.missing_tables().await.unwrap(),
-            ["rollup", "view_states_insert"]
+            ["rollup_v2", "view_states_v2_insert"]
         );
         assert_eq!(start(&config).await.unwrap_err(), PENDING);
         assert_eq!(client.migrate(false).await.unwrap(), all);
@@ -431,14 +437,76 @@ mod tests {
         assert!(client.migrate(false).await.unwrap().is_empty());
     }
 
+    #[tokio::test]
+    async fn delivery_format_migration_reads_stored_events_into_view_states() {
+        let (client, _config, _guard) = database();
+        client.migrate(true).await.unwrap();
+        // A database before 0002: no column and no new states. A server of
+        // an earlier release kept the field in the event JSON, validated or not.
+        for statement in [
+            "DROP TABLE view_states_v2_insert",
+            "DROP TABLE view_states_v2",
+            "ALTER TABLE events DROP COLUMN e_delivery_format",
+        ] {
+            client.run(statement.into()).await.unwrap();
+        }
+        let mut body = Vec::new();
+        for (index, (view, remainder)) in [
+            ("a", r#"{"delivery_format":"hls"}"#),
+            ("b", r#"{"delivery_format":"file"}"#),
+            ("c", r#"{"delivery_format":"dash"}"#),
+            ("d", "{}"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let row = serde_json::json!({"ingest_id": index + 1, "event_id": view,
+                "project_id": "default", "view_id": view, "video_id": "video",
+                "event_name": "chunkify.video.view_started", "sequence": 1,
+                "occurred_at_ms": 1000, "received_at_ms": 1000,
+                "event_remainder": remainder, "context_format": 0});
+            body.extend(serde_json::to_vec(&row).unwrap());
+            body.push(b'\n');
+        }
+        client.insert("events", body, &[]).await.unwrap();
+        let formats = || async {
+            client
+                .all(
+                    "SELECT view_id, tupleElement(argMinIfMerge(first_start), 11)
+                    FROM view_states_v2 GROUP BY view_id ORDER BY view_id",
+                    &crate::clickhouse::Params::default(),
+                )
+                .await
+                .unwrap()
+        };
+        let expected = vec![
+            vec![Value::from("a"), Value::from("hls")],
+            vec![Value::from("b"), Value::from("file")],
+            vec![Value::from("c"), Value::Null],
+            vec![Value::from("d"), Value::Null],
+        ];
+        // Applied, then repeated as after an interruption: same states.
+        for _ in 0..2 {
+            client
+                .run("INSERT INTO schema_migrations SELECT 1, 0, max(sequence) + 1 FROM schema_migrations".into())
+                .await
+                .unwrap();
+            assert_eq!(
+                client.migrate(false).await.unwrap(),
+                ["0002_delivery_format"]
+            );
+            assert_eq!(formats().await, expected);
+        }
+    }
+
     #[test]
     fn expected_tables_come_from_the_schema_file() {
         let tables = expected_tables();
-        for table in ["events", "registry", "rollup", "schema_migrations"] {
+        for table in ["events", "registry", "rollup_v2", "schema_migrations"] {
             assert!(tables.contains(&table), "{table}");
         }
         // The materialized view counts: without it no view state is stored.
-        assert!(tables.contains(&"view_states_insert"));
+        assert!(tables.contains(&"view_states_v2_insert"));
         assert!(tables.iter().all(|table| !table.contains('`')));
     }
 

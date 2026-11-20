@@ -133,15 +133,15 @@ refreshes reads the latest one instead.
 
 ### How refreshes work
 
-A materialized view keeps each view's aggregation state (`view_states`) as
+A materialized view keeps each view's aggregation state (`view_states_v2`) as
 events are inserted. Every `rollup_interval_seconds`, one server refreshes the
 hours whose views received events since the previous refresh: it merges the
 states of the views that started in those hours, which costs in proportion to
 those views rather than their events, then rebuilds those hours' aggregates.
-A refresh claims its run in the `rollup_runs` table, so one server works at a
+A refresh claims its run in the `rollup_runs_v2` table, so one server works at a
 time; if a server stops in the middle of a run, another takes over after four
 intervals (at least one minute). With `rollup_max_lag_seconds = 0`, servers do
-not refresh at all, but `view_states` is still kept at insert.
+not refresh at all, but `view_states_v2` is still kept at insert.
 
 ## Duplicate deliveries
 
@@ -190,9 +190,10 @@ stop with a schema message; start it again. For the same reason, point
 | --- | --- |
 | `events` | One row per stored event, ordered by project and receipt order and partitioned by receipt month. Location, page and the numeric fields reports measure are extracted at insert time, and ClickHouse records when it stored each row. |
 | `registry` | Versioned project registry documents. The highest version is active. |
-| `view_states` | Each view identity's aggregation states, kept by a materialized view as events are inserted. Fully expired views are deleted by the expiration sweep. |
-| `rollup`, `rollup_hours`, `rollup_views` | [Report rollups](#report-rollups): partial aggregates per hour, each hour's receipt range, and per-view results. Derived from `events`; superseded rows are deleted after 20 refreshes and expired hours by the expiration sweep. |
-| `rollup_runs` | Rollup refresh claims and completions. |
+| `view_states_v2` | Each view identity's aggregation states, kept by a materialized view as events are inserted. Fully expired views are deleted by the expiration sweep. |
+| `rollup_v2`, `rollup_hours_v2`, `rollup_views_v2` | [Report rollups](#report-rollups): partial aggregates per hour, each hour's receipt range, and per-view results. Derived from `events`; superseded rows are deleted after 20 refreshes and expired hours by the expiration sweep. |
+| `rollup_runs_v2` | Rollup refresh claims and completions. |
+| `view_states`, `rollup`, `rollup_hours`, `rollup_views`, `rollup_runs` | The derived tables before the delivery format dimension, kept for servers of earlier releases during an upgrade. The expiration sweep still deletes their expired views; a later release drops them. |
 | `claims` | Short leases between servers: node IDs and expiration sweeps. Rows expire after a day. |
 | `schema_migrations` | The schema version: the row with the highest `sequence` is current, and `dirty = 1` marks a migration that did not finish. |
 
@@ -237,3 +238,8 @@ does not start again, so upgrade all servers soon after migrating. Back up the
 database before an upgrade: there are no downgrade migrations, and going back
 to an earlier release means restoring the backup.
 See [backup and restore](administration.md#backup-and-restore).
+
+Migration `0002_delivery_format` rebuilds each view's aggregation state from
+every stored event, so it takes longer on a large database. It also starts new,
+empty rollup tables: the first refresh after the upgrade recomputes every hour,
+and until it completes, reports read events instead of rollups.

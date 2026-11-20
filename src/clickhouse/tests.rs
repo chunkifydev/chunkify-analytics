@@ -1655,6 +1655,123 @@ async fn subtitle_and_rate_reports_split_watch_time_and_filters_use_the_start_st
 }
 
 #[tokio::test]
+async fn delivery_format_uses_the_first_start_and_values_older_servers_stored() {
+    let fixture = Fixture::new(&["default", "other"]).await;
+    let store = &fixture.store;
+    let start = |id: &str, project: &str, view: &str, sequence: i64, fields: Value| {
+        with(
+            event(
+                id,
+                project,
+                view,
+                "video",
+                None,
+                "view_started",
+                sequence,
+                1000 + sequence,
+            ),
+            fields,
+        )
+    };
+    // Servers of earlier releases keep the field in the event JSON.
+    let kept =
+        |format: &str| json!({"event_remainder": json!({"delivery_format": format}).to_string()});
+    fixture
+        .insert(vec![
+            // A later start with another format does not move the view.
+            start(
+                "a-1",
+                "default",
+                "a",
+                1,
+                json!({"e_delivery_format": "hls"}),
+            ),
+            start(
+                "a-2",
+                "default",
+                "a",
+                2,
+                json!({"e_delivery_format": "file"}),
+            ),
+            start(
+                "b-1",
+                "default",
+                "b",
+                1,
+                json!({"e_delivery_format": "file"}),
+            ),
+            start("c-1", "default", "c", 1, kept("hls")),
+            // They did not validate it; reports ignore other values.
+            start("d-1", "default", "d", 1, kept("dash")),
+            // An SDK that does not report it.
+            start("e-1", "default", "e", 1, json!({})),
+            start("x-1", "other", "x", 1, json!({"e_delivery_format": "hls"})),
+        ])
+        .await;
+
+    let views = |fields: Value| async move {
+        let query: Query = serde_json::from_value(fields).unwrap();
+        ok(store.summary("default".into(), query, false).await)["views"].clone()
+    };
+    assert_eq!(views(json!({})).await, 5);
+    assert_eq!(views(json!({"delivery_format": "hls"})).await, 2);
+    assert_eq!(views(json!({"delivery_format": "file"})).await, 1);
+    for kind in [
+        MetricKind::Summary,
+        MetricKind::Engagement,
+        MetricKind::Quality,
+    ] {
+        let query = Query {
+            group_by: Some(breakdown("delivery_format")),
+            limit: Some(10),
+            ..Query::default()
+        };
+        let grouped = ok(match kind {
+            MetricKind::Summary => store.summary("default".into(), query, false).await,
+            MetricKind::Engagement => store.engagement("default".into(), query).await,
+            MetricKind::Quality => store.quality("default".into(), query).await,
+        });
+        assert_eq!(grouped["group_by"], "delivery_format");
+        let groups: Vec<_> = grouped["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| (g["value"].clone(), g["data"]["views"].clone()))
+            .collect();
+        // Views without a format form the null group, first among ties.
+        assert_eq!(
+            groups,
+            [
+                (Value::Null, json!(2)),
+                (json!("hls"), json!(2)),
+                (json!("file"), json!(1))
+            ]
+        );
+    }
+    let values = ok(store
+        .dimension(
+            "default".into(),
+            dimension("delivery_format"),
+            Query::default(),
+        )
+        .await);
+    assert_eq!(
+        values["values"],
+        json!([{"value": null, "views": 2}, {"value": "hls", "views": 2}, {"value": "file", "views": 1}])
+    );
+    for value in ["HLS", "mp4", "dash", ""] {
+        let query = Query {
+            delivery_format: Some(value.into()),
+            ..Query::default()
+        };
+        assert!(
+            store.summary("default".into(), query, false).await.is_err(),
+            "{value:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn retention_uses_one_measurement_per_identity_and_preserves_unwatched_gaps() {
     let fixture = Fixture::new(&["default", "foreign"]).await;
     let store = &fixture.store;
@@ -2074,21 +2191,36 @@ fn rollup_rows(base: i64) -> Vec<Value> {
         // Some starts lack a title, so videos keep the latest one they have;
         // titles repeat so reports can group by them.
         let title = (index % 4 != 1).then(|| format!("title-{}", index % 3));
-        let context = json!({
+        // Views without a format, and views whose format a server of an
+        // earlier release kept in the event JSON instead of its column.
+        let (format, stored_format) = match index % 5 {
+            0 | 1 => (Some("hls"), None),
+            2 => (Some("file"), None),
+            3 => (None, Some("file")),
+            _ => (None, None),
+        };
+        let mut remainder = json!({"custom": match index % 3 {
+            0 => json!({"plan": "pro", "seats": index % 2}),
+            1 => json!({"plan": "free"}),
+            _ => json!({}),
+        }});
+        if let Some(stored) = stored_format {
+            remainder["delivery_format"] = json!(stored);
+        }
+        let mut context = json!({
             "e_video_title": title, "e_user_id": format!("user-{}", index % 3),
             "context_browser_name": browsers[(index % 3) as usize],
             "context_os_name": "Linux", "context_device_type": "desktop",
             "e_subtitle_language": subtitles[(index % 4) as usize],
-            "event_remainder": json!({"custom": match index % 3 {
-                0 => json!({"plan": "pro", "seats": index % 2}),
-                1 => json!({"plan": "free"}),
-                _ => json!({}),
-            }}).to_string(),
+            "event_remainder": remainder.to_string(),
             "e_playback_rate": rates[(index % 5) as usize],
             "context_remainder": json!({"continent": "EU", "country": countries[(index % 2) as usize],
                 "city": format!("city-{}", index % 4), "page_origin": "https://a.example",
                 "page_path": "/watch"}).to_string(),
         });
+        if let Some(format) = format {
+            context["e_delivery_format"] = json!(format);
+        }
         let event = |kind: &str, sequence: i64, at: i64| {
             event(
                 &format!("{view}-{kind}-{sequence}"),
@@ -2177,6 +2309,8 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             json!({"subtitle_language": "fr"}),
             json!({"playback_rate": "1.5", "video_id": "video-a"}),
             json!({"playback_rate": "2", "browser_name": "Chrome"}),
+            json!({"delivery_format": "file"}),
+            json!({"delivery_format": "hls", "video_id": "video-a"}),
             json!({"custom.plan": "pro"}),
             json!({"custom.plan": "free", "browser_name": "Chrome", "video_id": "video-a"}),
             json!({"user_id": "user-1"}),
@@ -2234,6 +2368,7 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
             "country",
             "subtitle_language",
             "playback_rate",
+            "delivery_format",
             "custom.plan",
             "custom.seats",
             "video_title",
@@ -2248,6 +2383,7 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
                     "country" => [None, Some("FR"), Some("US")],
                     "subtitle_language" => [None, Some("fr"), Some("es")],
                     "playback_rate" => [None, Some("1.25"), Some("3")],
+                    "delivery_format" => [None, Some("hls"), Some("file")],
                     "custom.plan" => [None, Some("pro"), Some("none")],
                     "custom.seats" => [None, Some("1"), Some("2")],
                     "video_title" => [None, Some("title-0"), Some("missing")],
@@ -2341,7 +2477,7 @@ async fn rollup_runs_claim_once_and_skip_until_the_interval() {
     let runs = store
         .client
         .all(
-            "SELECT version, completed FROM rollup_runs ORDER BY version, completed",
+            "SELECT version, completed FROM rollup_runs_v2 ORDER BY version, completed",
             &Params::default(),
         )
         .await
@@ -2498,6 +2634,91 @@ async fn lagged_reports_read_the_last_refresh_and_keep_pages_on_their_run() {
     // a start of v6, whose earlier start in hour 0 is expired.
     assert_eq!(plan.hours, vec![base + 3 * HOUR]);
     assert!(plan.reads_events());
+}
+
+#[tokio::test]
+async fn expiration_purges_current_and_replaced_derived_tables() {
+    let fixture =
+        Fixture::with_settings(&["default"], "clickhouse.rollup_max_lag_seconds = 3600").await;
+    let store = &fixture.store;
+    fixture
+        .insert(vec![
+            event(
+                "old",
+                "default",
+                "old",
+                "video",
+                None,
+                "view_started",
+                1,
+                1000,
+            ),
+            event(
+                "new",
+                "default",
+                "new",
+                "video",
+                None,
+                "view_started",
+                1,
+                10 * HOUR,
+            ),
+        ])
+        .await;
+    store.refresh_rollups_with(0, 0).await.unwrap();
+    // Servers of earlier releases fill the replaced rollup tables; the
+    // replaced view_states is still filled by its materialized view.
+    for statement in [
+        "INSERT INTO rollup SELECT * FROM rollup_v2",
+        "INSERT INTO rollup_hours SELECT * FROM rollup_hours_v2",
+        "INSERT INTO rollup_views SELECT * EXCEPT (e_delivery_format) FROM rollup_views_v2",
+    ] {
+        fixture.sql(statement).await;
+    }
+    let rows = |table: &'static str, key: &'static str| async move {
+        let sql = format!("SELECT toString({key}) FROM {table} ORDER BY {key}");
+        ok(store
+            .client
+            .all(&sql, &Params::default())
+            .await
+            .map(Value::from))
+    };
+    let tables = [
+        ("rollup_v2", "hour_ms"),
+        ("rollup_hours_v2", "hour_ms"),
+        ("rollup_views_v2", "view_id"),
+        ("view_states_v2", "view_id"),
+        ("rollup", "hour_ms"),
+        ("rollup_hours", "hour_ms"),
+        ("rollup_views", "view_id"),
+        ("view_states", "view_id"),
+    ];
+    for (table, key) in tables {
+        let before = rows(table, key).await;
+        assert!(before.as_array().unwrap().len() >= 2, "{table}: {before}");
+    }
+    // Events received before 5000 are expired: only the old view's.
+    store
+        .purge_rollups(|params, column| Ok(format!("{column} >= {}", params.int(5000))))
+        .await
+        .unwrap();
+    for (table, key) in tables {
+        let after = rows(table, key).await;
+        let expected = if key == "view_id" {
+            json!("new")
+        } else {
+            json!((10 * HOUR).to_string())
+        };
+        assert!(
+            after
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row[0] == expected),
+            "{table}: {after}"
+        );
+        assert!(!after.as_array().unwrap().is_empty(), "{table}");
+    }
 }
 
 #[tokio::test]
@@ -2919,12 +3140,13 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
     };
     let fixture = Fixture::new(&["default"]).await;
     let client = &fixture.store.client;
-    // Columns that inserts set, in table order.
+    // Columns that inserts set, in table order. A column added to events
+    // later has a default for servers that do not write it yet.
     let columns = |table: &'static str| async move {
         let mut params = Params::default();
         let sql = format!(
             "SELECT name, type FROM system.columns
-            WHERE database = currentDatabase() AND table = {} AND default_kind = ''
+            WHERE database = currentDatabase() AND table = {} AND default_kind IN ('', 'DEFAULT')
             ORDER BY position",
             params.text(table)
         );
@@ -2956,7 +3178,7 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
     events.push(("otlp_payload".into(), "Nullable(String)".into()));
     assert_eq!(columns("events").await, events);
 
-    assert_eq!(columns("rollup_views").await, owned(VIEW_COLUMNS));
+    assert_eq!(columns("rollup_views_v2").await, owned(VIEW_COLUMNS));
 
     let mut rollup = owned(&[
         ("project_id", "LowCardinality(String)"),
@@ -2971,7 +3193,7 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
             .iter()
             .map(|(name, kind, _)| (name.to_string(), kind.to_string())),
     );
-    assert_eq!(columns("rollup").await, rollup);
+    assert_eq!(columns("rollup_v2").await, rollup);
 
     // The states the code merges, created from the code's own aggregates.
     let states = format!(
@@ -2998,7 +3220,7 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
         ))
         .await;
     assert_eq!(
-        columns("view_states").await,
+        columns("view_states_v2").await,
         columns("expected_states").await
     );
     let select = |view: &'static str| async move {
@@ -3011,9 +3233,9 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
         )
         .await
     };
-    assert!(!select("view_states_insert").await.trim().is_empty());
+    assert!(!select("view_states_v2_insert").await.trim().is_empty());
     assert_eq!(
-        select("view_states_insert").await,
+        select("view_states_v2_insert").await,
         select("expected_states_insert").await
     );
 }

@@ -43,7 +43,7 @@ pub(super) struct Narrow {
     /// Also require the condition of each view's first start.
     pub first_start: bool,
     /// Read the identities of these views (a `view_id` subquery) from their
-    /// states in `view_states` instead of aggregating events.
+    /// states in `view_states_v2` instead of aggregating events.
     pub states: Option<String>,
 }
 
@@ -122,7 +122,7 @@ pub(super) fn cohort_events(cohort: Cohort) -> String {
 }
 
 /// Aggregates over one identity's events (view, video and viewer): function,
-/// arguments and name. Reports apply them to events; the `view_states`
+/// arguments and name. Reports apply them to events; the `view_states_v2`
 /// materialized view keeps their states as events arrive, and rollup refreshes
 /// merge those states with the same functions.
 pub(super) fn identity_aggregates(
@@ -260,7 +260,7 @@ pub(super) const QUALITY_SAMPLES: &str = ", quality_samples AS (
 )";
 
 /// Values recorded on a view's first start, available to filters and callers:
-/// the context, the subtitle language and playback rate, then the
+/// the context, the subtitle language, playback rate and delivery format, then the
 /// integrator's user ID, video title and custom dimensions.
 pub(super) const START_COLUMNS: &[&str] = &[
     "context_browser_name",
@@ -273,6 +273,7 @@ pub(super) const START_COLUMNS: &[&str] = &[
     "ctx_page_path",
     "e_subtitle_language",
     "d_playback_rate",
+    "e_delivery_format",
     "e_user_id",
     "e_video_title",
     "c_custom",
@@ -289,6 +290,7 @@ pub(super) const START_CONTEXT: &[&str] = &[
     "ctx_page_path",
     "e_subtitle_language",
     "d_playback_rate",
+    "e_delivery_format",
 ];
 const VIEW_CONTEXT: &[&str] = &[
     "context_browser_name",
@@ -359,7 +361,7 @@ pub(super) fn view_cohort(
     let identities = match &narrow.states {
         // Merged states of the given views, with the same results per identity.
         Some(views) => format!(
-            "SELECT view_id, video_id, viewer_id, {} FROM view_states
+            "SELECT view_id, video_id, viewer_id, {} FROM view_states_v2
             WHERE project_id = {project_id} AND view_id IN ({views})
             GROUP BY view_id, video_id, viewer_id",
             aggregates
@@ -1852,6 +1854,7 @@ impl Store {
             || query.page_path.is_some()
             || query.subtitle_language.is_some()
             || query.playback_rate.is_some()
+            || query.delivery_format.is_some()
             || !query.custom.is_empty()
             || query.order.is_some()
         {

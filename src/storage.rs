@@ -84,6 +84,8 @@ const EVENT_FIELDS: &[(&str, Kind)] = &[
     ("previous_subtitle_language", Text),
     ("playback_rate", Number),
     ("previous_playback_rate", Number),
+    // HLS or file delivery. Added by migration 0002.
+    ("delivery_format", Text),
 ];
 const BROWSER_FIELDS: &[(&str, Kind)] = &[
     ("schema_version", Integer),
@@ -404,7 +406,7 @@ mod tests {
         json!({"event_id": format!("event-{id}"), "view_id": "view", "video_id": "video",
             "viewer_id": null, "event_name": "chunkify.video.view_started", "sequence": id,
             "occurred_at": "2026-10-19T12:00:00.123456+02:00", "schema_version": 1,
-            "playing_time_ms": 123, "startup_time_ms": 1.25,
+            "playing_time_ms": 123, "startup_time_ms": 1.25, "delivery_format": "file",
             "browser_context": {"schema_version": 1, "browser_name": "Firefox", "pixel_ratio": 1.5}})
     }
 

@@ -3,14 +3,14 @@
 //! Reports measure each view once, from its first start and its final or latest
 //! measurement. Computing that from events on every request costs CPU in
 //! proportion to the views in range. Instead, a materialized view keeps each
-//! view's aggregation state as events are inserted (`view_states`), and a
+//! view's aggregation state as events are inserted (`view_states_v2`), and a
 //! periodic refresh turns the states of views that changed into per-view
-//! results (`rollup_views`) and mergeable partial aggregates per hour of first
-//! start, video and first-start context value (`rollup`).
+//! results (`rollup_views_v2`) and mergeable partial aggregates per hour of first
+//! start, video and first-start context value (`rollup_v2`).
 //!
 //! With `clickhouse.rollup_max_lag_seconds` above zero, reports read every hour
-//! as of the last completed refresh: whole hours from `rollup`, partial hours
-//! from `rollup_views`, and hours with expired events from events, so expired
+//! as of the last completed refresh: whole hours from `rollup_v2`, partial hours
+//! from `rollup_views_v2`, and hours with expired events from events, so expired
 //! events stay hidden. Without it, reports read events and no refresh runs.
 //!
 //! Any analytics server can refresh. A run claims the next version with the
@@ -43,6 +43,19 @@ const MIN_CLAIM_TIMEOUT_MS: i64 = 60_000;
 const KEEP_RUNS: i64 = 20;
 /// Hours recomputed per query during a refresh.
 const HOURS_PER_QUERY: usize = 24;
+/// Rollup, rollup hour, per-view and view state tables the expiration sweep
+/// purges: the current ones, then the ones migration 0002 replaced. Servers of
+/// earlier releases still read those until a later migration drops them, so
+/// expired views must leave them too.
+const DERIVED_TABLES: [(&str, &str, &str, &str); 2] = [
+    (
+        "rollup_v2",
+        "rollup_hours_v2",
+        "rollup_views_v2",
+        "view_states_v2",
+    ),
+    ("rollup", "rollup_hours", "rollup_views", "view_states"),
+];
 
 /// The UTC hour containing a millisecond timestamp, also before 1970.
 pub(super) fn hour_of(column: &str) -> String {
@@ -262,6 +275,7 @@ pub(super) const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("ctx_page_path", "Nullable(String)"),
     ("e_subtitle_language", "LowCardinality(Nullable(String))"),
     ("d_playback_rate", "LowCardinality(Nullable(String))"),
+    ("e_delivery_format", "LowCardinality(Nullable(String))"),
     ("e_user_id", "Nullable(String)"),
     ("e_video_title", "Nullable(String)"),
     ("c_custom", "Map(String, String)"),
@@ -450,7 +464,7 @@ impl Store {
         // A pinned run stays readable while its generations are kept.
         let pinned = match run {
             Some(run) => format!(
-                "AND version = {} AND version > (SELECT max(version) FROM rollup_runs WHERE completed = 1) - {KEEP_RUNS}",
+                "AND version = {} AND version > (SELECT max(version) FROM rollup_runs_v2 WHERE completed = 1) - {KEEP_RUNS}",
                 params.int(run)
             ),
             None => String::new(),
@@ -458,14 +472,14 @@ impl Store {
         let first = from.div_euclid(HOUR_MS).saturating_mul(HOUR_MS);
         let sql = format!(
             "WITH run AS (
-                SELECT version, through_ms FROM rollup_runs WHERE completed = 1 {pinned}
+                SELECT version, through_ms FROM rollup_runs_v2 WHERE completed = 1 {pinned}
                 ORDER BY version DESC LIMIT 1)
             SELECT (SELECT version FROM run), (SELECT through_ms FROM run),
                 toUnixTimestamp64Milli(now64(3)),
                 (SELECT groupArray((hour_ms, latest, low)) FROM (
                     SELECT hour_ms, max(generation) AS latest,
                         argMax(min_received_ms, generation) AS low
-                    FROM rollup_hours
+                    FROM rollup_hours_v2
                     WHERE project_id = {project_id} AND hour_ms >= {first} AND hour_ms < {to}
                         AND generation <= (SELECT version FROM run)
                     GROUP BY hour_ms ORDER BY hour_ms))",
@@ -600,7 +614,7 @@ impl Store {
                 .stored_key
                 .map_or(String::new(), |key| format!("{key} AS key, "));
             ctes.push(format!(
-                "stored_parts AS (SELECT {stored_key}{names} FROM rollup WHERE {}{})",
+                "stored_parts AS (SELECT {stored_key}{names} FROM rollup_v2 WHERE {}{})",
                 stored.join(" AND "),
                 video.clone().unwrap_or_default()
             ));
@@ -631,7 +645,7 @@ impl Store {
                 None => conditions.push(filters.clickhouse(params)),
             }
             ctes.push(format!(
-                "view_parts AS (SELECT {raw_key}{} FROM rollup_views WHERE {}{}{group})",
+                "view_parts AS (SELECT {raw_key}{} FROM rollup_views_v2 WHERE {}{}{group})",
                 query.partials.expressions(),
                 conditions.join(" AND "),
                 video.unwrap_or_default()
@@ -641,7 +655,7 @@ impl Store {
         if sources.is_empty() {
             // Nothing had views in range: an empty source with the same columns.
             ctes.push(format!(
-                "view_parts AS (SELECT {raw_key}{} FROM rollup_views WHERE 0{group})",
+                "view_parts AS (SELECT {raw_key}{} FROM rollup_views_v2 WHERE 0{group})",
                 query.partials.expressions()
             ));
             sources.push("view_parts");
@@ -703,7 +717,7 @@ impl Store {
             .control
             .one(
                 "SELECT toUnixTimestamp64Milli(now64(3)),
-                    (SELECT max(through_ms) FROM rollup_runs WHERE completed = 1)",
+                    (SELECT max(through_ms) FROM rollup_runs_v2 WHERE completed = 1)",
                 &none,
             )
             .await?;
@@ -717,7 +731,7 @@ impl Store {
         let latest = self
             .control
             .all(
-                "SELECT version, completed, toUnixTimestamp64Milli(written_at) FROM rollup_runs
+                "SELECT version, completed, toUnixTimestamp64Milli(written_at) FROM rollup_runs_v2
                 ORDER BY version DESC, completed DESC LIMIT 1",
                 &none,
             )
@@ -745,7 +759,7 @@ impl Store {
         self.record_run(&run, false).await?;
         let mut params = Params::default();
         let sql = format!(
-            "SELECT write_id FROM rollup_runs WHERE version = {} AND completed = 0",
+            "SELECT write_id FROM rollup_runs_v2 WHERE version = {} AND completed = 0",
             params.int(version)
         );
         let winner = self.control.all(&sql, &params).await?;
@@ -765,7 +779,7 @@ impl Store {
         );
         self.control
             .insert(
-                "rollup_runs",
+                "rollup_runs_v2",
                 serde_json::to_vec(&row).map_err(|_| ApiError::internal())?,
                 &[
                     ("async_insert", "0"),
@@ -787,7 +801,7 @@ impl Store {
         );
         let sql = format!(
             "SELECT project_id, arraySort(groupUniqArray(hour)) FROM (
-                SELECT project_id, arrayJoin(hours) AS hour FROM rollup_views
+                SELECT project_id, arrayJoin(hours) AS hour FROM rollup_views_v2
                 WHERE (project_id, view_id) IN (SELECT project_id, view_id FROM events WHERE {window})
                 UNION ALL
                 SELECT project_id, {} AS hour FROM events
@@ -826,7 +840,7 @@ impl Store {
         // and views with events stored in this run's window. Their states are
         // read by primary key, so the cost follows views, not events.
         let views = format!(
-            "SELECT view_id FROM rollup_views WHERE project_id = {owner} AND hasAny(hours, {list})
+            "SELECT view_id FROM rollup_views_v2 WHERE project_id = {owner} AND hasAny(hours, {list})
             UNION DISTINCT
             SELECT view_id FROM events WHERE project_id = {owner}
                 AND stored_at_ms > {} AND stored_at_ms <= {}",
@@ -867,7 +881,7 @@ impl Store {
         self.client
             .execute(
                 format!(
-                    "INSERT INTO rollup_views ({columns}) {cohort}{} SELECT {values} FROM quality_samples",
+                    "INSERT INTO rollup_views_v2 ({columns}) {cohort}{} SELECT {values} FROM quality_samples",
                     super::reports::QUALITY_SAMPLES
                 ),
                 &params,
@@ -901,10 +915,10 @@ impl Store {
         self.client
             .execute(
                 format!(
-                    "INSERT INTO rollup (project_id, hour_ms, generation, dim, value, video_id, {names})
+                    "INSERT INTO rollup_v2 (project_id, hour_ms, generation, dim, value, video_id, {names})
                     SELECT project_id, hour_ms, generation, dimension.1 AS dim, dimension.2 AS value,
                         video_id, {expressions}
-                    FROM rollup_views ARRAY JOIN [{dimensions}] AS dimension
+                    FROM rollup_views_v2 ARRAY JOIN [{dimensions}] AS dimension
                     WHERE {current}
                     GROUP BY project_id, hour_ms, generation, dim, value, video_id"
                 ),
@@ -916,13 +930,13 @@ impl Store {
         self.client
             .execute(
                 format!(
-                    "INSERT INTO rollup_hours (project_id, hour_ms, generation, min_received_ms, max_received_ms)
+                    "INSERT INTO rollup_hours_v2 (project_id, hour_ms, generation, min_received_ms, max_received_ms)
                     SELECT {project_id}, hour, {generation}, min(low), max(high) FROM (
                         SELECT arrayJoin({list}) AS hour,
                             toInt64(9223372036854775807) AS low, toInt64(-9223372036854775808) AS high
                         UNION ALL
                         SELECT arrayJoin(hours) AS hour, min_received_ms AS low, max_received_ms AS high
-                        FROM rollup_views WHERE project_id = {project_id} AND generation = {generation}
+                        FROM rollup_views_v2 WHERE project_id = {project_id} AND generation = {generation}
                     ) WHERE has({list}, hour) GROUP BY hour"
                 ),
                 &params,
@@ -938,22 +952,22 @@ impl Store {
         let mut params = Params::default();
         let before = params.int(before);
         let current_hours = format!(
-            "SELECT project_id, hour_ms, max(generation) FROM rollup_hours
+            "SELECT project_id, hour_ms, max(generation) FROM rollup_hours_v2
             WHERE generation <= {before} GROUP BY project_id, hour_ms"
         );
         for statement in [
             format!(
-                "DELETE FROM rollup WHERE generation < {before}
+                "DELETE FROM rollup_v2 WHERE generation < {before}
                 AND (project_id, hour_ms, generation) NOT IN ({current_hours})"
             ),
             format!(
-                "DELETE FROM rollup_hours WHERE generation < {before}
+                "DELETE FROM rollup_hours_v2 WHERE generation < {before}
                 AND (project_id, hour_ms, generation) NOT IN ({current_hours})"
             ),
             format!(
-                "DELETE FROM rollup_views WHERE generation < {before}
+                "DELETE FROM rollup_views_v2 WHERE generation < {before}
                 AND (project_id, view_id, generation) NOT IN (
-                    SELECT project_id, view_id, max(generation) FROM rollup_views
+                    SELECT project_id, view_id, max(generation) FROM rollup_views_v2
                     WHERE generation <= {before} GROUP BY project_id, view_id)"
             ),
         ] {
@@ -980,23 +994,29 @@ impl Store {
         let hours = retained(&mut params, "max(max_received_ms)")?;
         let views = retained(&mut params, "max(max_received_ms)")?;
         let states = retained(&mut params, "maxMerge(max_received)")?;
-        let expired_hours = format!(
-            "SELECT project_id, hour_ms FROM rollup_hours GROUP BY project_id, hour_ms HAVING NOT ({hours})"
-        );
-        for statement in [
-            format!("DELETE FROM rollup WHERE (project_id, hour_ms) IN ({expired_hours})"),
-            format!("DELETE FROM rollup_hours WHERE (project_id, hour_ms) IN ({expired_hours})"),
-            format!(
-                "DELETE FROM rollup_views WHERE (project_id, view_id) IN (
-                    SELECT project_id, view_id FROM rollup_views
-                    GROUP BY project_id, view_id HAVING NOT ({views}))"
-            ),
-            format!(
-                "DELETE FROM view_states WHERE (project_id, view_id) IN (
-                    SELECT project_id, view_id FROM view_states
-                    GROUP BY project_id, view_id HAVING NOT ({states}))"
-            ),
-        ] {
+        let mut statements = Vec::new();
+        for (rollup, rollup_hours, rollup_views, view_states) in DERIVED_TABLES {
+            let expired_hours = format!(
+                "SELECT project_id, hour_ms FROM {rollup_hours} GROUP BY project_id, hour_ms HAVING NOT ({hours})"
+            );
+            statements.extend([
+                format!("DELETE FROM {rollup} WHERE (project_id, hour_ms) IN ({expired_hours})"),
+                format!(
+                    "DELETE FROM {rollup_hours} WHERE (project_id, hour_ms) IN ({expired_hours})"
+                ),
+                format!(
+                    "DELETE FROM {rollup_views} WHERE (project_id, view_id) IN (
+                        SELECT project_id, view_id FROM {rollup_views}
+                        GROUP BY project_id, view_id HAVING NOT ({views}))"
+                ),
+                format!(
+                    "DELETE FROM {view_states} WHERE (project_id, view_id) IN (
+                        SELECT project_id, view_id FROM {view_states}
+                        GROUP BY project_id, view_id HAVING NOT ({states}))"
+                ),
+            ]);
+        }
+        for statement in statements {
             // Replicated tables reject deletes whose condition reads other
             // rows unless allowed; each replica applies the same generations.
             self.client

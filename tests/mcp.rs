@@ -527,6 +527,25 @@ async fn exercise_project_queries(http: bool) {
     )
     .await;
     assert_eq!(grouped["data"]["groups"], json!([]));
+    let formats = call(
+        &client,
+        "get_metrics",
+        json!({"kind":"quality", "group_by":"delivery_format", "delivery_format":"file"}),
+        false,
+    )
+    .await;
+    assert_eq!(formats["data"]["group_by"], "delivery_format");
+    assert_eq!(formats["data"]["groups"], json!([]));
+    assert_eq!(
+        call(
+            &client,
+            "get_metrics",
+            json!({"kind":"summary", "delivery_format":"mp4"}),
+            true
+        )
+        .await["error"]["code"],
+        "invalid_arguments"
+    );
     let titled = call(
         &client,
         "get_metrics",
@@ -1607,6 +1626,7 @@ async fn grouped_metrics_match_http_with_read_only_keys_and_bounded_pages() {
                     "page_path",
                     "subtitle_language",
                     "playback_rate",
+                    "delivery_format",
                     "video_title",
                     "user_id"
                 ])

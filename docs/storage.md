@@ -214,10 +214,12 @@ It prints the schema version and the migrations it applied, for example
 `{"applied":["0003_add_example"],"version":3}`, and an empty list when nothing
 was pending. Then restart the servers.
 
-Nothing locks the database while `migrate` runs, so run it from one place at a
-time. If two runs overlap, at least one of them fails and says so, and the
-migration stays marked unfinished: when both have stopped, run `migrate` once
-more.
+Run `migrate` once per deploy, from one place, such as a step of your deploy
+pipeline, and never from each server's startup. The same goes for `init` on a
+new database, which applies every migration. Nothing locks the database: two
+runs at the same time can both report success on a schema that neither
+finished correctly. If your pipeline can run twice at once, make the second
+run wait, for example with a GitHub Actions `concurrency` group.
 
 `serve` never creates or changes tables, and `init` does not change a database
 that is already initialized. At startup `serve` compares the database with the
@@ -226,7 +228,7 @@ version its release needs and stops with a message when they differ:
 | Message | What to do |
 | --- | --- |
 | The database needs schema migrations | Run `chunkify-analytics migrate`, then start the server again. The release is newer than the database, or tables are missing, for example after a restore that left some out. `migrate` recreates missing tables. |
-| A schema migration did not finish | A `migrate` run was interrupted or is still running, or two runs overlapped. When none is running, run `chunkify-analytics migrate` again. It repeats the migration from its start, which is safe. |
+| A schema migration did not finish | A `migrate` run was interrupted or is still running. When none is running, run `chunkify-analytics migrate` again. It repeats the migration from its start, which is safe. |
 | The schema is newer than this release supports | Another server already runs a newer release. Upgrade this server too. |
 
 Running servers check the schema only at startup, so they keep serving while

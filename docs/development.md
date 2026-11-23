@@ -272,5 +272,5 @@ Follow the commit conventions in [AGENTS.md](../AGENTS.md).
 ## Releases
 
 See [the release guide](releasing.md) for automatic release PRs, version tags,
-release packages, Docker images, and a manual build that checks the release
-without publishing.
+release packages, Docker images, the OpenAPI sync to the SDK config repository,
+and a manual build that checks the release without publishing.

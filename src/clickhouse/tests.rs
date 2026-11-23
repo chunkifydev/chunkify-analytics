@@ -2454,6 +2454,70 @@ async fn all_reports(store: &Store, base: i64, events_only: bool) -> Value {
 }
 
 #[tokio::test]
+async fn refreshes_record_each_view_once_across_hour_chunks() {
+    let fixture = Fixture::new(&["default"]).await;
+    let store = &fixture.store;
+    // One view per hour over 30 hours, more than one chunk of hours; a view
+    // that starts again in the second chunk; and a view whose first start
+    // (by sequence) comes in a later chunk than its other start.
+    let mut rows: Vec<Value> = (0..30)
+        .map(|hour| {
+            let view = format!("v{hour}");
+            event(
+                &view,
+                "default",
+                &view,
+                "video",
+                None,
+                "view_started",
+                1,
+                hour * HOUR + 1000,
+            )
+        })
+        .collect();
+    for (view, sequence, hour) in [("m", 1, 0), ("m", 2, 26), ("x", 1, 29), ("x", 2, 1)] {
+        rows.push(event(
+            &format!("{view}{sequence}"),
+            "default",
+            view,
+            "video",
+            None,
+            "view_started",
+            sequence,
+            hour * HOUR + 2000,
+        ));
+    }
+    fixture.insert(rows).await;
+    assert_eq!(store.refresh_rollups_with(0, 0).await.unwrap(), Some(30));
+    let read = |sql: &str| {
+        let sql = sql.to_owned();
+        async move {
+            ok(store
+                .client
+                .all(&sql, &Params::default())
+                .await
+                .map(Value::from))
+        }
+    };
+    assert_eq!(
+        read("SELECT view_id FROM rollup_views GROUP BY view_id HAVING count() > 1").await,
+        json!([])
+    );
+    assert_eq!(
+        read("SELECT toString(sum(views)) FROM rollup WHERE dim = 'all'").await,
+        json!([["32"]])
+    );
+    // Hour 1 holds a start of x, so its receipt range includes x's events.
+    assert_eq!(
+        read(&format!(
+            "SELECT toString(max_received_ms) FROM rollup_hours WHERE hour_ms = {HOUR}"
+        ))
+        .await,
+        json!([[(29 * HOUR + 2000).to_string()]])
+    );
+}
+
+#[tokio::test]
 async fn rollup_runs_claim_once_and_skip_until_the_interval() {
     let fixture = Fixture::new(&["default"]).await;
     let store = &fixture.store;

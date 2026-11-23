@@ -41,8 +41,12 @@ const MIN_CLAIM_TIMEOUT_MS: i64 = 60_000;
 /// Superseded generations are kept for this many runs, so reads that chose
 /// them before a newer generation was written can finish.
 const KEEP_RUNS: i64 = 20;
-/// Hours recomputed per query during a refresh.
+/// Hours recomputed per query during a refresh. Tests use small chunks, so
+/// that every rollup test also covers views and refreshes across chunks.
+#[cfg(not(test))]
 const HOURS_PER_QUERY: usize = 24;
+#[cfg(test)]
+const HOURS_PER_QUERY: usize = 2;
 
 /// The UTC hour containing a millisecond timestamp, also before 1970.
 pub(super) fn hour_of(column: &str) -> String {
@@ -824,15 +828,19 @@ impl Store {
         let list = params.ints(hours);
         let owner = params.text(project);
         // Every view with a start in these hours: views known from earlier runs
-        // and views with events stored in this run's window. Their states are
-        // read by primary key, so the cost follows views, not events.
+        // and views with a start stored in this run's window. A view known
+        // earlier keeps its hours in rollup_views, so its later events need no
+        // start in the window. Their states are read by primary key, so the
+        // cost follows views, not events.
         let views = format!(
             "SELECT view_id FROM rollup_views WHERE project_id = {owner} AND hasAny(hours, {list})
             UNION DISTINCT
             SELECT view_id FROM events WHERE project_id = {owner}
-                AND stored_at_ms > {} AND stored_at_ms <= {}",
+                AND stored_at_ms > {} AND stored_at_ms <= {}
+                AND event_name = 'chunkify.video.view_started' AND has({list}, {})",
             params.int(run.since),
-            params.int(run.through)
+            params.int(run.through),
+            hour_of("occurred_at_ms")
         );
         let narrow = Narrow {
             states: Some(views),
@@ -865,10 +873,15 @@ impl Store {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        // A view whose starts span chunks is recomputed in each of them, but
+        // recorded once per generation: in the chunk of its earliest start
+        // hour. Chunks run in hour order, so every later chunk that rolls up
+        // its first start, or the receipt range of one of its hours, sees it.
         self.client
             .execute(
                 format!(
-                    "INSERT INTO rollup_views ({columns}) {cohort}{} SELECT {values} FROM quality_samples",
+                    "INSERT INTO rollup_views ({columns}) {cohort}{} SELECT {values} FROM quality_samples
+                    WHERE has({list}, arrayMin(hours))",
                     super::reports::QUALITY_SAMPLES
                 ),
                 &params,

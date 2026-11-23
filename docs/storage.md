@@ -237,3 +237,14 @@ does not start again, so upgrade all servers soon after migrating. Back up the
 database before an upgrade: there are no downgrade migrations, and going back
 to an earlier release means restoring the backup.
 See [backup and restore](administration.md#backup-and-restore).
+
+Migration `0002_delivery_format` is an exception: it drops and recreates the
+derived tables (`view_states`, its materialized view, `rollup`, `rollup_hours`,
+`rollup_views` and `rollup_runs`) to add the delivery format. Stop every server,
+run `chunkify-analytics migrate`, then start the servers. Reports keep the same
+data, because these tables are derived from `events`: the migration rebuilds
+each view's aggregation state from every stored event, which takes longer on a
+large database, and the first rollup refresh after the upgrade recomputes every
+hour. Until it completes, reports read events instead of rollups. When
+`migrate` recreates missing tables, it runs this migration again too, so stop
+the servers for that as well.

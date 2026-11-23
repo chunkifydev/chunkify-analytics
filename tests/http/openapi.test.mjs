@@ -1453,6 +1453,45 @@ test("subtitle and playback rate state is collected, filtered and reported per s
   }
 });
 
+test("delivery format is optional, stored and reported from the first start", async t => {
+  const server = await collector(t);
+  const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;
+  const start = fields => ({ ...structuredClone(example), event_id: randomUUID(), view_id: randomUUID(),
+    video_id: "format-video", sequence: 1, ...fields });
+  const hls = start({ delivery_format: "hls" });
+  // Safari plays HLS natively: the connector cannot tell it from a file.
+  const native = start({ delivery_format: "hls", connector_name: "html-media" });
+  const file = start({ delivery_format: "file", connector_name: "html-media" });
+  const later = { ...structuredClone(file), event_id: randomUUID(), sequence: 2, delivery_format: "hls" };
+  const unknown = start({ delivery_format: null });
+  const older = start({});
+  assert.equal("delivery_format" in older, false);
+  for (const event of [hls, native, file, later, unknown, older]) {
+    assertRequest("/v1/events", "post", event);
+    await server.post("/v1/events", JSON.stringify(event), 201);
+  }
+  for (const value of ["HLS", "mp4", "", 1]) {
+    await server.post("/v1/events", JSON.stringify(start({ delivery_format: value })), 400);
+  }
+  const stored = await server.get(`/v1/events?video_id=format-video&view_id=${file.view_id}`);
+  assert.deepEqual(stored.events.map(record => record.event.delivery_format), ["file", "hls"]);
+  assert.equal((await server.get(`/v1/events?view_id=${older.view_id}`)).events[0].event.delivery_format, undefined);
+  assert.equal((await server.get("/v1/summary?video_id=format-video&delivery_format=hls")).views, 2);
+  assert.equal((await server.get("/v1/summary?video_id=format-video&delivery_format=file")).views, 1);
+  for (const route of ["summary", "quality", "engagement"]) {
+    const grouped = await server.get(`/v1/${route}?video_id=format-video&group_by=delivery_format&limit=10`);
+    assert.equal(grouped.group_by, "delivery_format");
+    assert.deepEqual(grouped.groups.map(group => [group.value, group.data.views]), [[null, 2], ["hls", 2], ["file", 1]]);
+  }
+  const values = await assertResponse("/v1/dimensions/{dimension}", "get",
+    await fetch(`${server.url}/v1/dimensions/delivery_format?video_id=format-video`,
+      { headers: { Authorization: `Bearer ${server.keys.secret_key}` } }), 200);
+  assert.deepEqual(values.values, [{ value: null, views: 2 }, { value: "hls", views: 2 }, { value: "file", views: 1 }]);
+  await server.get("/v1/summary?delivery_format=mp4", 400);
+  assert.equal((await fetch(`${server.url}/v1/views/${hls.view_id}?delivery_format=hls`,
+    { headers: { Authorization: `Bearer ${server.keys.secret_key}` } })).status, 400);
+});
+
 test("custom dimensions filter, group, list keys and export by first start", async t => {
   const server = await collector(t);
   const example = contract.paths["/v1/events"].post.requestBody.content["application/json"].example;

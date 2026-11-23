@@ -69,6 +69,7 @@ pub struct Query {
     pub subtitle_language: Option<String>,
     #[serde(default, deserialize_with = "optional_rate")]
     pub playback_rate: Option<String>,
+    pub delivery_format: Option<String>,
     #[serde(default, deserialize_with = "optional_limit")]
     pub limit: Option<usize>,
     pub cursor: Option<String>,
@@ -210,6 +211,7 @@ const DIMENSIONS: &[(&str, &str, Grouping)] = &[
     ("page_path", "ctx_page_path", Grouping::Hourly),
     ("subtitle_language", "e_subtitle_language", Grouping::Hourly),
     ("playback_rate", "d_playback_rate", Grouping::Hourly),
+    ("delivery_format", "e_delivery_format", Grouping::Hourly),
     ("video_title", "e_video_title", Grouping::PerView),
     ("video_id", "video_id", Grouping::FilterOnly),
     ("viewer_id", "viewer_id", Grouping::FilterOnly),
@@ -361,6 +363,7 @@ pub struct TimeseriesQuery {
     pub subtitle_language: Option<String>,
     #[serde(default, deserialize_with = "optional_rate")]
     pub playback_rate: Option<String>,
+    pub delivery_format: Option<String>,
     /// `custom.<key>` filters, validated like [`Query::custom`].
     #[serde(flatten, deserialize_with = "custom_filters")]
     pub custom: BTreeMap<String, String>,
@@ -401,6 +404,7 @@ impl TimeseriesQuery {
             page_path: self.page_path,
             subtitle_language: self.subtitle_language,
             playback_rate: self.playback_rate,
+            delivery_format: self.delivery_format,
             custom: self.custom,
             ..Query::default()
         }
@@ -449,6 +453,9 @@ pub struct Filters {
     page_path: Option<String>,
     subtitle_language: Option<String>,
     playback_rate: Option<String>,
+    /// Optional in cursors from earlier releases.
+    #[serde(default)]
+    delivery_format: Option<String>,
     /// Custom dimension filters by key, without the `custom.` prefix.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     custom: BTreeMap<String, String>,
@@ -545,6 +552,13 @@ impl Query {
                 event::MAX_LANGUAGE_CHARS
             )));
         }
+        if self
+            .delivery_format
+            .as_deref()
+            .is_some_and(|value| !event::DELIVERY_FORMATS.contains(&value))
+        {
+            return Err(ApiError::bad("delivery_format must be hls or file"));
+        }
         for (name, value) in [
             ("user_id", &self.user_id),
             ("video_title", &self.video_title),
@@ -609,6 +623,7 @@ impl Query {
             page_path: self.page_path.clone(),
             subtitle_language: self.subtitle_language.clone(),
             playback_rate: self.playback_rate.clone(),
+            delivery_format: self.delivery_format.clone(),
             custom,
         })
     }
@@ -727,6 +742,7 @@ impl Filters {
             (&self.page_path, "ctx_page_path"),
             (&self.subtitle_language, "e_subtitle_language"),
             (&self.playback_rate, "d_playback_rate"),
+            (&self.delivery_format, "e_delivery_format"),
         ] {
             if let Some(value) = value {
                 conditions.push(format!("{column} = {}", params.text(value)));
@@ -770,6 +786,7 @@ impl Filters {
             (&self.page_path, "ctx_page_path"),
             (&self.subtitle_language, "e_subtitle_language"),
             (&self.playback_rate, "d_playback_rate"),
+            (&self.delivery_format, "e_delivery_format"),
         ]
         .into_iter()
         .filter_map(|(value, column)| value.as_ref().map(|value| (column, value.clone())));
@@ -965,5 +982,18 @@ mod tests {
         assert_eq!(title.0.start_column(), "e_video_title");
         let country: BreakdownBy = serde_json::from_value(json!("country")).unwrap();
         assert!(country.0.in_rollups());
+        let format: BreakdownBy = serde_json::from_value(json!("delivery_format")).unwrap();
+        assert!(format.0.in_rollups());
+        assert_eq!(format.0.start_column(), "e_delivery_format");
+        let filters = super::Query {
+            delivery_format: Some("file".into()),
+            ..super::Query::default()
+        }
+        .filters()
+        .unwrap();
+        assert_eq!(
+            filters.rollup_scope().unwrap().dimension,
+            Some(("e_delivery_format", "file".to_owned()))
+        );
     }
 }

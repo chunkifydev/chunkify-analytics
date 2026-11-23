@@ -266,6 +266,7 @@ pub(super) const VIEW_COLUMNS: &[(&str, &str)] = &[
     ("ctx_page_path", "Nullable(String)"),
     ("e_subtitle_language", "LowCardinality(Nullable(String))"),
     ("d_playback_rate", "LowCardinality(Nullable(String))"),
+    ("e_delivery_format", "LowCardinality(Nullable(String))"),
     ("e_user_id", "Nullable(String)"),
     ("e_video_title", "Nullable(String)"),
     ("c_custom", "Map(String, String)"),

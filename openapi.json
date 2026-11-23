@@ -169,6 +169,9 @@
             "$ref": "#/components/parameters/playback_rate"
           },
           {
+            "$ref": "#/components/parameters/delivery_format"
+          },
+          {
             "$ref": "#/components/parameters/event_name"
           },
           {
@@ -791,6 +794,9 @@
             "$ref": "#/components/parameters/playback_rate"
           },
           {
+            "$ref": "#/components/parameters/delivery_format"
+          },
+          {
             "$ref": "#/components/parameters/group_by"
           },
           {
@@ -1007,6 +1013,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -1226,6 +1235,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/view_id"
@@ -1454,6 +1466,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -1708,6 +1723,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/group_by"
@@ -3036,6 +3054,9 @@
             "$ref": "#/components/parameters/playback_rate"
           },
           {
+            "$ref": "#/components/parameters/delivery_format"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3454,6 +3475,9 @@
             "$ref": "#/components/parameters/playback_rate"
           },
           {
+            "$ref": "#/components/parameters/delivery_format"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -3658,6 +3682,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -4296,6 +4323,9 @@
             "$ref": "#/components/parameters/playback_rate"
           },
           {
+            "$ref": "#/components/parameters/delivery_format"
+          },
+          {
             "$ref": "#/components/parameters/view_id"
           }
         ],
@@ -4518,6 +4548,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -4757,6 +4790,9 @@
             "$ref": "#/components/parameters/playback_rate"
           },
           {
+            "$ref": "#/components/parameters/delivery_format"
+          },
+          {
             "$ref": "#/components/parameters/limit"
           },
           {
@@ -4982,6 +5018,9 @@
           },
           {
             "$ref": "#/components/parameters/playback_rate"
+          },
+          {
+            "$ref": "#/components/parameters/delivery_format"
           },
           {
             "$ref": "#/components/parameters/limit"
@@ -5453,6 +5492,7 @@
                 "page_path",
                 "subtitle_language",
                 "playback_rate",
+                "delivery_format",
                 "video_title",
                 "user_id"
               ]
@@ -5464,7 +5504,7 @@
             }
           ]
         },
-        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites. video_title groups by the title on each view's first retained start, so a renamed video counts each view under the title it started with. user_id groups by the user ID on each view's first retained start. Use custom.<key>, such as custom.plan, to group by a custom dimension; views without the key form the null group."
+        "description": "Optional on summary, quality and engagement. Group views by this field on their first retained start. Missing, null and nonstring context forms a null group; the literal device type unknown stays separate. Groups sort by views descending, then value ascending with null first for ties. Pagination is available only with group_by. Location uses the first retained start too. City groups use the stored name; filter by country to avoid combining names shared by different countries. Page groups use the first retained start even if playback continues after navigation. Filter by page_origin when grouping page_path to distinguish identical paths on different sites. video_title groups by the title on each view's first retained start, so a renamed video counts each view under the title it started with. delivery_format groups by hls or file on each view's first retained start; views from SDKs that do not report it form the null group. user_id groups by the user ID on each view's first retained start. Use custom.<key>, such as custom.plan, to group by a custom dimension; views without the key form the null group."
       },
       "view_id": {
         "name": "view_id",
@@ -5512,6 +5552,7 @@
                 "page_path",
                 "subtitle_language",
                 "playback_rate",
+                "delivery_format",
                 "custom_keys"
               ]
             },
@@ -5636,6 +5677,18 @@
           "pattern": "^[0-9]+(\\.[0-9]{1,2})?$"
         },
         "description": "Playback rate from 0.01 to 16 with at most two decimals, such as 1, 1.5 or 2; 2.0 and 2 are the same rate. Metrics use the rate on the first retained view start; raw events use each event's value."
+      },
+      "delivery_format": {
+        "name": "delivery_format",
+        "in": "query",
+        "schema": {
+          "type": "string",
+          "enum": [
+            "hls",
+            "file"
+          ]
+        },
+        "description": "Delivery format on the first retained view start: hls for HLS streams, file for a single media file such as an MP4 rendition. Metrics use the first retained view start; raw events use each event's value. Views whose SDK did not report it do not match. connector_name is not a substitute: Safari plays HLS natively and reports html-media."
       },
       "views_order": {
         "name": "order",
@@ -5773,6 +5826,18 @@
             "type": [
               "string",
               "null"
+            ]
+          },
+          "delivery_format": {
+            "description": "How the player receives the media: hls for an HLS stream, file for a single media file such as an MP4 rendition; null when unknown. Optional: older SDKs omit it. Reports read it from each view's first start. Unlike connector_name, it does not depend on the playback engine: Safari's native HLS reports html-media.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "hls",
+              "file",
+              null
             ]
           },
           "environment": {
@@ -8635,6 +8700,7 @@
                   "page_path",
                   "subtitle_language",
                   "playback_rate",
+                  "delivery_format",
                   "video_title",
                   "user_id"
                 ]
@@ -8701,6 +8767,7 @@
                   "page_path",
                   "subtitle_language",
                   "playback_rate",
+                  "delivery_format",
                   "video_title",
                   "user_id"
                 ]
@@ -8767,6 +8834,7 @@
                   "page_path",
                   "subtitle_language",
                   "playback_rate",
+                  "delivery_format",
                   "video_title",
                   "user_id"
                 ]
@@ -9362,6 +9430,7 @@
                   "page_path",
                   "subtitle_language",
                   "playback_rate",
+                  "delivery_format",
                   "custom_keys"
                 ]
               },
@@ -9498,6 +9567,7 @@
                   "page_path",
                   "subtitle_language",
                   "playback_rate",
+                  "delivery_format",
                   "video_title",
                   "user_id"
                 ]
@@ -9564,6 +9634,7 @@
                   "page_path",
                   "subtitle_language",
                   "playback_rate",
+                  "delivery_format",
                   "custom_keys"
                 ]
               },
@@ -9618,6 +9689,13 @@
           "playback_rate": {
             "type": "string",
             "pattern": "^[0-9]+(\\.[0-9]{1,2})?$"
+          },
+          "delivery_format": {
+            "type": "string",
+            "enum": [
+              "hls",
+              "file"
+            ]
           }
         },
         "patternProperties": {

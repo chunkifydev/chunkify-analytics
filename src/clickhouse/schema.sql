@@ -98,6 +98,7 @@ CREATE TABLE events
     `e_previous_subtitle_language` Nullable(String),
     `e_playback_rate` Nullable(Float64),
     `e_previous_playback_rate` Nullable(Float64),
+    `e_delivery_format` Nullable(String) DEFAULT if((JSONExtractString(event_remainder, 'delivery_format') IN ('hls', 'file')), JSONExtractString(event_remainder, 'delivery_format'), NULL),
     `b_schema_version` Nullable(Int64),
     `b_user_agent` Nullable(String),
     `b_browser_name` Nullable(String),
@@ -242,6 +243,7 @@ CREATE TABLE rollup_views
     `ctx_page_path` Nullable(String),
     `e_subtitle_language` LowCardinality(Nullable(String)),
     `d_playback_rate` LowCardinality(Nullable(String)),
+    `e_delivery_format` LowCardinality(Nullable(String)),
     `e_user_id` Nullable(String),
     `e_video_title` Nullable(String),
     `c_custom` Map(String, String),
@@ -297,6 +299,10 @@ CREATE TABLE view_states
         Int64,
         Int64,
         Int64), UInt8),
+    `first_delivery_format` AggregateFunction(argMinIf, Tuple(Nullable(String)), Tuple(
+        Int64,
+        Int64,
+        Int64), UInt8),
     `start_order` AggregateFunction(minIf, Tuple(
         Int64,
         Int64,
@@ -345,6 +351,10 @@ CREATE MATERIALIZED VIEW view_states_insert TO view_states
         Int64,
         Int64,
         Int64), UInt8),
+    `first_delivery_format` AggregateFunction(argMinIf, Tuple(Nullable(String)), Tuple(
+        Int64,
+        Int64,
+        Int64), UInt8),
     `start_order` AggregateFunction(minIf, Tuple(
         Int64,
         Int64,
@@ -372,6 +382,7 @@ AS SELECT
     video_id,
     viewer_id,
     argMinIfState(tuple(context_browser_name, context_os_name, context_device_type, ctx_continent, ctx_country, ctx_city, ctx_page_origin, ctx_page_path, e_subtitle_language, d_playback_rate, e_user_id, e_video_title, c_custom), tuple(sequence, occurred_at_ms, ingest_id), event_name = 'chunkify.video.view_started') AS first_start,
+    argMinIfState(tuple(e_delivery_format), tuple(sequence, occurred_at_ms, ingest_id), event_name = 'chunkify.video.view_started') AS first_delivery_format,
     minIfState(tuple(sequence, occurred_at_ms, ingest_id), event_name = 'chunkify.video.view_started') AS start_order,
     countIfState(event_name = 'chunkify.video.view_started') AS start_count,
     argMaxIfState(tuple(toNullable(playing_time_ms), toNullable(n_startup_time_ms), toNullable(n_rebuffer_duration_ms), toNullable(if(event_name = 'chunkify.video.view_ended', e_startup_outcome, NULL)), toNullable((event_name = 'chunkify.video.view_ended') AND (e_reason = 'ended')), toNullable(if((n_media_duration_seconds > 0) AND ((n_furthest_progress_ratio >= 0) AND (n_furthest_progress_ratio <= 1)), n_furthest_progress_ratio, NULL))), tuple(event_name = 'chunkify.video.view_ended', sequence, occurred_at_ms, ingest_id), (event_name IN ('chunkify.video.view_snapshot', 'chunkify.video.view_ended'))) AS measurement,

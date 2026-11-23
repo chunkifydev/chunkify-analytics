@@ -105,6 +105,28 @@ Reports read these two ways, under different names so neither is ambiguous: the
 each view's first retained start, so each view counts once; `/v1/subtitles` and
 `/v1/playback-rates` split watch time across states within each view.
 
+### Delivery format
+
+`delivery_format` tells HLS playback apart from a single media file:
+
+- `hls` for an HLS stream, whether hls.js or the browser plays it.
+- `file` for a single media file, such as a Chunkify MP4 rendition or a
+  transcoding output.
+- `null` when the integration does not know.
+
+It is optional on every event, so events from SDKs that do not send it stay
+valid; any other value rejects the event. Filters and breakdowns use the value
+on each view's first retained start. Views whose SDK did not report it do not
+match a `delivery_format` filter and form the `null` group of a breakdown.
+
+`connector_name` is not a substitute: it names the playback engine
+(`hls.js` or `html-media`), and Safari plays HLS natively, so its HLS views
+report `html-media` like MP4 files.
+
+Servers released before this field accept it too, because they keep unknown
+event fields in the stored event. After an upgrade, `chunkify-analytics migrate`
+makes the values they stored available to reports.
+
 ### Custom dimensions
 
 Integrators can label views with their own dimensions, such as a plan or an
@@ -205,7 +227,7 @@ Pages displaying or using bundled DB-IP location results must include an
 
 Analytics collection queries accept `from`, `to`, `video_id`, `viewer_id`, `user_id`, `video_title`, `view_id`,
 `browser_name`, `os_name`, `device_type`, `continent`, `country`, `city`, `page_origin`, `page_path`,
-`subtitle_language`, `playback_rate`, and custom dimension filters `custom.<key>`.
+`subtitle_language`, `playback_rate`, `delivery_format`, and custom dimension filters `custom.<key>`.
 Other query parameters are rejected. View detail accepts only timeline
 pagination; export downloads use their saved query. Timestamps use
 RFC3339 with a timezone and are compared in UTC, with `from` inclusive and `to`
@@ -222,7 +244,8 @@ dimension, rendition, and time-series queries.
 `subtitle_language` is an exact, case-sensitive, non-blank language tag of up to 35
 characters; views with subtitles off at start do not match. `playback_rate`
 accepts digits with at most two decimals, from 0.01 to 16; `2` and `2.0`
-are the same rate.
+are the same rate. `delivery_format` accepts `hls` or `file`; views whose SDK
+did not report it do not match.
 `video_id` must not be blank and `viewer_id` must not be empty, like the event
 fields they match. `user_id` and `video_title` are exact, case-sensitive values of
 1 to 256 Unicode characters. Views without the value do not match. Like custom dimensions, they
@@ -292,11 +315,11 @@ curl -H "Authorization: Bearer $SECRET_KEY" \
   incomplete. Client occurrence times and metric values are supplied by the SDK;
   an public key does not verify their authenticity.
 
-### Breakdowns by browser, OS, device, location, subtitles, rate, title and user
+### Breakdowns by browser, OS, device, location, subtitles, rate, delivery format, title and user
 
 Add `group_by` with `browser_name`, `os_name`, `device_type`, `continent`,
 `country`, `city`, `page_origin`, `page_path`, `subtitle_language`,
-`playback_rate`, `video_title`, `user_id` or a custom key such as `custom.plan` to
+`playback_rate`, `delivery_format`, `video_title`, `user_id` or a custom key such as `custom.plan` to
 `GET /v1/summary`, `GET /v1/quality` or `GET /v1/engagement`. The MCP tool
 `get_metrics` accepts the same argument, with `kind` selecting `summary`,
 `quality` or `engagement`. Without `group_by`, each route returns its
@@ -743,7 +766,7 @@ bind the project and filters and exclude later arrivals. The MCP equivalent is
 
 `GET /v1/dimensions/{dimension}` returns `dimension`, `values` and `next_cursor`.
 Supported dimensions are `browser_name`, `os_name`, `device_type`, `continent`,
-`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `video_id`, `video_title`, `viewer_id`, `user_id`,
+`country`, `city`, `page_origin`, `page_path`, `subtitle_language`, `playback_rate`, `delivery_format`, `video_id`, `video_title`, `viewer_id`, `user_id`,
 `custom.<key>` (one custom dimension) and `custom_keys` (the custom keys set on views). Each value has `value` and `views`;
 values and counts come from first retained starts after applying the usual date, identity and context filters.
 Values sort by views descending, then value ascending with null first for ties.

@@ -427,7 +427,9 @@ docker compose up -d
 ```
 
 A server does not start on a database that still needs migrations; its log says
-to run `migrate`. See [upgrade the schema](docs/storage.md#upgrade-the-schema).
+to run `migrate`. Some upgrades need the servers stopped while `migrate` runs
+(`docker compose stop analytics` first); [upgrade the schema](docs/storage.md#upgrade-the-schema)
+lists them.
 
 ## Troubleshooting
 

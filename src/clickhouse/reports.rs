@@ -131,15 +131,26 @@ pub(super) fn identity_aggregates(
 ) -> Vec<(&'static str, String, &'static str)> {
     let order = "tuple(sequence, occurred_at_ms, ingest_id)";
     let mut aggregates = Vec::new();
-    if !starts.is_empty() {
+    let tupled = tupled_starts(starts);
+    if !tupled.is_empty() {
         aggregates.push((
             "argMinIf",
             format!(
                 "tuple({}), {order}, event_name = {STARTED}",
-                starts.join(", ")
+                tupled.join(", ")
             ),
             "first_start",
         ));
+    }
+    // In a tuple, so that a NULL value is kept like any other.
+    for (column, name) in START_STATES {
+        if starts.contains(column) {
+            aggregates.push((
+                "argMinIf",
+                format!("tuple({column}), {order}, event_name = {STARTED}"),
+                *name,
+            ));
+        }
     }
     aggregates.push((
         "minIf",
@@ -260,7 +271,7 @@ pub(super) const QUALITY_SAMPLES: &str = ", quality_samples AS (
 )";
 
 /// Values recorded on a view's first start, available to filters and callers:
-/// the context, the subtitle language and playback rate, then the
+/// the context, the subtitle language, playback rate and delivery format, then the
 /// integrator's user ID, video title and custom dimensions.
 pub(super) const START_COLUMNS: &[&str] = &[
     "context_browser_name",
@@ -273,6 +284,7 @@ pub(super) const START_COLUMNS: &[&str] = &[
     "ctx_page_path",
     "e_subtitle_language",
     "d_playback_rate",
+    "e_delivery_format",
     "e_user_id",
     "e_video_title",
     "c_custom",
@@ -289,7 +301,23 @@ pub(super) const START_CONTEXT: &[&str] = &[
     "ctx_page_path",
     "e_subtitle_language",
     "d_playback_rate",
+    "e_delivery_format",
 ];
+/// First-start values kept in their own state instead of the `first_start`
+/// tuple, with the state's name. The tuple keeps the type migration 0001
+/// gave it: `migrate` repeats 0001 after a partial restore, and 0001's
+/// materialized view must still be able to write to `view_states`.
+pub(super) const START_STATES: &[(&str, &str)] = &[("e_delivery_format", "first_delivery_format")];
+
+/// The given first-start values that the `first_start` tuple holds, in order.
+fn tupled_starts<'a>(starts: &[&'a str]) -> Vec<&'a str> {
+    starts
+        .iter()
+        .copied()
+        .filter(|column| START_STATES.iter().all(|(own, _)| own != column))
+        .collect()
+}
+
 const VIEW_CONTEXT: &[&str] = &[
     "context_browser_name",
     "context_os_name",
@@ -333,11 +361,16 @@ pub(super) fn view_cohort(
         .copied()
         .filter(|column| context.contains(column) || conditions.contains(column))
         .collect();
-    let start_columns: String = starts
+    let mut start_columns: String = tupled_starts(&starts)
         .iter()
         .enumerate()
         .map(|(index, column)| format!(", first_start.{} AS {column}", index + 1))
         .collect();
+    for (column, name) in START_STATES {
+        if starts.contains(column) {
+            start_columns.push_str(&format!(", {name}.1 AS {column}"));
+        }
+    }
     let projections: String = measurement(cohort)
         .iter()
         .enumerate()
@@ -1852,6 +1885,7 @@ impl Store {
             || query.page_path.is_some()
             || query.subtitle_language.is_some()
             || query.playback_rate.is_some()
+            || query.delivery_format.is_some()
             || !query.custom.is_empty()
             || query.order.is_some()
         {

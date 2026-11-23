@@ -13,8 +13,14 @@ use serde_json::Value;
 
 /// Version, name and SQL of every migration, in order. Released files never
 /// change: a schema change is a new file, registered here.
-const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "init", include_str!("migrations/0001_init.up.sql"))];
+const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "init", include_str!("migrations/0001_init.up.sql")),
+    (
+        2,
+        "delivery_format",
+        include_str!("migrations/0002_delivery_format.up.sql"),
+    ),
+];
 
 pub const UNREACHABLE: &str =
     "Cannot reach ClickHouse; check clickhouse.url, credentials and permissions";
@@ -429,6 +435,92 @@ mod tests {
         assert_eq!(client.migrate(false).await.unwrap(), all);
         start(&config).await.unwrap();
         assert!(client.migrate(false).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delivery_format_migration_reads_stored_events_into_view_states() {
+        let (client, _config, _guard) = database();
+        client.migrate(true).await.unwrap();
+        // A database at 0001: its derived tables, without the column. A server
+        // of an earlier release kept the field in the event JSON, validated or not.
+        for statement in [
+            "DROP VIEW view_states_insert",
+            "DROP TABLE view_states",
+            "DROP TABLE rollup_views",
+            "ALTER TABLE events DROP COLUMN e_delivery_format",
+        ] {
+            client.run(statement.into()).await.unwrap();
+        }
+        for statement in statements(MIGRATIONS[0].2) {
+            client.run(statement).await.unwrap();
+        }
+        let client = &client;
+        let columns = |table: &'static str| async move {
+            client
+                .all(
+                    &format!("SELECT name FROM system.columns WHERE database = currentDatabase() AND table = '{table}' AND name LIKE '%delivery_format'"),
+                    &crate::clickhouse::Params::default(),
+                )
+                .await
+                .unwrap()
+                .len()
+        };
+        assert_eq!(columns("rollup_views").await, 0);
+        assert_eq!(columns("view_states").await, 0);
+        let mut body = Vec::new();
+        // View e reports a format only on its second start: the first counts.
+        for (index, (view, sequence, remainder)) in [
+            ("a", 1, r#"{"delivery_format":"hls"}"#),
+            ("b", 1, r#"{"delivery_format":"file"}"#),
+            ("c", 1, r#"{"delivery_format":"dash"}"#),
+            ("d", 1, "{}"),
+            ("e", 1, "{}"),
+            ("e", 2, r#"{"delivery_format":"hls"}"#),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let row = serde_json::json!({"ingest_id": index + 1,
+                "event_id": format!("{view}{sequence}"),
+                "project_id": "default", "view_id": view, "video_id": "video",
+                "event_name": "chunkify.video.view_started", "sequence": sequence,
+                "occurred_at_ms": 1000, "received_at_ms": 1000,
+                "event_remainder": remainder, "context_format": 0});
+            body.extend(serde_json::to_vec(&row).unwrap());
+            body.push(b'\n');
+        }
+        client.insert("events", body, &[]).await.unwrap();
+        let formats = || async {
+            client
+                .all(
+                    "SELECT view_id, argMinIfMerge(first_delivery_format).1
+                    FROM view_states GROUP BY view_id ORDER BY view_id",
+                    &crate::clickhouse::Params::default(),
+                )
+                .await
+                .unwrap()
+        };
+        let expected = vec![
+            vec![Value::from("a"), Value::from("hls")],
+            vec![Value::from("b"), Value::from("file")],
+            vec![Value::from("c"), Value::Null],
+            vec![Value::from("d"), Value::Null],
+            vec![Value::from("e"), Value::Null],
+        ];
+        // Applied, then repeated as after an interruption: same states.
+        for _ in 0..2 {
+            client
+                .run("INSERT INTO schema_migrations SELECT 1, 0, max(sequence) + 1 FROM schema_migrations".into())
+                .await
+                .unwrap();
+            assert_eq!(
+                client.migrate(false).await.unwrap(),
+                ["0002_delivery_format"]
+            );
+            assert_eq!(formats().await, expected);
+            assert_eq!(columns("rollup_views").await, 1);
+            assert_eq!(columns("view_states").await, 1);
+        }
     }
 
     #[test]

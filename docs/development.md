@@ -231,11 +231,15 @@ Rules for a migration file:
   existing parts. Changing a column type, `ORDER BY` or `PARTITION BY` rewrites
   the table.
 - `view_states`, its materialized view and the `rollup*` tables are derived from
-  `events`, so replace them instead of altering them: create the new table under
-  a new name and drop the old one in a later release, after no server reads it.
-  Refreshes rebuild missing rollup hours. A new `view_states` must be filled
-  from `events`; truncate it before the `INSERT … SELECT`, so that a retried
-  migration does not count events twice.
+  `events`, so replace them instead of altering them. Until there are
+  production users, a migration may drop and recreate them under the same
+  names, as `0002_delivery_format` does; the upgrade notes then say to stop the
+  servers before `migrate`. Once there are production users, create the new
+  table under a new name, keep the old one for servers of the earlier release,
+  and drop it in a later migration, after no server reads it. Refreshes rebuild
+  missing rollup hours. A new `view_states` must be filled from `events`; drop
+  or truncate it before the `INSERT … SELECT`, so that a retried migration does
+  not count events twice.
 - Keep every migration safe to run again on a database that later migrations
   already changed. When tables are missing behind a recorded version, for
   example after a partial restore, `migrate` applies all migrations again from

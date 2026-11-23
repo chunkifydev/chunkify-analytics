@@ -63,3 +63,58 @@ jobs:
     with:
       release-tag: ${{ needs.release-please.outputs.tag }}
       publish: true
+
+  # openapi.json in this repository is the single source of truth for the
+  # analytics SDKs. The copy in the SDK config repository changes only here.
+  sync-sdk-config:
+    name: Sync released OpenAPI schema
+    needs: [release-please, publish]
+    if: needs.release-please.outputs.release-created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    concurrency:
+      group: sdk-config-openapi
+      cancel-in-progress: false
+    steps:
+      - name: Checkout released tag
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.release-please.outputs.tag }}
+          persist-credentials: false
+
+      - name: Record released commit
+        id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout SDK config
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: chunkifydev/chunkify-analytics-sdk-config
+          ref: main
+          path: sdk-config
+          token: ${{ secrets.SDK_CONFIG_TOKEN }}
+          persist-credentials: false
+
+      - name: Copy released OpenAPI schema
+        run: cp openapi.json sdk-config/stainless/openapi.json
+
+      # This action creates no PR when the copied schema matches SDK config main.
+      # A fixed branch updates an existing PR instead of opening duplicates.
+      - name: Create or update SDK config pull request
+        uses: peter-evans/create-pull-request@3ffccacd46053766916f087ce41d627c0b8cf2d1 # v8.1.3
+        with:
+          token: ${{ secrets.SDK_CONFIG_TOKEN }}
+          path: sdk-config
+          add-paths: stainless/openapi.json
+          branch: sync-openapi
+          base: main
+          commit-message: "chore: sync OpenAPI schema from Chunkify Analytics ${{ needs.release-please.outputs.tag }}"
+          title: "chore: sync OpenAPI schema from Chunkify Analytics ${{ needs.release-please.outputs.tag }}"
+          body: |
+            Update `stainless/openapi.json` from the published [Chunkify Analytics ${{ needs.release-please.outputs.tag }} release](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.release-please.outputs.tag }}).
+
+            Source commit: ${{ github.server_url }}/${{ github.repository }}/commit/${{ steps.source.outputs.sha }}
+
+            Only the OpenAPI schema is copied. The SDK config workflow regenerates SDK previews for review.

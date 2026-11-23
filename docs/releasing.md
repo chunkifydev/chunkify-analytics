@@ -4,8 +4,8 @@ The [Release Please workflow](../.github/workflows/release-please.yml) opens and
 updates a release PR as changes merge into `main`. Merging that release PR
 starts the [Release workflow](../.github/workflows/release.yml), which publishes
 executable packages and a multi-platform image in GitHub Container Registry.
-Both workflows use the repository's `GITHUB_TOKEN`; no registry password or
-personal access token is required.
+Both workflows use the repository's `GITHUB_TOKEN`; no registry password is
+required. Only the [SDK schema sync](#sdk-schema-sync) needs an extra token.
 
 ## Automatic release PRs
 
@@ -33,6 +33,26 @@ Repository Settings > Actions > General must allow GitHub Actions to create
 pull requests. The Release Please job needs permission to write contents,
 issues, and pull requests. Its CI dispatch job also needs permission to write
 Actions. Organization policies must allow these permissions.
+
+## SDK schema sync
+
+`openapi.json` in this repository is the single source of truth for the
+analytics SDKs. After the publishing workflow succeeds, the Release Please
+workflow copies the tagged `openapi.json` to `stainless/openapi.json` in
+[chunkify-analytics-sdk-config](https://github.com/chunkifydev/chunkify-analytics-sdk-config)
+and opens or updates a PR there from its `sync-openapi` branch. No PR is opened
+when the schema already matches that repository's `main`. Do not edit the
+schema in the SDK config repository by hand; change `openapi.json` here and
+release.
+
+The job needs an `SDK_CONFIG_TOKEN` Actions secret in this repository: a
+fine-grained personal access token whose resource owner is `chunkifydev`,
+limited to `chunkify-analytics-sdk-config`, with read and write access to
+**Contents** and **Pull requests**. The organization may need to approve the
+token before it works. If the secret
+is missing or expired, the sync job fails after the release is published; fix
+the secret and rerun the failed job. Releases tagged manually do not run the
+sync.
 
 ## Check the release workflow
 

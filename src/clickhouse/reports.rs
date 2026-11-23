@@ -43,7 +43,7 @@ pub(super) struct Narrow {
     /// Also require the condition of each view's first start.
     pub first_start: bool,
     /// Read the identities of these views (a `view_id` subquery) from their
-    /// states in `view_states_v2` instead of aggregating events.
+    /// states in `view_states` instead of aggregating events.
     pub states: Option<String>,
 }
 
@@ -122,7 +122,7 @@ pub(super) fn cohort_events(cohort: Cohort) -> String {
 }
 
 /// Aggregates over one identity's events (view, video and viewer): function,
-/// arguments and name. Reports apply them to events; the `view_states_v2`
+/// arguments and name. Reports apply them to events; the `view_states`
 /// materialized view keeps their states as events arrive, and rollup refreshes
 /// merge those states with the same functions.
 pub(super) fn identity_aggregates(
@@ -131,15 +131,26 @@ pub(super) fn identity_aggregates(
 ) -> Vec<(&'static str, String, &'static str)> {
     let order = "tuple(sequence, occurred_at_ms, ingest_id)";
     let mut aggregates = Vec::new();
-    if !starts.is_empty() {
+    let tupled = tupled_starts(starts);
+    if !tupled.is_empty() {
         aggregates.push((
             "argMinIf",
             format!(
                 "tuple({}), {order}, event_name = {STARTED}",
-                starts.join(", ")
+                tupled.join(", ")
             ),
             "first_start",
         ));
+    }
+    // In a tuple, so that a NULL value is kept like any other.
+    for (column, name) in START_STATES {
+        if starts.contains(column) {
+            aggregates.push((
+                "argMinIf",
+                format!("tuple({column}), {order}, event_name = {STARTED}"),
+                *name,
+            ));
+        }
     }
     aggregates.push((
         "minIf",
@@ -292,6 +303,21 @@ pub(super) const START_CONTEXT: &[&str] = &[
     "d_playback_rate",
     "e_delivery_format",
 ];
+/// First-start values kept in their own state instead of the `first_start`
+/// tuple, with the state's name. The tuple keeps the type migration 0001
+/// gave it: `migrate` repeats 0001 after a partial restore, and 0001's
+/// materialized view must still be able to write to `view_states`.
+pub(super) const START_STATES: &[(&str, &str)] = &[("e_delivery_format", "first_delivery_format")];
+
+/// The given first-start values that the `first_start` tuple holds, in order.
+fn tupled_starts<'a>(starts: &[&'a str]) -> Vec<&'a str> {
+    starts
+        .iter()
+        .copied()
+        .filter(|column| START_STATES.iter().all(|(own, _)| own != column))
+        .collect()
+}
+
 const VIEW_CONTEXT: &[&str] = &[
     "context_browser_name",
     "context_os_name",
@@ -335,11 +361,16 @@ pub(super) fn view_cohort(
         .copied()
         .filter(|column| context.contains(column) || conditions.contains(column))
         .collect();
-    let start_columns: String = starts
+    let mut start_columns: String = tupled_starts(&starts)
         .iter()
         .enumerate()
         .map(|(index, column)| format!(", first_start.{} AS {column}", index + 1))
         .collect();
+    for (column, name) in START_STATES {
+        if starts.contains(column) {
+            start_columns.push_str(&format!(", {name}.1 AS {column}"));
+        }
+    }
     let projections: String = measurement(cohort)
         .iter()
         .enumerate()
@@ -361,7 +392,7 @@ pub(super) fn view_cohort(
     let identities = match &narrow.states {
         // Merged states of the given views, with the same results per identity.
         Some(views) => format!(
-            "SELECT view_id, video_id, viewer_id, {} FROM view_states_v2
+            "SELECT view_id, video_id, viewer_id, {} FROM view_states
             WHERE project_id = {project_id} AND view_id IN ({views})
             GROUP BY view_id, video_id, viewer_id",
             aggregates

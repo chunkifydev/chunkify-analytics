@@ -2477,7 +2477,7 @@ async fn rollup_runs_claim_once_and_skip_until_the_interval() {
     let runs = store
         .client
         .all(
-            "SELECT version, completed FROM rollup_runs_v2 ORDER BY version, completed",
+            "SELECT version, completed FROM rollup_runs ORDER BY version, completed",
             &Params::default(),
         )
         .await
@@ -2634,91 +2634,6 @@ async fn lagged_reports_read_the_last_refresh_and_keep_pages_on_their_run() {
     // a start of v6, whose earlier start in hour 0 is expired.
     assert_eq!(plan.hours, vec![base + 3 * HOUR]);
     assert!(plan.reads_events());
-}
-
-#[tokio::test]
-async fn expiration_purges_current_and_replaced_derived_tables() {
-    let fixture =
-        Fixture::with_settings(&["default"], "clickhouse.rollup_max_lag_seconds = 3600").await;
-    let store = &fixture.store;
-    fixture
-        .insert(vec![
-            event(
-                "old",
-                "default",
-                "old",
-                "video",
-                None,
-                "view_started",
-                1,
-                1000,
-            ),
-            event(
-                "new",
-                "default",
-                "new",
-                "video",
-                None,
-                "view_started",
-                1,
-                10 * HOUR,
-            ),
-        ])
-        .await;
-    store.refresh_rollups_with(0, 0).await.unwrap();
-    // Servers of earlier releases fill the replaced rollup tables; the
-    // replaced view_states is still filled by its materialized view.
-    for statement in [
-        "INSERT INTO rollup SELECT * FROM rollup_v2",
-        "INSERT INTO rollup_hours SELECT * FROM rollup_hours_v2",
-        "INSERT INTO rollup_views SELECT * EXCEPT (e_delivery_format) FROM rollup_views_v2",
-    ] {
-        fixture.sql(statement).await;
-    }
-    let rows = |table: &'static str, key: &'static str| async move {
-        let sql = format!("SELECT toString({key}) FROM {table} ORDER BY {key}");
-        ok(store
-            .client
-            .all(&sql, &Params::default())
-            .await
-            .map(Value::from))
-    };
-    let tables = [
-        ("rollup_v2", "hour_ms"),
-        ("rollup_hours_v2", "hour_ms"),
-        ("rollup_views_v2", "view_id"),
-        ("view_states_v2", "view_id"),
-        ("rollup", "hour_ms"),
-        ("rollup_hours", "hour_ms"),
-        ("rollup_views", "view_id"),
-        ("view_states", "view_id"),
-    ];
-    for (table, key) in tables {
-        let before = rows(table, key).await;
-        assert!(before.as_array().unwrap().len() >= 2, "{table}: {before}");
-    }
-    // Events received before 5000 are expired: only the old view's.
-    store
-        .purge_rollups(|params, column| Ok(format!("{column} >= {}", params.int(5000))))
-        .await
-        .unwrap();
-    for (table, key) in tables {
-        let after = rows(table, key).await;
-        let expected = if key == "view_id" {
-            json!("new")
-        } else {
-            json!((10 * HOUR).to_string())
-        };
-        assert!(
-            after
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|row| row[0] == expected),
-            "{table}: {after}"
-        );
-        assert!(!after.as_array().unwrap().is_empty(), "{table}");
-    }
 }
 
 #[tokio::test]
@@ -3178,7 +3093,7 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
     events.push(("otlp_payload".into(), "Nullable(String)".into()));
     assert_eq!(columns("events").await, events);
 
-    assert_eq!(columns("rollup_views_v2").await, owned(VIEW_COLUMNS));
+    assert_eq!(columns("rollup_views").await, owned(VIEW_COLUMNS));
 
     let mut rollup = owned(&[
         ("project_id", "LowCardinality(String)"),
@@ -3193,7 +3108,7 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
             .iter()
             .map(|(name, kind, _)| (name.to_string(), kind.to_string())),
     );
-    assert_eq!(columns("rollup_v2").await, rollup);
+    assert_eq!(columns("rollup").await, rollup);
 
     // The states the code merges, created from the code's own aggregates.
     let states = format!(
@@ -3220,7 +3135,7 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
         ))
         .await;
     assert_eq!(
-        columns("view_states_v2").await,
+        columns("view_states").await,
         columns("expected_states").await
     );
     let select = |view: &'static str| async move {
@@ -3233,9 +3148,9 @@ async fn migrated_tables_match_the_columns_the_code_uses() {
         )
         .await
     };
-    assert!(!select("view_states_v2_insert").await.trim().is_empty());
+    assert!(!select("view_states_insert").await.trim().is_empty());
     assert_eq!(
-        select("view_states_v2_insert").await,
+        select("view_states_insert").await,
         select("expected_states_insert").await
     );
 }

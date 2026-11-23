@@ -424,12 +424,12 @@ mod tests {
         client.migrate(true).await.unwrap();
         assert!(client.missing_tables().await.unwrap().is_empty());
         // A restore can bring back the version without every table.
-        for table in ["view_states_v2_insert", "rollup_v2"] {
+        for table in ["view_states_insert", "rollup"] {
             client.run(format!("DROP TABLE {table}")).await.unwrap();
         }
         assert_eq!(
             client.missing_tables().await.unwrap(),
-            ["rollup_v2", "view_states_v2_insert"]
+            ["rollup", "view_states_insert"]
         );
         assert_eq!(start(&config).await.unwrap_err(), PENDING);
         assert_eq!(client.migrate(false).await.unwrap(), all);
@@ -441,28 +441,49 @@ mod tests {
     async fn delivery_format_migration_reads_stored_events_into_view_states() {
         let (client, _config, _guard) = database();
         client.migrate(true).await.unwrap();
-        // A database before 0002: no column and no new states. A server of
-        // an earlier release kept the field in the event JSON, validated or not.
+        // A database at 0001: its derived tables, without the column. A server
+        // of an earlier release kept the field in the event JSON, validated or not.
         for statement in [
-            "DROP TABLE view_states_v2_insert",
-            "DROP TABLE view_states_v2",
+            "DROP VIEW view_states_insert",
+            "DROP TABLE view_states",
+            "DROP TABLE rollup_views",
             "ALTER TABLE events DROP COLUMN e_delivery_format",
         ] {
             client.run(statement.into()).await.unwrap();
         }
+        for statement in statements(MIGRATIONS[0].2) {
+            client.run(statement).await.unwrap();
+        }
+        let client = &client;
+        let columns = |table: &'static str| async move {
+            client
+                .all(
+                    &format!("SELECT name FROM system.columns WHERE database = currentDatabase() AND table = '{table}' AND name LIKE '%delivery_format'"),
+                    &crate::clickhouse::Params::default(),
+                )
+                .await
+                .unwrap()
+                .len()
+        };
+        assert_eq!(columns("rollup_views").await, 0);
+        assert_eq!(columns("view_states").await, 0);
         let mut body = Vec::new();
-        for (index, (view, remainder)) in [
-            ("a", r#"{"delivery_format":"hls"}"#),
-            ("b", r#"{"delivery_format":"file"}"#),
-            ("c", r#"{"delivery_format":"dash"}"#),
-            ("d", "{}"),
+        // View e reports a format only on its second start: the first counts.
+        for (index, (view, sequence, remainder)) in [
+            ("a", 1, r#"{"delivery_format":"hls"}"#),
+            ("b", 1, r#"{"delivery_format":"file"}"#),
+            ("c", 1, r#"{"delivery_format":"dash"}"#),
+            ("d", 1, "{}"),
+            ("e", 1, "{}"),
+            ("e", 2, r#"{"delivery_format":"hls"}"#),
         ]
         .into_iter()
         .enumerate()
         {
-            let row = serde_json::json!({"ingest_id": index + 1, "event_id": view,
+            let row = serde_json::json!({"ingest_id": index + 1,
+                "event_id": format!("{view}{sequence}"),
                 "project_id": "default", "view_id": view, "video_id": "video",
-                "event_name": "chunkify.video.view_started", "sequence": 1,
+                "event_name": "chunkify.video.view_started", "sequence": sequence,
                 "occurred_at_ms": 1000, "received_at_ms": 1000,
                 "event_remainder": remainder, "context_format": 0});
             body.extend(serde_json::to_vec(&row).unwrap());
@@ -472,8 +493,8 @@ mod tests {
         let formats = || async {
             client
                 .all(
-                    "SELECT view_id, tupleElement(argMinIfMerge(first_start), 11)
-                    FROM view_states_v2 GROUP BY view_id ORDER BY view_id",
+                    "SELECT view_id, argMinIfMerge(first_delivery_format).1
+                    FROM view_states GROUP BY view_id ORDER BY view_id",
                     &crate::clickhouse::Params::default(),
                 )
                 .await
@@ -484,6 +505,7 @@ mod tests {
             vec![Value::from("b"), Value::from("file")],
             vec![Value::from("c"), Value::Null],
             vec![Value::from("d"), Value::Null],
+            vec![Value::from("e"), Value::Null],
         ];
         // Applied, then repeated as after an interruption: same states.
         for _ in 0..2 {
@@ -496,17 +518,19 @@ mod tests {
                 ["0002_delivery_format"]
             );
             assert_eq!(formats().await, expected);
+            assert_eq!(columns("rollup_views").await, 1);
+            assert_eq!(columns("view_states").await, 1);
         }
     }
 
     #[test]
     fn expected_tables_come_from_the_schema_file() {
         let tables = expected_tables();
-        for table in ["events", "registry", "rollup_v2", "schema_migrations"] {
+        for table in ["events", "registry", "rollup", "schema_migrations"] {
             assert!(tables.contains(&table), "{table}");
         }
         // The materialized view counts: without it no view state is stored.
-        assert!(tables.contains(&"view_states_v2_insert"));
+        assert!(tables.contains(&"view_states_insert"));
         assert!(tables.iter().all(|table| !table.contains('`')));
     }
 

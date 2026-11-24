@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.19.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.18.0...v0.19.0) (2026-11-24)
+
+
+### Features
+
+* **api:** add the delivery_format event field and report dimension ([#79](https://github.com/chunkifydev/chunkify-analytics/issues/79)) ([f83fdca](https://github.com/chunkifydev/chunkify-analytics/commit/f83fdcafda976213aeaf55b843d58b30c31201ca))
+* **api:** declare the time spent before a seek on seek_completed ([#81](https://github.com/chunkifydev/chunkify-analytics/issues/81)) ([43f4945](https://github.com/chunkifydev/chunkify-analytics/commit/43f4945863466d83bd3816cabf5d0bdaf449b8d3))
+
+
+### Bug Fixes
+
+* **reports:** record each view once per rollup refresh ([#78](https://github.com/chunkifydev/chunkify-analytics/issues/78)) ([d5b3c27](https://github.com/chunkifydev/chunkify-analytics/commit/d5b3c27bbaa716121271a34830a730566ad0d078))
+
 ## [0.18.0](https://github.com/chunkifydev/chunkify-analytics/compare/v0.17.1...v0.18.0) (2026-11-12)
 
 

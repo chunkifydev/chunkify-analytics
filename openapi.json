@@ -7385,6 +7385,11 @@
                   "stopped"
                 ]
               },
+              "previous_state_duration_ms": {
+                "description": "Wall-clock time spent in state_before_seek until the seek started, excluding the seek. The state after the seek is timed from when the seek ends, so each stretch is reported once. Omitted by older SDKs.",
+                "type": "number",
+                "minimum": 0
+              },
               "from_playhead_seconds": {
                 "type": [
                   "number",

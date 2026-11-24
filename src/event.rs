@@ -351,6 +351,10 @@ pub fn validate(event: &Value) -> Result<(), ApiError> {
                 field(object, key, nullable_number)?;
             }
             field(object, "seek_interaction_duration_ms", number)?;
+            // Time in state_before_seek until the seek; older SDKs omit it.
+            if object.contains_key("previous_state_duration_ms") {
+                field(object, "previous_state_duration_ms", number)?;
+            }
             field(object, "seek_outcome", |v| {
                 one_of(v, &["resumed", "paused", "interrupted"])
             })?;
@@ -472,6 +476,10 @@ mod tests {
             }
             validate(&event)
         };
+        assert!(with(json!({"previous_state_duration_ms": 2600})).is_ok());
+        for duration in [json!(-1), json!(null), json!("2600")] {
+            assert!(with(json!({"previous_state_duration_ms": duration})).is_err());
+        }
         assert!(with(json!({"subtitle_language": null, "playback_rate": null})).is_ok());
         assert!(with(json!({"playback_rate": 0})).is_err());
         let entry =
